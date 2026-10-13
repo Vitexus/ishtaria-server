@@ -12,6 +12,7 @@ mod experience;
 mod federation;
 mod fishing;
 mod gathering;
+mod glb;
 mod guard;
 mod hall;
 mod land;

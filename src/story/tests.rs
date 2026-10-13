@@ -733,3 +733,59 @@ fn every_walled_town_has_a_guard_standing_at_its_gate() {
         );
     }
 }
+
+#[test]
+fn a_structure_is_shipped_validated_and_excludes_generated_scenery() {
+    let a = scratch("structure");
+    base(&a, "zeta", "1.0.0", "");
+    let with_structure = |extra: &str| {
+        write(
+            &a,
+            "places/p.yaml",
+            &format!("- {{id: hut, kind: building, name_key: place.hut, structure: {{model: media/models/architecture/hut.glb{extra}}}}}\n"),
+        );
+    };
+    with_structure("");
+    assert!(
+        Story::load(std::slice::from_ref(&a), false).is_err(),
+        "a model that is not shipped must be rejected"
+    );
+    write(&a, "media/models/architecture/hut.glb", "glTF");
+    let story = Story::load(std::slice::from_ref(&a), false).unwrap();
+    assert!(story
+        .media
+        .contains_key("zeta/media/models/architecture/hut.glb"));
+    let structure = story.anchors[0].place.structure.as_ref().unwrap();
+    assert_eq!(structure.model, "media/models/architecture/hut.glb");
+    for bad in [
+        ", scale_m: 0",
+        ", scale_m: 500",
+        ", visible_m: 10",
+        ", offset_m: [9000, 0]",
+        ", ground_m: [0, 5000]",
+        ", collision: media/other/hut.glb",
+        ", surprise: 1",
+    ] {
+        with_structure(bad);
+        assert!(
+            Story::load(std::slice::from_ref(&a), false).is_err(),
+            "{bad} must be rejected"
+        );
+    }
+    write(
+        &a,
+        "places/p.yaml",
+        "- {id: hut, kind: building, name_key: place.hut, scenery: {preset: town}, structure: {model: media/models/architecture/hut.glb}}\n",
+    );
+    assert!(
+        Story::load(std::slice::from_ref(&a), false).is_err(),
+        "scenery and a structure exclude each other"
+    );
+    with_structure("");
+    let big = vec![0u8; (super::disk::MAX_MODEL_BYTES + 1) as usize];
+    fs::write(a.join("media/models/architecture/hut.glb"), big).unwrap();
+    assert!(
+        Story::load(std::slice::from_ref(&a), false).is_err(),
+        "oversized model"
+    );
+}

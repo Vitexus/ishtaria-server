@@ -73,6 +73,38 @@ const RUN_JUMP_SPEED: f64 = 8.5;
 const GRAVITY: f64 = 9.81;
 const COLLISION_SKIN: f64 = 0.001;
 const WALKABLE_NORMAL: f64 = 0.8192319205190405;
+/// The highest step a walking character climbs without jumping (the risers of stairs are 0.3 m).
+const STEP_HEIGHT: f64 = 0.45;
+/// The step near a datadisk building: stairs are 0.3 m high with treads narrower than the capsule, so the
+/// capsule must clear two risers at once.
+const STAIR_STEP_HEIGHT: f64 = 0.7;
+
+/// How high a walking character climbs in one step among these obstacles.
+fn step_lift(objects: &[WorldObject]) -> f64 {
+    if objects
+        .iter()
+        .any(|object| object.model.starts_with(STRUCTURE_PREFIX))
+    {
+        STAIR_STEP_HEIGHT
+    } else {
+        STEP_HEIGHT
+    }
+}
+/// Steepest contact of a datadisk building a character stands on (the round capsule meets stairs of 45 degrees
+/// on their edges with a normal of 0.5 to 0.7); terrain and the natural props keep `WALKABLE_NORMAL`.
+const STAIR_NORMAL: f64 = 0.4;
+
+/// Whether a surface with this normal carries a character standing on it.
+fn walkable(normal: [f64; 3], up: [f64; 3], structure: bool) -> bool {
+    dot(normal, up)
+        >= if structure {
+            STAIR_NORMAL
+        } else {
+            WALKABLE_NORMAL
+        }
+}
+/// Model names of buildings that datadisks bring: `disk:<disk>:<media path>`.
+pub(super) const STRUCTURE_PREFIX: &str = "disk:";
 
 fn flight_step(height: f64, velocity: f64, seconds: f64) -> (f64, f64) {
     (
@@ -137,13 +169,44 @@ fn colliders() -> &'static HashMap<String, TriMesh> {
     })
 }
 
+type StructureMeshes = std::sync::RwLock<HashMap<String, (String, &'static TriMesh)>>;
+static STRUCTURE_MESHES: OnceLock<StructureMeshes> = OnceLock::new();
+
+/// Registers the collision mesh of a datadisk building under its model name. A mesh lives as long
+/// as the process; it is replaced (and the old one leaked) only when the file's hash changes.
+pub(super) fn register_structure(
+    model: &str,
+    sha256: &str,
+    vertices: Vec<[f64; 3]>,
+    triangles: Vec<[u32; 3]>,
+) {
+    let meshes = STRUCTURE_MESHES.get_or_init(Default::default);
+    if let Ok(mut meshes) = meshes.write() {
+        if meshes.get(model).is_some_and(|(hash, _)| hash == sha256) {
+            return;
+        }
+        let mesh = TriMesh::new(vertices.into_iter().map(Point3::from).collect(), triangles);
+        meshes.insert(
+            model.to_owned(),
+            (sha256.to_owned(), Box::leak(Box::new(mesh))),
+        );
+    }
+}
+
+fn structure_mesh(model: &str) -> Option<&'static TriMesh> {
+    let meshes = STRUCTURE_MESHES.get()?.read().ok()?;
+    meshes.get(model).map(|(_, mesh)| *mesh)
+}
+
 fn object_shape(object: &WorldObject) -> Option<(Isometry3<f64>, &'static TriMesh)> {
     let up = Vector3::from(unit(object.position));
     let rotation = UnitQuaternion::rotation_between(&Vector3::y(), &up)?
         * UnitQuaternion::from_axis_angle(&Vector3::y_axis(), object.yaw);
     Some((
         Isometry3::from_parts(Translation3::from(Vector3::from(object.position)), rotation),
-        colliders().get(&object.model)?,
+        colliders()
+            .get(&object.model)
+            .or_else(|| structure_mesh(&object.model))?,
     ))
 }
 
@@ -187,7 +250,16 @@ fn capsule_hit(
     motion: [f64; 3],
     objects: &[WorldObject],
 ) -> Option<(f64, [f64; 3])> {
-    let mut closest: Option<(f64, [f64; 3])> = None;
+    capsule_hit_kind(point, motion, objects).map(|(time, normal, _)| (time, normal))
+}
+
+/// Like `capsule_hit`, and tells whether the nearest thing hit is a building of a datadisk.
+fn capsule_hit_kind(
+    point: [f64; 3],
+    motion: [f64; 3],
+    objects: &[WorldObject],
+) -> Option<(f64, [f64; 3], bool)> {
+    let mut closest: Option<(f64, [f64; 3], bool)> = None;
     for object in objects
         .iter()
         .filter(|object| object.collision_radius_m > 0.0)
@@ -196,8 +268,8 @@ fn capsule_hit(
             // A round obstacle without a mesh (fences, graves, lamps of places) blocks sideways
             // only; it must not stop a jump that goes straight up.
             if let Some(hit) = cylinder_hit(point, motion, object) {
-                if closest.map_or(true, |(time, _)| hit.0 < time) {
-                    closest = Some(hit);
+                if closest.map_or(true, |(time, _, _)| hit.0 < time) {
+                    closest = Some((hit.0, hit.1, false));
                 }
             }
             continue;
@@ -223,13 +295,17 @@ fn capsule_hit(
                 let normal: [f64; 3] =
                     (object_transform.rotation * hit.normal2.into_inner()).into();
                 if dot(motion, normal) < -1e-10
-                    && closest.map_or(true, |(time, _)| hit.time_of_impact < time)
+                    && closest.map_or(true, |(time, _, _)| hit.time_of_impact < time)
                 {
-                    closest = Some((hit.time_of_impact.clamp(0.0, 1.0), normal));
+                    closest = Some((
+                        hit.time_of_impact.clamp(0.0, 1.0),
+                        normal,
+                        object.model.starts_with(STRUCTURE_PREFIX),
+                    ));
                 }
             }
             Ok(None) => {}
-            Err(_) => return Some((0.0, unit(motion).map(|value| -value))),
+            Err(_) => return Some((0.0, unit(motion).map(|value| -value), false)),
         }
     }
     closest
@@ -273,6 +349,40 @@ fn cylinder_hit(
     }
     let touch: [f64; 3] = std::array::from_fn(|axis| offset[axis] + sideways[axis] * time);
     (length(touch) > 1e-9).then(|| (time, unit(touch)))
+}
+
+/// A walking capsule that a low edge (a stair riser) blocks: lifts it by one step, moves it on and
+/// sets it down on the walkable surface it reaches. `None` when the edge is too high, the way is
+/// blocked above it, or nothing walkable lies beyond.
+fn step_up(
+    start: [f64; 3],
+    motion: [f64; 3],
+    slid: [f64; 3],
+    lift: f64,
+    objects: &[WorldObject],
+) -> Option<[f64; 3]> {
+    let up = unit(start);
+    let along = |from: [f64; 3]| {
+        let offset: [f64; 3] = std::array::from_fn(|axis| from[axis] - start[axis]);
+        let lift = dot(offset, up);
+        length(std::array::from_fn(|axis| offset[axis] - up[axis] * lift))
+    };
+    let wanted = along(std::array::from_fn(|axis| start[axis] + motion[axis]));
+    if wanted < 1e-9 || capsule_hit(start, up.map(|value| value * lift), objects).is_some() {
+        return None;
+    }
+    let lifted: [f64; 3] = std::array::from_fn(|axis| start[axis] + up[axis] * lift);
+    let (over, _) = slide_capsule(lifted, motion, objects);
+    if along(over) < 0.6 * wanted || along(over) <= along(slid) + 1e-4 {
+        return None;
+    }
+    let drop = lift + 0.05;
+    let (time, normal, structure) = capsule_hit_kind(over, up.map(|value| -value * drop), objects)?;
+    if !walkable(normal, up, structure) {
+        return None;
+    }
+    let landed: [f64; 3] = std::array::from_fn(|axis| over[axis] - up[axis] * drop * time);
+    (dot(std::array::from_fn(|axis| landed[axis] - start[axis]), up) > 0.01).then_some(landed)
 }
 
 fn recover_capsule(mut point: [f64; 3], objects: &[WorldObject]) -> [f64; 3] {
@@ -587,7 +697,9 @@ fn clear_path(point: [f64; 3], destination: [f64; 3], objects: &[WorldObject]) -
     let velocity = Vector2::new(dot(delta, sideways), dot(delta, forward));
     objects
         .iter()
-        .filter(|object| object.collision_radius_m > 0.0)
+        .filter(|object| {
+            object.collision_radius_m > 0.0 && !object.model.starts_with(STRUCTURE_PREFIX)
+        })
         .all(|object| {
             let offset = std::array::from_fn(|axis| object.position[axis] - point[axis]);
             let center = Vector2::new(dot(offset, sideways), dot(offset, forward));
@@ -808,6 +920,24 @@ impl WalkingTerrain {
         })
     }
 
+    /// Whether the point lies within reach of a datadisk building, whose mesh must be walked by
+    /// the capsule instead of the terrain-only step.
+    fn near_structure(&self, point: [f64; 3]) -> bool {
+        let key = format!(
+            "{}:{}",
+            self.environment.seed, self.environment.heightmap_sha256
+        );
+        STATICS.read().is_ok_and(|statics| {
+            statics.0 == key
+                && statics.1.iter().any(|obstacle| {
+                    obstacle.model.starts_with(STRUCTURE_PREFIX)
+                        && length(std::array::from_fn(|axis| {
+                            obstacle.position[axis] - point[axis]
+                        })) < obstacle.collision_radius_m + 4.0
+                })
+        })
+    }
+
     fn advance(
         &self,
         mut point: [f64; 3],
@@ -817,7 +947,7 @@ impl WalkingTerrain {
         on_object: bool,
     ) -> ([f64; 3], bool) {
         let speed = if intent.run { RUN_SPEED } else { WALK_SPEED };
-        if !flight.airborne && !intent.jump && !on_object {
+        if !flight.airborne && !intent.jump && !on_object && !self.near_structure(point) {
             return (
                 self.step_at_speed(point, intent.direction, seconds, speed)
                     .unwrap_or(point),
@@ -861,6 +991,7 @@ impl WalkingTerrain {
         let steps = (seconds / 0.016).ceil().max(1.0) as usize;
         let delta = seconds / steps as f64;
         point = recover_capsule(point, objects);
+        let lift = step_lift(objects);
         for _ in 0..steps {
             let radius = length(point);
             let up = unit(point);
@@ -883,8 +1014,15 @@ impl WalkingTerrain {
             };
             let motion =
                 std::array::from_fn(|axis| lateral[axis] * delta + up[axis] * (height - radius));
-            let normals;
-            (point, normals) = slide_capsule(point, motion, objects);
+            let before = point;
+            let (slid, mut normals) = slide_capsule(point, motion, objects);
+            point = slid;
+            if !flight.airborne && !normals.is_empty() {
+                if let Some(stepped) = step_up(before, motion, point, lift, objects) {
+                    point = stepped;
+                    normals.clear();
+                }
+            }
             let up = unit(point);
             let mut velocity =
                 std::array::from_fn(|axis| lateral[axis] + up[axis] * speed.max(-100.0));
@@ -898,11 +1036,22 @@ impl WalkingTerrain {
                 point = up.map(|value| value * ground);
             }
             if speed <= 0.0 {
-                if let Some((time, normal)) =
-                    capsule_hit(point, up.map(|value| -value * 0.05), objects)
+                if let Some((time, normal, structure)) =
+                    capsule_hit_kind(point, up.map(|value| -value * 0.05), objects)
                 {
-                    if dot(normal, up) >= WALKABLE_NORMAL {
+                    if walkable(normal, up, structure) {
                         point = std::array::from_fn(|axis| point[axis] - up[axis] * 0.05 * time);
+                        grounded = true;
+                    }
+                }
+            }
+            if !grounded && !flight.airborne {
+                // Walking down stairs: follow the surface instead of dropping off every tread.
+                if let Some((time, normal, structure)) =
+                    capsule_hit_kind(point, up.map(|value| -value * lift), objects)
+                {
+                    if walkable(normal, up, structure) {
+                        point = std::array::from_fn(|axis| point[axis] - up[axis] * lift * time);
                         grounded = true;
                     }
                 }
@@ -1405,7 +1554,10 @@ impl WalkingTerrain {
                         .1
                         .iter()
                         .filter(|obstacle| {
-                            (0..3).all(|axis| (obstacle.position[axis] - point[axis]).abs() < 60.0)
+                            (0..3).all(|axis| {
+                                (obstacle.position[axis] - point[axis]).abs()
+                                    < 60.0 + obstacle.collision_radius_m
+                            })
                         })
                         .cloned(),
                 );
@@ -1791,6 +1943,212 @@ mod tests {
         let previous = point;
         point = terrain.advance_over_objects(point, 0.25, &mut flight, &[object]);
         assert!(length(std::array::from_fn(|axis| point[axis] - previous[axis])) < 0.00001);
+    }
+
+    /// A flat test terrain with a model of a staircase of the given riser height standing at
+    /// the sphere point `[RADIUS + height, 0, 0]`; model +Z is world +Z, model +Y is up.
+    fn staircase(riser: f64, steps: usize) -> (WalkingTerrain, WorldObject, f64) {
+        staircase_with(riser, 0.8, steps)
+    }
+
+    fn staircase_with(riser: f64, tread: f64, steps: usize) -> (WalkingTerrain, WorldObject, f64) {
+        let pixels = vec![144; 16 * 16 * 6];
+        let mut terrain = WalkingTerrain {
+            size: 16,
+            environment: environment::generate(16, &pixels, "42", "test").unwrap(),
+            pixels,
+            catalog: Vec::new(),
+            removed: Default::default(),
+        };
+        terrain.environment.water_m.fill(environment::DRY);
+        terrain.environment.biomes.fill(4);
+        let height = terrain.height([1.0, 0.0, 0.0]);
+        let half = 2.0;
+        let mut vertices: Vec<[f64; 3]> = Vec::new();
+        let mut triangles: Vec<[u32; 3]> = Vec::new();
+        let mut quad = |a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]| {
+            let base = vertices.len() as u32;
+            vertices.extend([a, b, c, d]);
+            triangles.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]]);
+        };
+        for k in 0..steps {
+            let (z0, z1) = (k as f64 * tread, (k + 1) as f64 * tread);
+            let (y0, y1) = (k as f64 * riser, (k + 1) as f64 * riser);
+            quad(
+                [-half, y0, z0],
+                [half, y0, z0],
+                [half, y1, z0],
+                [-half, y1, z0],
+            );
+            quad(
+                [-half, y1, z0],
+                [half, y1, z0],
+                [half, y1, z1],
+                [-half, y1, z1],
+            );
+        }
+        let top = steps as f64 * riser;
+        let end = steps as f64 * tread;
+        quad(
+            [-half, top, end],
+            [half, top, end],
+            [half, top, end + 6.0],
+            [-half, top, end + 6.0],
+        );
+        let model = format!(
+            "disk:test:stairs_{steps}_{}",
+            (riser * 1000.0) as u32 + (tread * 1e6) as u32
+        );
+        register_structure(&model, "test", vertices, triangles);
+        let object = WorldObject {
+            id: "stairs".into(),
+            model,
+            position: [RADIUS + height, 0.0, 0.0],
+            scale_m: 1.0,
+            yaw: 0.0,
+            collision_radius_m: 8.0,
+            biome: 4,
+        };
+        (terrain, object, RADIUS + height)
+    }
+
+    /// Walks along world +Z (or -Z) for the given seconds; returns the final point.
+    fn walk_along(
+        terrain: &WalkingTerrain,
+        object: &WorldObject,
+        mut point: [f64; 3],
+        flight: &mut Flight,
+        direction: f64,
+        seconds: f64,
+    ) -> [f64; 3] {
+        for _ in 0..(seconds / 0.05) as usize {
+            flight.horizontal = [0.0, 0.0, direction * WALK_SPEED];
+            point = terrain.advance_over_objects(point, 0.05, flight, std::slice::from_ref(object));
+        }
+        point
+    }
+
+    #[test]
+    fn a_walker_climbs_stairs_with_low_risers_and_comes_down_again() {
+        let (terrain, object, ground) = staircase(0.3, 10);
+        let mut flight = Flight {
+            airborne: false,
+            vertical_speed: 0.0,
+            horizontal: [0.0; 3],
+        };
+        let start = [ground, 0.0, -3.0];
+        let top = walk_along(&terrain, &object, start, &mut flight, 1.0, 3.5);
+        assert!(!flight.airborne, "climbing stairs is walking");
+        assert!(top[2] > 8.0, "reached the platform: z = {}", top[2]);
+        assert!(
+            (top[0] - ground - 3.0).abs() < 0.05,
+            "standing on the platform at 3 m: {}",
+            top[0] - ground
+        );
+        let down = walk_along(&terrain, &object, top, &mut flight, -1.0, 5.0);
+        assert!(down[2] < -1.0, "walked off the stairs: z = {}", down[2]);
+        assert!(
+            (length(down) - RADIUS - terrain.surface(unit(down)).unwrap()).abs() < 0.05,
+            "back on the ground: {}",
+            length(down) - RADIUS - terrain.surface(unit(down)).unwrap()
+        );
+        assert!(!flight.airborne);
+    }
+
+    #[test]
+    fn a_walker_climbs_stairs_as_steep_as_those_of_a_ziggurat() {
+        // Risers of 0.3 m and treads of 0.316 m: the 43 degrees of the stairs of the Anu ziggurat.
+        let (terrain, object, ground) = staircase_with(0.3, 0.316, 25);
+        let mut flight = Flight {
+            airborne: false,
+            vertical_speed: 0.0,
+            horizontal: [0.0; 3],
+        };
+        let top = walk_along(
+            &terrain,
+            &object,
+            [ground, 0.0, -3.0],
+            &mut flight,
+            1.0,
+            3.5,
+        );
+        let top = walk_along(&terrain, &object, top, &mut flight, 0.0, 1.0);
+        let above = length(top) - RADIUS - terrain.surface(unit(top)).unwrap();
+        assert!(!flight.airborne, "standing on the platform: z = {}", top[2]);
+        assert!(
+            (above - 7.5).abs() < 0.1,
+            "the platform is 7.5 m up: {above}, z = {}",
+            top[2]
+        );
+    }
+
+    /// `GLB=path cargo test real_stairs -- --ignored --nocapture`: walks up the stairs of a real model that faces +Z,
+    /// the way the server does (`advance`, in steps of 0.1 s).
+    #[test]
+    #[ignore = "needs a model file in GLB"]
+    fn real_stairs() {
+        let Ok(path) = std::env::var("GLB") else {
+            return; // a utility: it needs GLB=path
+        };
+        let loaded = crate::glb::triangles(&std::fs::read(path).unwrap()).unwrap();
+        let (terrain, mut object, ground) = staircase(0.3, 1);
+        object.model = "disk:test:real".into();
+        register_structure("disk:test:real", "x", loaded.vertices, loaded.triangles);
+        object.collision_radius_m = 45.0;
+        let start = std::env::var("START")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40.0);
+        let key = format!(
+            "{}:{}",
+            terrain.environment.seed, terrain.environment.heightmap_sha256
+        );
+        set_statics(key, vec![object]);
+        let mut flight = Flight {
+            airborne: false,
+            vertical_speed: 0.0,
+            horizontal: [0.0; 3],
+        };
+        let mut point = [ground, 0.0, start];
+        let mut on_object = false;
+        let intent = Intent {
+            direction: [0.0, 0.0, -1.0],
+            sequence: "1".into(),
+            jump: false,
+            run: false,
+        };
+        for step in 0..120 {
+            (point, on_object) = terrain.advance(point, &intent, 0.1, &mut flight, on_object);
+            if step % 3 == 0 {
+                println!(
+                    "z {:7.3} h {:6.3} air {} on_object {}",
+                    point[2],
+                    length(point) - ground,
+                    flight.airborne,
+                    on_object
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wall_higher_than_a_step_stops_the_walker() {
+        let (terrain, object, ground) = staircase(1.2, 1);
+        let mut flight = Flight {
+            airborne: false,
+            vertical_speed: 0.0,
+            horizontal: [0.0; 3],
+        };
+        let end = walk_along(
+            &terrain,
+            &object,
+            [ground, 0.0, -3.0],
+            &mut flight,
+            1.0,
+            3.0,
+        );
+        assert!(end[2] < 0.0, "stopped at the wall: z = {}", end[2]);
+        assert!((end[0] - ground).abs() < 0.05);
     }
 
     #[test]

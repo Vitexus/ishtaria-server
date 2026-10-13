@@ -388,6 +388,7 @@ pub fn npc_descriptors(
 pub async fn props_near(state: &AppState, point: [f64; 3]) -> Vec<super::settlements::WorldProp> {
     const PROP_RADIUS_M: f64 = 450.0;
     const MAX_PROPS: usize = 2500;
+    // Buildings of datadisks are few and large, so they are announced from farther away.
     match world(state).await {
         Ok(Some(world)) => world
             .props
@@ -395,7 +396,7 @@ pub async fn props_near(state: &AppState, point: [f64; 3]) -> Vec<super::settlem
             .filter(|prop| {
                 length(std::array::from_fn(|axis| {
                     prop.position[axis] - point[axis]
-                })) <= PROP_RADIUS_M
+                })) <= prop.visible_m.unwrap_or(PROP_RADIUS_M)
             })
             .take(MAX_PROPS)
             .cloned()

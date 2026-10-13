@@ -7,6 +7,7 @@
 //! and ships for gold.
 
 use super::{
+    disk::Structure,
     disk::{Dialogue, Disk, HeightRange, Manifest, Music, Near, Npc, Place, Requires, Scenery},
     placement::{self, Ground, Placed},
     Story,
@@ -64,6 +65,10 @@ pub struct WorldProp {
     pub yaw: f64,
     /// Metres per model unit.
     pub scale_m: f64,
+    /// Distance up to which the prop is announced, when it is larger than the usual radius
+    /// (the buildings of datadisks are seen from afar).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible_m: Option<f64>,
 }
 
 fn manifest(id: &str, name: &str) -> Manifest {
@@ -186,6 +191,7 @@ pub fn world_disk(seed: &str, count: usize) -> Disk {
             at: None,
             music: None,
             music_radius_m: None,
+            structure: None,
             scenery: Some(Scenery {
                 preset: "town".to_owned(),
                 size: Some(size_name(size).to_owned()),
@@ -217,6 +223,7 @@ pub fn world_disk(seed: &str, count: usize) -> Disk {
             at: None,
             music: graveyard_music.clone(),
             music_radius_m: graveyard_music.as_ref().map(|_| GRAVEYARD_MUSIC_RADIUS_M),
+            structure: None,
             scenery: Some(Scenery {
                 preset: "graveyard".to_owned(),
                 size: None,
@@ -266,6 +273,7 @@ pub fn world_disk(seed: &str, count: usize) -> Disk {
             at: None,
             music: None,
             music_radius_m: None,
+            structure: None,
             scenery: Some(Scenery {
                 preset: "fortress".to_owned(),
                 size: None,
@@ -320,6 +328,7 @@ pub fn world_disk(seed: &str, count: usize) -> Disk {
             music: None,
             music_radius_m: None,
             scenery: None,
+            structure: None,
             requires: Requires::default(),
         });
         disk.npcs.push(Npc {
@@ -415,8 +424,126 @@ fn to_props(
             position,
             yaw: prop.yaw,
             scale_m: prop.scale,
+            visible_m: None,
         });
     }
+}
+
+/// A building the datadisk itself brings: its model is drawn by the clients (`disk:<disk>:<path>`) and
+/// its mesh (the model, or the simpler `collision` file) is walked by the characters. A broken or
+/// missing model leaves the place without a building instead of failing the whole world.
+fn build_structure(
+    id: &str,
+    structure: &Structure,
+    site: &Placed,
+    story: &Story,
+    ground: &dyn Ground,
+    built: &mut Built,
+) -> Option<([f64; 3], f64)> {
+    let (disk, _) = id.split_once(':')?;
+    let load = |path: &str| -> Result<(crate::glb::Triangles, String)> {
+        let (file, sha256) = story
+            .media
+            .get(&format!("{disk}/{path}"))
+            .ok_or_else(|| anyhow::anyhow!("{path} is not a media file of the disk"))?;
+        let bytes = std::fs::read(file)?;
+        anyhow::ensure!(
+            format!("{:x}", Sha256::digest(&bytes)) == *sha256,
+            "{path} changed on disk"
+        );
+        Ok((crate::glb::triangles(&bytes)?, sha256.clone()))
+    };
+    let model = format!(
+        "{}{disk}:{}",
+        crate::movement::STRUCTURE_PREFIX,
+        structure.model
+    );
+    let mesh = structure.collision.as_deref().unwrap_or(&structure.model);
+    let (triangles, sha256) = match load(mesh) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("structure {id}: {error:#}");
+            return None;
+        }
+    };
+    let scale = structure.scale_m.unwrap_or(1.0);
+    let reach = triangles
+        .vertices
+        .iter()
+        .map(|point| (point[0] * point[0] + point[2] * point[2]).sqrt())
+        .fold(0.0, f64::max)
+        * scale;
+    crate::movement::register_structure(&model, &sha256, triangles.vertices, triangles.triangles);
+    let [east, north] = structure.offset_m.unwrap_or([0.0, 0.0]);
+    let yaw = structure.yaw_deg.unwrap_or(0.0).to_radians();
+    // The model stands at the height of the ground at its `ground_m` point (the foot of its stairs, say), so that
+    // the way up starts on the terrain and not in the air.
+    let [ground_x, ground_z] = structure.ground_m.unwrap_or([0.0, 0.0]);
+    let (sin, cos) = yaw.sin_cos();
+    let (_, ground_point) = scenery::world_from_local(
+        site.direction,
+        east + (ground_x * cos + ground_z * sin) * scale,
+        north + (-ground_x * sin + ground_z * cos) * scale,
+        |direction| ground.height(direction).max(0.0),
+        crate::movement::RADIUS,
+    );
+    let (direction, _) = scenery::world_from_local(
+        site.direction,
+        east,
+        north,
+        |_| 0.0,
+        crate::movement::RADIUS,
+    );
+    let radial = ground_point.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let position = direction.map(|v| v * radial);
+    built.props.push(WorldProp {
+        id: id.to_owned(),
+        model: model.clone(),
+        position,
+        yaw,
+        scale_m: scale,
+        visible_m: Some(structure.visible_m.unwrap_or(600.0)),
+    });
+    built.colliders.push(WorldObject {
+        id: format!("{id}#structure"),
+        model,
+        position,
+        scale_m: scale,
+        yaw,
+        collision_radius_m: reach.max(1.0),
+        biome: 4,
+    });
+    Some((direction, reach))
+}
+
+/// Clearance around a building where the houses of a generated town are not built.
+const STRUCTURE_CLEARANCE_M: f64 = 6.0;
+
+/// Drops the parts of a generated town that would stand inside a building of a datadisk.
+fn clear_structures(
+    local: Vec<LocalProp>,
+    site: &Placed,
+    structures: &[([f64; 3], f64)],
+) -> Vec<LocalProp> {
+    let (axis_x, axis_z) = scenery::client_axes(site.direction);
+    let spots: Vec<(f64, f64, f64)> = structures
+        .iter()
+        .map(|(direction, reach)| {
+            let delta: [f64; 3] = std::array::from_fn(|axis| {
+                (direction[axis] - site.direction[axis]) * crate::movement::RADIUS
+            });
+            let dot = |axis: [f64; 3]| (0..3).map(|k| delta[k] * axis[k]).sum::<f64>();
+            (dot(axis_x), dot(axis_z), reach + STRUCTURE_CLEARANCE_M)
+        })
+        .collect();
+    local
+        .into_iter()
+        .filter(|prop| {
+            spots
+                .iter()
+                .all(|(x, z, radius)| (prop.x - x).hypot(prop.z - z) >= *radius)
+        })
+        .collect()
 }
 
 /// Builds what depends on where the places ended up: the scenery of every place that has one,
@@ -432,6 +559,15 @@ pub fn finish(
     let mut harbours: Vec<(usize, Placed)> = Vec::new();
     let mut markets: Vec<(usize, Placed)> = Vec::new();
     let anchors = story.anchors.clone();
+    // Buildings of the datadisks first, so that the towns leave room for them.
+    let mut structures: Vec<([f64; 3], f64)> = Vec::new();
+    for anchor in &anchors {
+        if let (Some(structure), Some(site)) = (&anchor.place.structure, sites.get(&anchor.id)) {
+            structures.extend(build_structure(
+                &anchor.id, structure, site, story, ground, &mut built,
+            ));
+        }
+    }
     for (index, anchor) in anchors.iter().enumerate() {
         let (Some(scenery), Some(site)) = (&anchor.place.scenery, sites.get(&anchor.id)) else {
             continue;
@@ -463,7 +599,11 @@ pub fn finish(
                 to_props(
                     &anchor.id,
                     &site,
-                    scenery::settlement(seed, &anchor.id, size, sea),
+                    clear_structures(
+                        scenery::settlement(seed, &anchor.id, size, sea),
+                        &site,
+                        &structures,
+                    ),
                     ground,
                     &mut built,
                 );
@@ -530,6 +670,7 @@ pub fn finish(
                 music: None,
                 music_radius_m: None,
                 scenery: None,
+                structure: None,
                 requires: Requires::default(),
             });
             disk.npcs.push(Npc {
@@ -576,6 +717,7 @@ pub fn finish(
                 music: None,
                 music_radius_m: None,
                 scenery: None,
+                structure: None,
                 requires: Requires::default(),
             });
             disk.npcs.push(Npc {

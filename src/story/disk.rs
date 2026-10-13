@@ -103,6 +103,8 @@ pub struct Place {
     pub spacing_m: Option<f64>,
     /// Buildings and props the engine builds at the place.
     pub scenery: Option<Scenery>,
+    /// A model of the datadisk standing at the place (a building the engine does not generate).
+    pub structure: Option<Structure>,
     /// New characters of the world appear here (the first such place of the first disk wins).
     #[serde(default)]
     pub spawn: bool,
@@ -124,6 +126,27 @@ pub struct Scenery {
     pub preset: String,
     /// `hamlet`, `village` or `town` (presets that build settlements).
     pub size: Option<String>,
+}
+
+/// A building of the datadisk itself: a glTF binary drawn at the place and walkable by its mesh.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Structure {
+    /// A `.glb` below `media/models/` in metres, standing on the ground at its origin, +Y up.
+    pub model: String,
+    /// A simpler `.glb` used for collision and walking; defaults to `model`.
+    pub collision: Option<String>,
+    /// Metres per model unit (default 1).
+    pub scale_m: Option<f64>,
+    /// Turn about the vertical axis in degrees (default 0).
+    pub yaw_deg: Option<f64>,
+    /// Shift from the place's anchor, in metres east and north.
+    pub offset_m: Option<[f64; 2]>,
+    /// The point of the model (x and z in model units, before the turn) that stands on the ground, such as the foot of
+    /// its stairs; the model's height is set by the terrain there. Defaults to the model's origin.
+    pub ground_m: Option<[f64; 2]>,
+    /// Distance up to which the server announces the structure (default 600).
+    pub visible_m: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -505,6 +528,10 @@ impl Disk {
         // Only files that an NPC or a track names are shipped; they are part of the hash.
         let mut wanted: Vec<&str> = npcs.iter().filter_map(|n| n.portrait.as_deref()).collect();
         wanted.extend(npcs.iter().filter_map(|n| n.character.model.as_deref()));
+        for structure in places.iter().filter_map(|place| place.structure.as_ref()) {
+            wanted.push(structure.model.as_str());
+            wanted.extend(structure.collision.as_deref());
+        }
         wanted.extend(music.iter().map(|m| m.file.as_str()));
         wanted.extend(manifest.cover.as_deref());
         // Spoken lines: a file `media/voice/<language>/<text key>.ogg` for a key a dialogue node shows.
@@ -642,6 +669,37 @@ impl Disk {
                         .as_deref()
                         .map_or(true, |size| ["hamlet", "village", "town"].contains(&size)),
                     "{id}: unknown settlement size"
+                );
+            }
+            if let Some(structure) = &place.structure {
+                ensure!(
+                    place.scenery.is_none(),
+                    "{id}: place {} has both scenery and a structure",
+                    place.id
+                );
+                for path in std::iter::once(&structure.model).chain(structure.collision.iter()) {
+                    ensure!(
+                        path.starts_with("media/models/") && path.ends_with(".glb"),
+                        "{id}: structure model {path} must be a .glb below media/models/"
+                    );
+                }
+                let in_range = |value: Option<f64>, low: f64, high: f64| {
+                    value.map_or(true, |value| {
+                        value.is_finite() && (low..=high).contains(&value)
+                    })
+                };
+                ensure!(
+                    in_range(structure.scale_m, 0.05, 20.0)
+                        && in_range(structure.yaw_deg, -360.0, 360.0)
+                        && in_range(structure.visible_m, 50.0, 5000.0)
+                        && structure.offset_m.map_or(true, |offset| offset
+                            .iter()
+                            .all(|v| v.is_finite() && v.abs() <= 2000.0))
+                        && structure.ground_m.map_or(true, |point| point
+                            .iter()
+                            .all(|v| v.is_finite() && v.abs() <= 1000.0)),
+                    "{id}: place {} has a structure value out of range",
+                    place.id
                 );
             }
             if let Some(at) = &place.at {
