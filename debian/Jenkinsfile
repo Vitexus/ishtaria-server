@@ -272,11 +272,19 @@ architectures.each { arch ->
                                     }
                                     sh 'sudo apt-get update --allow-releaseinfo-change'
                                     sh 'sudo rm -rf debian/$(dpkg-parsechangelog --show-field Source)/ debian/.debhelper/ debian/tmp/'
-                                    sh '''
-                                        export DH_INTERNAL_BUILDDIR="/tmp/debhelper-build-''' + uniqueBuildId + '''"
-                                        export TMPDIR="/tmp/build-''' + uniqueBuildId + '''"
-                                        debuild-pbuilder -r"sudo -E" -i -us -uc -b
-                                    '''
+                                    // Cargo fetches ishtaria-core from git.vitexsoftware.com/Ishtaria, which needs a login:
+                                    // git rewrites the URL with the Jenkins credentials (masked in the log) and debuild is told
+                                    // to keep these variables, as it drops the rest of the environment.
+                                    withCredentials([usernamePassword(credentialsId: 'vsgitjenkins', usernameVariable: 'FJ_USER', passwordVariable: 'FJ_PASS')]) {
+                                        sh '''
+                                            export DH_INTERNAL_BUILDDIR="/tmp/debhelper-build-''' + uniqueBuildId + '''"
+                                            export TMPDIR="/tmp/build-''' + uniqueBuildId + '''"
+                                            export CARGO_NET_GIT_FETCH_WITH_CLI=true GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1
+                                            export GIT_CONFIG_KEY_0="url.https://${FJ_USER}:${FJ_PASS}@git.vitexsoftware.com/Ishtaria/.insteadOf"
+                                            export GIT_CONFIG_VALUE_0="https://git.vitexsoftware.com/Ishtaria/"
+                                            debuild-pbuilder --preserve-envvar=CARGO_NET_GIT_FETCH_WITH_CLI --preserve-envvar=GIT_TERMINAL_PROMPT --preserve-envvar=GIT_CONFIG_COUNT --preserve-envvar=GIT_CONFIG_KEY_0 --preserve-envvar=GIT_CONFIG_VALUE_0 -r"sudo -E" -i -us -uc -b
+                                        '''
+                                    }
                                     withEnv(["LB_OUT=${t.out}"]) {
                                         sh '''
                                             set -eu
