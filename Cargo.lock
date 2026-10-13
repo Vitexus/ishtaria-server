@@ -1029,7 +1029,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 [[package]]
 name = "ishtaria-core"
 version = "0.1.0"
-source = "git+https://github.com/VitexSoftware/ishtaria-core?branch=main#de8a0e9c95cd045874c4af07744b5af621a454d2"
+source = "git+https://git.vitexsoftware.com/Ishtaria/ishtaria-core?branch=main#de8a0e9c95cd045874c4af07744b5af621a454d2"
 dependencies = [
  "serde",
  "thiserror 2.0.21",

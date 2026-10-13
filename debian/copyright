@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: ishtaria-server
-Source: https://github.com/VitexSoftware/ishtaria-server
+Source: https://git.vitexsoftware.com/Ishtaria/ishtaria-server
 
 Files: *
 Copyright: 2026 Vítězslav Dvořák <cybervitexus@gmail.com>

@@ -354,7 +354,7 @@ dpkg-buildpackage -us -uc -b
 To develop against a local checkout of `ishtaria-core`, add to `.cargo/config.toml` (not committed):
 
 ```toml
-[patch."https://github.com/VitexSoftware/ishtaria-core"]
+[patch."https://git.vitexsoftware.com/Ishtaria/ishtaria-core"]
 ishtaria-core = { path = "../ishtaria-core" }
 ```
 
@@ -363,7 +363,7 @@ License: AGPL-3.0-only – anyone may run a world; modified servers offered over
 ## Part of Ishtaria
 
 Ishtaria is an open-source, persistent, federated virtual planet of Earth size.
-Documentation: https://vitexsoftware.github.io/ishtaria-docs/ · All repositories: https://github.com/VitexSoftware?q=ishtaria
+Documentation: https://vitexsoftware.github.io/ishtaria-docs/ · All repositories: https://git.vitexsoftware.com/Ishtaria
 
 ## Federation: portals and share links
 
