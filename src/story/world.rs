@@ -444,6 +444,18 @@ pub async fn spawn_position(state: &AppState) -> Option<[f64; 3]> {
         .and_then(|world| world.spawn)
 }
 
+/// The character a datadisk gives every new player, if one does; the first disk in the order of
+/// application wins.
+pub async fn player_character(state: &AppState) -> Option<String> {
+    world(state).await.ok().flatten().and_then(|world| {
+        world
+            .story
+            .infos
+            .iter()
+            .find_map(|info| info.player_character.clone())
+    })
+}
+
 /// NPCs near a point. A broken or missing story never disturbs the rest of the world.
 pub async fn npcs_near(state: &AppState, point: [f64; 3]) -> Vec<NpcDescriptor> {
     match world(state).await {

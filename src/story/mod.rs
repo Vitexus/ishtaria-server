@@ -37,6 +37,8 @@ pub struct DiskInfo {
     pub name: String,
     /// URL path of the cover image, when the disk has one.
     pub cover: Option<String>,
+    /// The character new players of the world are given, when the disk decides it.
+    pub player_character: Option<String>,
 }
 
 /// Several datadisks composed into one world's story. Every id is `<disk>:<id>`.
@@ -133,6 +135,7 @@ impl Story {
                 .cover
                 .as_deref()
                 .map(|cover| world::media_url(&format!("{id}/{cover}"))),
+            player_character: disk.manifest.player_character.clone(),
         });
         let depends: Vec<&str> = disk
             .manifest

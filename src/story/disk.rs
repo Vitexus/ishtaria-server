@@ -44,6 +44,10 @@ pub struct Manifest {
     /// Image below `media/` that clients show when they connect to a server using the disk.
     #[serde(default)]
     pub cover: Option<String>,
+    /// The character every new player of a world using this disk plays (`<pack>/<skin>` as in the
+    /// character creator); players then choose only their nickname. Without it they choose a look.
+    #[serde(default)]
+    pub player_character: Option<String>,
     #[serde(default = "default_languages")]
     pub languages: Vec<String>,
     #[serde(default)]
@@ -866,6 +870,12 @@ impl Disk {
             ensure!(
                 cover.ends_with(".png") || cover.ends_with(".jpg"),
                 "{id}: cover {cover} must be a png or jpg"
+            );
+        }
+        if let Some(character) = &self.manifest.player_character {
+            ensure!(
+                crate::players::valid_character(character),
+                "{id}: player_character {character} is not a character of the creator"
             );
         }
         for npc in &self.npcs {

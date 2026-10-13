@@ -102,6 +102,34 @@ fn announces_the_cover_of_a_disk_and_rejects_a_missing_one() {
 }
 
 #[test]
+fn a_disk_may_decide_the_character_of_new_players() {
+    let a = scratch("hero");
+    base(&a, "heroic", "1.0.0", "player_character: nowhere/nobody\n");
+    assert!(
+        Story::load(std::slice::from_ref(&a), false).is_err(),
+        "a character the creator does not know must be rejected"
+    );
+    let b = scratch("hero2");
+    base(
+        &b,
+        "heroic",
+        "1.0.0",
+        "player_character: protagonists/criminalMaleA\n",
+    );
+    let story = Story::load(&[b], false).unwrap();
+    assert_eq!(
+        story.infos[0].player_character.as_deref(),
+        Some("protagonists/criminalMaleA")
+    );
+    let c = scratch("hero3");
+    base(&c, "plain", "1.0.0", "");
+    assert_eq!(
+        Story::load(&[c], false).unwrap().infos[0].player_character,
+        None
+    );
+}
+
+#[test]
 fn an_npc_model_is_shipped_validated_and_announced() {
     let a = scratch("model");
     base(&a, "zeta", "1.0.0", "");

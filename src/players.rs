@@ -173,7 +173,7 @@ fn validate(credentials: &Credentials) -> Result<(), Error> {
     Ok(())
 }
 
-fn valid_character(character: &str) -> bool {
+pub(crate) fn valid_character(character: &str) -> bool {
     matches!(
         character,
         "protagonists/criminalMaleA"
@@ -335,9 +335,11 @@ async fn register(
     Json(credentials): Json<Credentials>,
 ) -> Result<(StatusCode, Json<Session>), Error> {
     validate(&credentials)?;
-    let character = credentials
-        .character
+    // A datadisk may decide the character of every new player; what the client asked for is then ignored.
+    let given = super::story::world::player_character(&state).await;
+    let character = given
         .as_deref()
+        .or(credentials.character.as_deref())
         .unwrap_or("retro/humanMaleA");
     if !valid_character(character) {
         return Err(Error::Status(StatusCode::BAD_REQUEST, "invalid character"));
