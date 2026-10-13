@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 const FREE_ATTEMPTS: u32 = 200_000;
 const RELATIVE_ATTEMPTS: u32 = 5_000;
+const LOCATE_ATTEMPTS: u32 = 20_000;
 const DEFAULT_RADIUS_M: f64 = 20.0;
 const DEFAULT_MAX_SLOPE_DEG: f64 = 20.0;
 const SLOPE_PROBE_M: f64 = 40.0;
@@ -77,6 +78,19 @@ pub fn offset(from: [f64; 3], meters: f64, azimuth: f64) -> [f64; 3] {
         std::array::from_fn(|axis| azimuth.cos() * east[axis] + azimuth.sin() * north[axis]);
     unit(std::array::from_fn(|axis| {
         from[axis] * angle.cos() + tangent[axis] * angle.sin()
+    }))
+}
+
+/// The point `meters` away from `site` in the direction `bearing_deg` of the map of the place: the frame of its
+/// landscape patch and buildings, in which 0 is up the map (north) and 90 is east. Along a great circle.
+pub fn offset_local(site: [f64; 3], meters: f64, bearing_deg: f64) -> [f64; 3] {
+    let (axis_x, axis_z) = crate::scenery::client_axes(site);
+    let bearing = bearing_deg.to_radians();
+    let tangent: [f64; 3] =
+        std::array::from_fn(|axis| axis_x[axis] * bearing.sin() - axis_z[axis] * bearing.cos());
+    let angle = meters / RADIUS;
+    unit(std::array::from_fn(|axis| {
+        site[axis] * angle.cos() + tangent[axis] * angle.sin()
     }))
 }
 
@@ -207,6 +221,7 @@ pub fn place_anchors(
                     .iter()
                     .map(String::as_str)
                     .chain(anchor.place.requires.near.iter().map(|n| n.place.as_str()))
+                    .chain(anchor.place.locate.iter().map(|l| l.from.as_str()))
                     .all(|dependency| placed.contains_key(dependency))
             })
             .ok_or_else(|| anyhow::anyhow!("places depend on each other in a cycle"))?;
@@ -224,6 +239,7 @@ pub fn place_anchors(
                         .iter()
                         .map(String::as_str)
                         .chain(other.place.requires.near.iter().map(|n| n.place.as_str()))
+                        .chain(other.place.locate.iter().map(|l| l.from.as_str()))
                         .any(|dependency| skipped.iter().any(|gone| gone == dependency))
                 });
                 continue;
@@ -313,25 +329,45 @@ fn find_site(
                 .first()
                 .map(|near| (&near.place, near.min_m, near.max_m))
         });
-    let attempts = if center.is_some() {
+    let attempts = if anchor.place.locate.is_some() {
+        // The search spreads out from the historical point: many tries make the nearest fit close to it.
+        LOCATE_ATTEMPTS
+    } else if center.is_some() {
         RELATIVE_ATTEMPTS
     } else {
         FREE_ATTEMPTS
     };
-    for attempt in 0..attempts {
+    // A located place widens its search twice (four and sixteen times the tolerance) before it gives up.
+    let stages: u32 = if anchor.place.locate.is_some() { 3 } else { 1 };
+    for step in 0..attempts * stages {
+        let (attempt, stage) = (step % attempts, step / attempts);
         let sample = samples(seed, &anchor.id, attempt);
-        let direction = match center {
-            Some((origin, minimum, maximum)) => {
-                let meters = (minimum * minimum
-                    + sample[3] * (maximum * maximum - minimum * minimum))
-                    .sqrt();
-                offset(
-                    placed[origin].direction,
-                    meters,
-                    sample[4] * std::f64::consts::TAU,
-                )
+        let direction = match (&anchor.place.locate, center) {
+            // The nearest site that does is the one: the search widens from the historical point outwards.
+            (Some(locate), _) => {
+                let target = offset_local(
+                    placed[&locate.from].direction,
+                    locate.distance_m,
+                    locate.bearing_deg,
+                );
+                let reach = locate.tolerance()
+                    * 4f64.powi(stage as i32)
+                    * ((f64::from(attempt) + 1.0) / f64::from(attempts)).sqrt();
+                offset(target, reach, sample[4] * std::f64::consts::TAU)
             }
-            None => direction_at((sample[0] * 6.0) as usize % 6, sample[1], sample[2]),
+            (None, center) => match center {
+                Some((origin, minimum, maximum)) => {
+                    let meters = (minimum * minimum
+                        + sample[3] * (maximum * maximum - minimum * minimum))
+                        .sqrt();
+                    offset(
+                        placed[origin].direction,
+                        meters,
+                        sample[4] * std::f64::consts::TAU,
+                    )
+                }
+                None => direction_at((sample[0] * 6.0) as usize % 6, sample[1], sample[2]),
+            },
         };
         let Some((biome, height)) = ground.land_site(direction) else {
             continue;
@@ -383,6 +419,19 @@ fn find_site(
             > requires.max_slope_deg.unwrap_or(DEFAULT_MAX_SLOPE_DEG)
         {
             continue;
+        }
+        if let (Some(locate), true) = (&anchor.place.locate, stage > 0) {
+            let target = offset_local(
+                placed[&locate.from].direction,
+                locate.distance_m,
+                locate.bearing_deg,
+            );
+            eprintln!(
+                "place {} lies {:.0} km from its historical point (no fitting site within {:.0} km)",
+                anchor.id,
+                distance_m(direction, target) / 1000.0,
+                locate.tolerance() * 4f64.powi(stage as i32 - 1) / 1000.0
+            );
         }
         return Ok(Placed {
             id: anchor.id.clone(),

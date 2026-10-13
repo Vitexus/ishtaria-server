@@ -520,6 +520,75 @@ fn placement_is_deterministic_and_honours_distances() {
 }
 
 #[test]
+fn a_located_place_lies_where_history_puts_it() {
+    use super::placement::{distance_m, place_anchors};
+    let a = scratch("located");
+    base(&a, "geo", "1.0.0", "");
+    write(
+        &a,
+        "places/p.yaml",
+        "- {id: hut, kind: building, name_key: place.hut}\n\
+         - {id: forest, kind: landmark, name_key: place.hut, locate: {from: hut, bearing_deg: 90, distance_m: 2500000, tolerance_m: 150000}}\n\
+         - {id: north, kind: landmark, name_key: place.hut, locate: {from: hut, bearing_deg: 0, distance_m: 1000000, tolerance_m: 100000}}\n\
+         - {id: shrine, kind: building, name_key: place.hut, locate: {from: forest, bearing_deg: 180, distance_m: 400000}}\n",
+    );
+    let story = Story::load(&[a], false).unwrap();
+    let sites = place_anchors(&story, &Flat, "7", &[]).unwrap();
+    let site = |id: &str| sites.iter().find(|p| p.id == id).unwrap();
+    let (hut, forest, north, shrine) = (
+        site("geo:hut"),
+        site("geo:forest"),
+        site("geo:north"),
+        site("geo:shrine"),
+    );
+    // Distance and bearing in the frame of the map of the place they are measured from.
+    let measure = |from: &super::placement::Placed, to: &super::placement::Placed| {
+        let (axis_x, axis_z) = crate::scenery::client_axes(from.direction);
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let (east, north) = (dot(to.direction, axis_x), -dot(to.direction, axis_z));
+        let bearing = east.atan2(north).to_degrees().rem_euclid(360.0);
+        (distance_m(from.direction, to.direction), bearing)
+    };
+    let (distance, bearing) = measure(hut, forest);
+    assert!(
+        (2_350_000.0..=2_650_000.0).contains(&distance),
+        "forest {distance} m"
+    );
+    assert!((bearing - 90.0).abs() < 10.0, "forest at bearing {bearing}");
+    let (distance, bearing) = measure(hut, north);
+    assert!(
+        (900_000.0..=1_100_000.0).contains(&distance),
+        "north {distance} m"
+    );
+    assert!(
+        !(12.0..=348.0).contains(&bearing),
+        "north at bearing {bearing}"
+    );
+    let (distance, bearing) = measure(forest, shrine);
+    assert!(
+        (380_000.0..=420_000.0).contains(&distance),
+        "shrine {distance} m"
+    );
+    assert!((bearing - 180.0).abs() < 8.0, "shrine at bearing {bearing}");
+}
+
+#[test]
+fn a_located_place_is_validated() {
+    let a = scratch("badloc");
+    base(&a, "geo", "1.0.0", "");
+    let with = |places: &str| {
+        write(&a, "places/p.yaml", places);
+        Story::load(std::slice::from_ref(&a), false)
+    };
+    let ok = "- {id: hut, kind: building, name_key: place.hut}\n";
+    assert!(with(&format!("{ok}- {{id: far, kind: landmark, name_key: place.hut, locate: {{from: hut, bearing_deg: 10, distance_m: 5000}}}}\n")).is_ok());
+    assert!(with(&format!("{ok}- {{id: far, kind: landmark, name_key: place.hut, locate: {{from: nowhere, bearing_deg: 10, distance_m: 5000}}}}\n")).is_err(), "unknown place");
+    assert!(with(&format!("{ok}- {{id: far, kind: landmark, name_key: place.hut, locate: {{from: hut, bearing_deg: 400, distance_m: 5000}}}}\n")).is_err(), "bearing");
+    assert!(with(&format!("{ok}- {{id: far, kind: landmark, name_key: place.hut, locate: {{from: hut, bearing_deg: 10, distance_m: 90000000}}}}\n")).is_err(), "further than the planet is wide");
+    assert!(with("- {id: hut, kind: building, name_key: place.hut, locate: {from: hut, bearing_deg: 10, distance_m: 5000}}\n").is_err(), "from itself");
+}
+
+#[test]
 fn placement_fails_clearly_when_nothing_fits() {
     use super::placement::place_anchors;
     struct Sea;

@@ -142,12 +142,35 @@ pub struct Place {
     pub spawn: bool,
     /// A fixed spot of the parent's walled town: `gate` or `alley` (see `scenery::town_spot`).
     pub at: Option<String>,
+    /// Where on the planet the place lies, from another place: the real geography of a story.
+    pub locate: Option<Locate>,
     /// Track (id of the disk's music) that plays while the player is within `music_radius_m`.
     pub music: Option<String>,
     /// Distance from the place where its music is heard; defaults to `radius_m`.
     pub music_radius_m: Option<f64>,
     #[serde(default)]
     pub requires: Requires,
+}
+
+/// A place put where history says: `distance_m` from `from` in the direction `bearing_deg` of the map of `from`
+/// (the frame of its landscape patch and buildings: 0 is north, up the map, 90 is east). The site is the nearest
+/// that satisfies the `requires` of the place within `tolerance_m` of that point, since the planet is not
+/// the Earth and its coasts and mountains lie elsewhere.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Locate {
+    pub from: String,
+    pub bearing_deg: f64,
+    pub distance_m: f64,
+    /// How far from the exact point a site may lie; default a twentieth of the distance (at least 30 m).
+    pub tolerance_m: Option<f64>,
+}
+
+impl Locate {
+    pub fn tolerance(&self) -> f64 {
+        self.tolerance_m
+            .unwrap_or((self.distance_m / 20.0).max(30.0))
+    }
 }
 
 /// A generated layout of models from the bundled Kenney kits.
@@ -740,6 +763,29 @@ impl Disk {
                 ensure!(
                     !local(parent) || places.contains(parent.as_str()),
                     "{id}: place {} has unknown parent {parent}",
+                    place.id
+                );
+            }
+            if let Some(locate) = &place.locate {
+                ensure!(
+                    !local(&locate.from)
+                        || (places.contains(locate.from.as_str()) && locate.from != place.id),
+                    "{id}: place {} is located from unknown {}",
+                    place.id,
+                    locate.from
+                );
+                ensure!(
+                    locate.bearing_deg.is_finite()
+                        && (0.0..360.0).contains(&locate.bearing_deg)
+                        && locate.distance_m.is_finite()
+                        && (1.0..=20_000_000.0).contains(&locate.distance_m)
+                        && locate.tolerance_m.map_or(true, |t| (1.0..=5_000_000.0).contains(&t)),
+                    "{id}: place {} has an invalid location (bearing 0..360, distance 1 m to 20000 km)",
+                    place.id
+                );
+                ensure!(
+                    place.at.is_none(),
+                    "{id}: place {} cannot be both located and pinned",
                     place.id
                 );
             }

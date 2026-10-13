@@ -167,10 +167,16 @@ impl Story {
             if let Some(parent) = &place.parent {
                 foreign_ok(parent)?;
             }
+            if let Some(locate) = &place.locate {
+                foreign_ok(&locate.from)?;
+            }
             for near in &place.requires.near {
                 foreign_ok(&near.place)?;
             }
             let mut place = place;
+            if let Some(locate) = &mut place.locate {
+                locate.from = qualify(&id, &locate.from);
+            }
             place.parent = place.parent.map(|p| qualify(&id, &p));
             for near in &mut place.requires.near {
                 near.place = qualify(&id, &near.place);
@@ -271,7 +277,15 @@ impl Story {
         let places: Vec<&str> = self.anchors.iter().map(|a| a.id.as_str()).collect();
         for anchor in &self.anchors {
             let near = anchor.place.requires.near.iter().map(|n| n.place.as_str());
-            for reference in anchor.place.parent.as_deref().into_iter().chain(near) {
+            let located = anchor.place.locate.iter().map(|l| l.from.as_str());
+            for reference in anchor
+                .place
+                .parent
+                .as_deref()
+                .into_iter()
+                .chain(near)
+                .chain(located)
+            {
                 ensure!(
                     places.contains(&reference),
                     "{}: unknown place {reference}",
