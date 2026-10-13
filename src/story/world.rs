@@ -65,6 +65,25 @@ pub struct AreaDescriptor {
     pub music: AreaMusic,
 }
 
+/// A landscape patch of a datadisk place near the client (ADR 0013): the client fetches the
+/// height and water PNGs from `heightmap`/`water` and replaces the base terrain with them inside
+/// `extent_m` around `position`, feathered across `feather_m`.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct TerrainDescriptor {
+    pub place: String,
+    pub position: [f64; 3],
+    /// Ground height of the anchor: the patch's 0x8000 means exactly this.
+    pub height_m: f64,
+    pub extent_m: [f64; 2],
+    pub offset_m: [f64; 2],
+    pub feather_m: f64,
+    /// Distance from the patch edge up to which the patch is announced.
+    pub visible_m: f64,
+    pub heightmap: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub water: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct AreaMusic {
     pub url: String,
@@ -84,6 +103,8 @@ pub struct StoryWorld {
     pub npcs: Vec<NpcDescriptor>,
     /// Places with background music.
     pub areas: Vec<AreaDescriptor>,
+    /// Landscape patches of the places (ADR 0013), announced to clients within their reach.
+    pub terrains: Vec<TerrainDescriptor>,
 }
 
 /// Path clients use to fetch a media file of a disk.
@@ -247,6 +268,14 @@ async fn build(
             })
             .collect();
     }
+    // The landscape patches shape the ground before anything is put on it: structures, NPCs and the spawn stand on
+    // the patched terrain, not on the base map below it.
+    let (patch_story, patch_sites) = (story.clone(), sites.clone());
+    let (patches, terrains) =
+        tokio::task::spawn_blocking(move || load_patches(&patch_story, &patch_sites))
+            .await
+            .map_err(|_| anyhow::anyhow!("terrain patch loading panicked"))??;
+    movement::set_patches(format!("{seed}:{heightmap}"), patches);
     let built = super::settlements::finish(&mut story, &mut sites, terrain.as_ref(), &seed)?;
     let props = built.props;
     let colliders = built.colliders;
@@ -263,6 +292,7 @@ async fn build(
         sites,
         npcs,
         areas,
+        terrains,
     })
 }
 
@@ -449,6 +479,131 @@ pub async fn areas_near(state: &AppState, point: [f64; 3]) -> Vec<AreaDescriptor
 /// Position of a place in world metres.
 pub fn site_position(site: &Placed) -> [f64; 3] {
     site.direction.map(|axis| axis * (RADIUS + site.height_m))
+}
+
+/// Reads the landscape patches of the placed places from the disks' media (ADR 0013): the
+/// heightmap and the water mask (0 = dry land), both 16-bit greyscale PNGs whose 0x8000 is the
+/// anchor's height and whose sha256 must still match the composed story.
+fn load_patches(
+    story: &Story,
+    sites: &HashMap<String, Placed>,
+) -> anyhow::Result<(Vec<movement::TerrainPatch>, Vec<TerrainDescriptor>)> {
+    let mut patches = Vec::new();
+    let mut descriptors = Vec::new();
+    for anchor in &story.anchors {
+        let Some(terrain) = &anchor.place.terrain else {
+            continue;
+        };
+        let Some(site) = sites.get(&anchor.id) else {
+            eprintln!("terrain patch {}: its place has no anchor", anchor.id);
+            continue;
+        };
+        let Some((disk, _)) = anchor.id.split_once(':') else {
+            continue;
+        };
+        let read = |path: &str| -> anyhow::Result<(Vec<u16>, usize, usize)> {
+            let (file, sha256) = story
+                .media
+                .get(&format!("{disk}/{path}"))
+                .ok_or_else(|| anyhow::anyhow!("{path} is not a media file of the disk"))?;
+            let bytes = std::fs::read(file)?;
+            anyhow::ensure!(
+                format!("{:x}", Sha256::digest(&bytes)) == *sha256,
+                "{path} changed on disk"
+            );
+            let image = image::load_from_memory(&bytes)
+                .map_err(|error| anyhow::anyhow!("{path}: {error:#}"))?
+                .into_luma16();
+            let (width, height) = image.dimensions();
+            anyhow::ensure!(
+                width >= 16 && height >= 16 && width * height <= 4 << 20,
+                "{path} has invalid dimensions {width}x{height}"
+            );
+            Ok((image.into_raw(), width as usize, height as usize))
+        };
+        let (elevation, width, height) = match read(&terrain.heightmap) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                eprintln!("terrain patch {}: {error:#}", anchor.id);
+                continue;
+            }
+        };
+        let elevation: Vec<i16> = elevation
+            .into_iter()
+            .map(|value| (i32::from(value) - 32768) as i16)
+            .collect();
+        let water = match &terrain.water {
+            Some(path) => match read(path) {
+                Ok((water, w, h)) if (w, h) == (width, height) => Some(
+                    water
+                        .into_iter()
+                        .map(|value| (i32::from(value) - 32768) as i16)
+                        .collect(),
+                ),
+                Ok(_) => {
+                    eprintln!(
+                        "terrain patch {}: water mask has a different size",
+                        anchor.id
+                    );
+                    None
+                }
+                Err(error) => {
+                    eprintln!("terrain patch {}: {error:#}", anchor.id);
+                    None
+                }
+            },
+            None => None,
+        };
+        let (extent, feather) = (terrain.extent_m, terrain.feather_m.unwrap_or(100.0));
+        let offset = terrain.offset_m.unwrap_or([0.0, 0.0]);
+        let visible = terrain.visible_m.unwrap_or(1200.0);
+        patches.push(movement::TerrainPatch {
+            anchor: site.direction,
+            anchor_height_m: site.height_m,
+            extent_m: extent,
+            offset_m: offset,
+            feather_m: feather,
+            width,
+            height,
+            elevation,
+            water: water.clone(),
+        });
+        descriptors.push(TerrainDescriptor {
+            place: anchor.id.clone(),
+            position: site_position(site),
+            height_m: site.height_m,
+            extent_m: extent,
+            offset_m: offset,
+            feather_m: feather,
+            visible_m: visible,
+            heightmap: media_url(&format!("{disk}/{}", terrain.heightmap)),
+            water: terrain
+                .water
+                .as_ref()
+                .map(|path| media_url(&format!("{disk}/{path}"))),
+        });
+    }
+    Ok((patches, descriptors))
+}
+
+/// Landscape patches whose rectangle lies within reach of a point, for the client.
+pub async fn terrains_near(state: &AppState, point: [f64; 3]) -> Vec<TerrainDescriptor> {
+    match world(state).await {
+        Ok(Some(world)) => world
+            .terrains
+            .iter()
+            .filter(|terrain| {
+                let reach = 0.5 * (terrain.extent_m[0].hypot(terrain.extent_m[1]))
+                    + terrain.feather_m
+                    + terrain.visible_m;
+                length(std::array::from_fn(|axis| {
+                    terrain.position[axis] - point[axis]
+                })) <= reach
+            })
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Distance in metres between a player and an NPC.

@@ -105,6 +105,8 @@ pub struct Place {
     pub scenery: Option<Scenery>,
     /// A model of the datadisk standing at the place (a building the engine does not generate).
     pub structure: Option<Structure>,
+    /// A landscape patch anchored at the place (ADR 0013): real-world relief around the site.
+    pub terrain: Option<Terrain>,
     /// New characters of the world appear here (the first such place of the first disk wins).
     #[serde(default)]
     pub spawn: bool,
@@ -146,6 +148,27 @@ pub struct Structure {
     /// its stairs; the model's height is set by the terrain there. Defaults to the model's origin.
     pub ground_m: Option<[f64; 2]>,
     /// Distance up to which the server announces the structure (default 600).
+    pub visible_m: Option<f64>,
+}
+
+/// A landscape patch of a datadisk place (ADR 0013): real-world relief around the site, with the
+/// river returned to its historical course. Heights are relative to the anchor's placed height.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Terrain {
+    /// A 16-bit greyscale `.png` below `media/terrain/`; 0x8000 is the anchor's height, other
+    /// pixels decimetres above it.
+    pub heightmap: String,
+    /// An equally sized `.png`: 0 is dry land, other pixels the water surface in decimetres
+    /// above the anchor (0x8000 = the anchor).
+    pub water: Option<String>,
+    /// The size of the rectangle in the client's local x and z frame, centred on `offset_m`.
+    pub extent_m: [f64; 2],
+    /// The centre of the rectangle from the anchor, in metres along the local x and z axes.
+    pub offset_m: Option<[f64; 2]>,
+    /// Width of the margin blending the patch into the base terrain (default 100).
+    pub feather_m: Option<f64>,
+    /// Distance from the patch edge up to which the server announces it (default 1200).
     pub visible_m: Option<f64>,
 }
 
@@ -344,6 +367,8 @@ pub const MAX_PORTRAIT_BYTES: u64 = 1 << 20;
 pub const MAX_MUSIC_BYTES: u64 = 8 << 20;
 /// Largest character model (`.glb`) a datadisk may ship.
 pub const MAX_MODEL_BYTES: u64 = 4 << 20;
+/// Largest landscape patch (16-bit `.png`) a datadisk may ship.
+pub const MAX_TERRAIN_BYTES: u64 = 4 << 20;
 /// Largest spoken line and most spoken lines per language a datadisk may ship.
 pub const MAX_VOICE_BYTES: u64 = 2 << 20;
 pub const MAX_VOICES_PER_LANGUAGE: usize = 4000;
@@ -532,6 +557,10 @@ impl Disk {
             wanted.push(structure.model.as_str());
             wanted.extend(structure.collision.as_deref());
         }
+        for terrain in places.iter().filter_map(|place| place.terrain.as_ref()) {
+            wanted.push(terrain.heightmap.as_str());
+            wanted.extend(terrain.water.as_deref());
+        }
         wanted.extend(music.iter().map(|m| m.file.as_str()));
         wanted.extend(manifest.cover.as_deref());
         // Spoken lines: a file `media/voice/<language>/<text key>.ogg` for a key a dialogue node shows.
@@ -568,6 +597,8 @@ impl Disk {
             let path = dir.join(relative);
             let limit = if relative.starts_with("media/voice/") {
                 MAX_VOICE_BYTES
+            } else if relative.starts_with("media/terrain/") {
+                MAX_TERRAIN_BYTES
             } else if relative.ends_with(".ogg") {
                 MAX_MUSIC_BYTES
             } else if relative.ends_with(".glb") {
@@ -699,6 +730,48 @@ impl Disk {
                             .iter()
                             .all(|v| v.is_finite() && v.abs() <= 1000.0)),
                     "{id}: place {} has a structure value out of range",
+                    place.id
+                );
+            }
+            if let Some(terrain) = &place.terrain {
+                for path in std::iter::once(&terrain.heightmap).chain(terrain.water.iter()) {
+                    ensure!(
+                        path.starts_with("media/terrain/") && path.ends_with(".png"),
+                        "{id}: terrain patch {path} must be a .png below media/terrain/"
+                    );
+                }
+                let in_range = |value: f64, low: f64, high: f64| {
+                    value.is_finite() && (low..=high).contains(&value)
+                };
+                ensure!(
+                    terrain
+                        .extent_m
+                        .iter()
+                        .all(|&v| in_range(v, 100.0, 10000.0)),
+                    "{id}: place {} has a terrain extent out of range",
+                    place.id
+                );
+                ensure!(
+                    terrain
+                        .offset_m
+                        .map_or([0.0, 0.0], |o| o)
+                        .iter()
+                        .all(|&v| { v.is_finite() && v.abs() <= 5000.0 }),
+                    "{id}: place {} has a terrain offset out of range",
+                    place.id
+                );
+                let feather = terrain.feather_m.unwrap_or(100.0);
+                let visible = terrain.visible_m.unwrap_or(1200.0);
+                ensure!(
+                    in_range(feather, 10.0, 500.0) && in_range(visible, 100.0, 5000.0),
+                    "{id}: place {} has a terrain value out of range",
+                    place.id
+                );
+                let [east, north] = terrain.offset_m.unwrap_or([0.0, 0.0]);
+                ensure!(
+                    (east.abs() + feather) <= terrain.extent_m[0] / 2.0
+                        && (north.abs() + feather) <= terrain.extent_m[1] / 2.0,
+                    "{id}: place {} keeps its anchor outside the feathered terrain core",
                     place.id
                 );
             }

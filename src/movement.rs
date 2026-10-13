@@ -130,6 +130,115 @@ pub(super) struct FarmSite {
 static FARMS: std::sync::RwLock<(String, Vec<FarmSite>)> =
     std::sync::RwLock::new((String::new(), Vec::new()));
 
+/// A landscape patch of a datadisk place (ADR 0013): real-world relief around the site with its
+/// river at the historical course, blended over the base terrain within its feathered rectangle.
+#[derive(Clone, Debug)]
+pub struct TerrainPatch {
+    /// Unit vector of the placed anchor.
+    pub anchor: [f64; 3],
+    /// Ground height of the anchor on the base terrain; the patch's 0x8000 means exactly this.
+    pub anchor_height_m: f64,
+    /// Size of the rectangle in the local x/z frame, centred `offset_m` from the anchor.
+    pub extent_m: [f64; 2],
+    pub offset_m: [f64; 2],
+    pub feather_m: f64,
+    /// Pixels of the 16-bit heightmap: decimetres above the anchor, row-major, `width` per row.
+    pub width: usize,
+    pub height: usize,
+    pub elevation: Vec<i16>,
+    /// The water mask (0 = dry land in the file, `i16::MIN` after the offset): other pixels the
+    /// surface in decimetres above the anchor, row-major like `elevation`.
+    pub water: Option<Vec<i16>>,
+}
+
+/// Landscape patches of the datadisk places, for the key `<seed>:<heightmap hash>`.
+static PATCHES: std::sync::RwLock<(String, Vec<TerrainPatch>)> =
+    std::sync::RwLock::new((String::new(), Vec::new()));
+
+impl TerrainPatch {
+    /// The patch rectangle around `direction`: local metres from its centre and the blend weight
+    /// (1.0 inside the feathered core, easing to 0.0 at the rectangle edge), when inside at all.
+    fn project(&self, direction: [f64; 3]) -> Option<(f64, f64, f64)> {
+        let (axis_x, axis_z) = crate::scenery::client_axes(self.anchor);
+        let x = RADIUS * dot(direction, axis_x) - self.offset_m[0];
+        let z = RADIUS * dot(direction, axis_z) - self.offset_m[1];
+        let half = [self.extent_m[0] / 2.0, self.extent_m[1] / 2.0];
+        if x.abs() > half[0] || z.abs() > half[1] {
+            return None;
+        }
+        let ease = |distance: f64, edge: f64| {
+            let weight = ((edge - distance) / self.feather_m).clamp(0.0, 1.0);
+            weight * weight * (3.0 - 2.0 * weight)
+        };
+        Some((x, z, ease(x.abs(), half[0]) * ease(z.abs(), half[1])))
+    }
+
+    /// Bilinear metres above the anchor at local patch metres.
+    fn sample(&self, x: f64, z: f64) -> f64 {
+        let grid = &self.elevation;
+        let unit = 0.1;
+        let columns = self.width as f64;
+        let rows = self.height as f64;
+        let horizontal = ((x + self.extent_m[0] / 2.0) / self.extent_m[0] * columns - 0.5)
+            .clamp(0.0, columns - 1.0);
+        let vertical =
+            ((z + self.extent_m[1] / 2.0) / self.extent_m[1] * rows - 0.5).clamp(0.0, rows - 1.0);
+        let column = horizontal.floor() as usize;
+        let row = vertical.floor() as usize;
+        let corner = |column: usize, row: usize| {
+            f64::from(grid.get(row * self.width + column).copied().unwrap_or(0))
+        };
+        let west = corner(column, row);
+        let east = corner((column + 1).min(self.width - 1), row);
+        let north = corner(column, (row + 1).min(self.height - 1));
+        let south = corner(
+            (column + 1).min(self.width - 1),
+            (row + 1).min(self.height - 1),
+        );
+        let upper = west + (east - west) * (horizontal - column as f64);
+        let lower = north + (south - north) * (horizontal - column as f64);
+        (upper + (lower - upper) * (vertical - row as f64)) * unit
+    }
+
+    /// The water surface in metres above the anchor at local patch metres, or nothing on dry
+    /// land. Nearest pixel, so the mask keeps sharp banks instead of bleeding across them.
+    fn surface(&self, x: f64, z: f64) -> Option<f64> {
+        let mask = self.water.as_ref()?;
+        let column = (((x + self.extent_m[0] / 2.0) / self.extent_m[0] * self.width as f64)
+            .clamp(0.0, self.width as f64 - 1.0)) as usize;
+        let row = (((z + self.extent_m[1] / 2.0) / self.extent_m[1] * self.height as f64)
+            .clamp(0.0, self.height as f64 - 1.0)) as usize;
+        let level = *mask.get(row * self.width + column)?;
+        (level != i16::MIN).then_some(f64::from(level) * 0.1)
+    }
+}
+
+/// Ground height in a direction with every patch applied, blended over the base height.
+fn patch_height(direction: [f64; 3], base: f64) -> Option<f64> {
+    let stored = PATCHES.read().ok()?;
+    stored.1.iter().find_map(|patch| {
+        let (x, z, weight) = patch.project(direction)?;
+        let height = patch.anchor_height_m + patch.sample(x, z);
+        Some(base + (height - base) * weight)
+    })
+}
+
+/// The water surface of a patch in a direction (absolute metres), when its mask says water.
+fn patch_water(direction: [f64; 3]) -> Option<f64> {
+    let stored = PATCHES.read().ok()?;
+    stored.1.iter().find_map(|patch| {
+        let (x, z, _) = patch.project(direction)?;
+        let surface = patch.surface(x, z)?;
+        Some(patch.anchor_height_m + surface)
+    })
+}
+
+pub(super) fn set_patches(key: String, patches: Vec<TerrainPatch>) {
+    if let Ok(mut stored) = PATCHES.write() {
+        *stored = (key, patches);
+    }
+}
+
 pub(super) fn set_farms(key: String, sites: Vec<FarmSite>) {
     if let Ok(mut farms) = FARMS.write() {
         *farms = (key, sites);
@@ -623,6 +732,8 @@ pub(super) struct ObjectRegion {
     areas: Vec<super::story::world::AreaDescriptor>,
     /// Buildings and props of towns, graveyards and harbours nearby.
     props: Vec<super::story::settlements::WorldProp>,
+    /// Landscape patches of datadisk places nearby.
+    terrains: Vec<super::story::world::TerrainDescriptor>,
     memorials: Vec<super::survival::Memorial>,
 }
 
@@ -828,6 +939,9 @@ impl WalkingTerrain {
             let point: [f64; 3] =
                 std::array::from_fn(|axis| position[axis] + east[axis] * dx + north[axis] * dz);
             let direction = point.map(|value| value / length(point));
+            if patch_water(direction).is_some() {
+                return WaterNear::Fresh;
+            }
             let (face, horizontal, vertical) = coordinates(direction);
             let size = self.environment.face_size;
             let index = face * size * size
@@ -1084,6 +1198,10 @@ impl WalkingTerrain {
         {
             return None;
         }
+        // A river of a landscape patch is no ground to stand scenery on.
+        if patch_water(direction).is_some() {
+            return None;
+        }
         let height = self.height(direction);
         (height > 0.0).then_some(height)
     }
@@ -1113,7 +1231,8 @@ impl WalkingTerrain {
             horizontal.fract(),
         );
         let base = interpolate(upper, lower, vertical.fract()) * 16000.0 / 255.0 - 8000.0;
-        base + environment::relief_offset(direction, base, &self.environment.seed)
+        let base = base + environment::relief_offset(direction, base, &self.environment.seed);
+        patch_height(direction, base).unwrap_or(base)
     }
 
     fn object_cell(&self, face: usize, column: i32, row: i32) -> Option<WorldObject> {
@@ -1161,7 +1280,11 @@ impl WalkingTerrain {
         if sample(2) > FAUNA_PRESENCE {
             return None;
         }
-        let level = f64::from(self.environment.water_m[index]);
+        // The water of a landscape patch is a river, whatever the coarse map says about the land below it.
+        let (level, biome) = match patch_water(point) {
+            Some(surface) => (surface, 2),
+            None => (f64::from(self.environment.water_m[index]), biome),
+        };
         let depth = level - self.height(point);
         if depth < MIN_WATER_DEPTH_M {
             return None;
@@ -1218,7 +1341,7 @@ impl WalkingTerrain {
             + ((vertical * size as f64) as usize).min(size - 1) * size
             + ((horizontal * size as f64) as usize).min(size - 1);
         let biome = self.environment.biomes[index];
-        if fauna && biome < 3 {
+        if fauna && (biome < 3 || patch_water(point).is_some()) {
             return self.place_aquatic(id, point, index, biome, &sample);
         }
         let height = self.surface(point)?;
@@ -1741,6 +1864,7 @@ pub(super) async fn world_objects(
         npcs: super::story::world::npcs_near(&state, point).await,
         areas: super::story::world::areas_near(&state, point).await,
         props: super::story::world::props_near(&state, point).await,
+        terrains: super::story::world::terrains_near(&state, point).await,
         version: 1,
         heightmap_sha256: terrain.environment.heightmap_sha256.clone(),
         seed: terrain.environment.seed.clone(),
@@ -2969,5 +3093,57 @@ mod tests {
             "{:?}",
             lake_fish.iter().map(|a| &a.model).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn landscape_patch_shapes_ground_water_and_fades_at_the_edge() {
+        let terrain = terrain_with(144, 4, Vec::new());
+        let anchor = [1.0, 0.0, 0.0];
+        let (axis_x, axis_z) = crate::scenery::client_axes(anchor);
+        let at = |east: f64, north: f64| {
+            unit(std::array::from_fn(|axis| {
+                anchor[axis] * RADIUS + axis_x[axis] * east + axis_z[axis] * north
+            }))
+        };
+        let anchor_height = terrain.height(anchor);
+        let untouched = |direction: [f64; 3]| terrain.height(direction);
+        let core = at(0.0, 0.0);
+        let margin = at(450.0, 0.0);
+        let outside = at(600.0, 0.0);
+        let (plain_core, plain_margin, plain_outside) =
+            (untouched(core), untouched(margin), untouched(outside));
+        // A flat patch of 32 x 32 pixels, five metres above the anchor, water at its centre.
+        set_patches(
+            "42:test".to_owned(),
+            vec![TerrainPatch {
+                anchor,
+                anchor_height_m: anchor_height,
+                extent_m: [1000.0, 1000.0],
+                offset_m: [0.0, 0.0],
+                feather_m: 100.0,
+                width: 32,
+                height: 32,
+                elevation: vec![50; 32 * 32],
+                water: Some(vec![10; 32 * 32]),
+            }],
+        );
+        let plateau = anchor_height + 5.0;
+        assert!((terrain.height(core) - plateau).abs() < 1.0e-9);
+        let feathered = terrain.height(margin);
+        let blended = plain_margin + (plateau - plain_margin) * 0.5;
+        assert!((feathered - blended).abs() < 1.0e-6);
+        assert!((terrain.height(outside) - plain_outside).abs() < 1.0e-9);
+        // The water mask is fresh water within reach, and only while the patch is set.
+        let here = anchor.map(|value| value * (RADIUS + terrain.height(anchor)));
+        assert_eq!(terrain.water_near(here, 6.0), WaterNear::Fresh);
+        assert_eq!(
+            terrain.water_near(outside.map(|value| value * RADIUS), 6.0),
+            WaterNear::None
+        );
+        // Scenery never stands in the river of a patch.
+        assert!(terrain.surface(core).is_none());
+        set_patches(String::new(), Vec::new());
+        assert!((terrain.height(core) - plain_core).abs() < 1.0e-9);
+        assert_eq!(terrain.water_near(here, 6.0), WaterNear::None);
     }
 }
