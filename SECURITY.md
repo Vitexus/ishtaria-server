@@ -1,7 +1,6 @@
 # Security policy
 
-Please **do not report a vulnerability in a public issue**. Use GitHub's private vulnerability reporting
-(*Security* tab of this repository, *Report a vulnerability*) and describe the class of problem, the affected
+Please **do not report a vulnerability in a public issue**. Write privately to ishtaria@vitexsoftware.com and describe the class of problem, the affected
 version and how to reproduce it. We aim to acknowledge a report within a week.
 
 Never include real tokens, passwords or private keys in a report; describe where they would be.
