@@ -150,6 +150,36 @@ fn a_disk_may_decide_the_character_of_new_players() {
         story.infos[0].player_model.as_deref(),
         Some("/story/media/heroic/media/models/hero.glb")
     );
+    let f = scratch("hero6");
+    base(
+        &f,
+        "heroic",
+        "1.0.0",
+        "player_body: {height_m: 3.0, toughness: 1.5}\n",
+    );
+    assert!(
+        Story::load(std::slice::from_ref(&f), false).is_err(),
+        "no player_character"
+    );
+    let g = scratch("hero7");
+    base(
+        &g,
+        "heroic",
+        "1.0.0",
+        "player_character: protagonists/criminalMaleA\nplayer_body: {height_m: 3.0, toughness: 1.5}\n",
+    );
+    let body = Story::load(&[g], false).unwrap().infos[0]
+        .player_body
+        .unwrap();
+    assert!((body.height_m - 3.0).abs() < 1e-9 && (body.toughness - 1.5).abs() < 1e-9);
+    let h = scratch("hero8");
+    base(
+        &h,
+        "heroic",
+        "1.0.0",
+        "player_character: protagonists/criminalMaleA\nplayer_body: {height_m: 30.0}\n",
+    );
+    assert!(Story::load(&[h], false).is_err(), "a thirty-metre hero");
     let c = scratch("hero3");
     base(&c, "plain", "1.0.0", "");
     assert_eq!(

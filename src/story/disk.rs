@@ -52,6 +52,10 @@ pub struct Manifest {
     /// character instead of the pack look, which stays the fallback. Needs `player_character`.
     #[serde(default)]
     pub player_model: Option<String>,
+    /// The body of that character: how tall it stands and how much more than a man it endures. Needs
+    /// `player_character`.
+    #[serde(default)]
+    pub player_body: Option<PlayerBody>,
     #[serde(default = "default_languages")]
     pub languages: Vec<String>,
     #[serde(default)]
@@ -59,6 +63,24 @@ pub struct Manifest {
     #[serde(default)]
     pub conflicts: Vec<String>,
 }
+
+/// The body of the character a datadisk gives its players (a demigod is taller and tougher than a man).
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerBody {
+    /// Height in metres; the character creator's people are 1.8 m.
+    pub height_m: f64,
+    /// How many times less a fall hurts than it would hurt a man of the same size (1 = as a man).
+    #[serde(default = "default_toughness")]
+    pub toughness: f64,
+}
+
+fn default_toughness() -> f64 {
+    1.0
+}
+
+/// Height of the people of the character creator, in metres.
+pub const MAN_HEIGHT_M: f64 = 1.8;
 
 fn default_languages() -> Vec<String> {
     vec!["en".into()]
@@ -204,6 +226,8 @@ pub struct Npc {
     pub portrait: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// How many times taller than the model as authored the character stands (a god towers over men).
+    pub size: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -883,6 +907,16 @@ impl Disk {
                 "{id}: player_character {character} is not a character of the creator"
             );
         }
+        if let Some(body) = &self.manifest.player_body {
+            ensure!(
+                self.manifest.player_character.is_some(),
+                "{id}: player_body needs player_character, the character it describes"
+            );
+            ensure!(
+                (0.5..=8.0).contains(&body.height_m) && (1.0..=20.0).contains(&body.toughness),
+                "{id}: player_body height_m must be 0.5..8 and toughness 1..20"
+            );
+        }
         if let Some(model) = &self.manifest.player_model {
             ensure!(
                 self.manifest.player_character.is_some(),
@@ -894,6 +928,13 @@ impl Disk {
             );
         }
         for npc in &self.npcs {
+            if let Some(size) = npc.size {
+                ensure!(
+                    (0.5..=4.0).contains(&size),
+                    "{id}: npc {} size must be 0.5..4",
+                    npc.id
+                );
+            }
             if let Some(portrait) = &npc.portrait {
                 ensure!(
                     portrait.ends_with(".png") || portrait.ends_with(".jpg"),

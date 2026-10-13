@@ -1,6 +1,7 @@
 //! The story of one running world: the disks it was generated with, where their places
 //! stand, and where their NPCs are. Built lazily from the database and cached.
 
+use super::disk::MAN_HEIGHT_M;
 use super::{
     placement::{self, Placed},
     Story,
@@ -436,7 +437,7 @@ pub fn npc_descriptors(
             model: npc.character.model.as_deref().map(media_url),
             position: direction.map(|axis| axis * (RADIUS + height)),
             yaw: sample(2) * std::f64::consts::TAU,
-            scale_m: 1.8,
+            scale_m: MAN_HEIGHT_M * npc.size.unwrap_or(1.0),
             portrait: npc.portrait.as_deref().map(media_url),
             shop: npc
                 .tags
@@ -489,6 +490,18 @@ pub async fn player_character(state: &AppState) -> Option<String> {
             .iter()
             .find_map(|info| info.player_character.clone())
     })
+}
+
+/// The body the datadisk of the world gives the players, as (character, body); the first disk that names a
+/// character decides. A character of another look is an ordinary person.
+pub async fn player_body(state: &AppState) -> Option<(String, super::disk::PlayerBody)> {
+    let world = world(state).await.ok().flatten()?;
+    let info = world
+        .story
+        .infos
+        .iter()
+        .find(|info| info.player_character.is_some())?;
+    Some((info.player_character.clone()?, info.player_body?))
 }
 
 /// NPCs near a point. A broken or missing story never disturbs the rest of the world.

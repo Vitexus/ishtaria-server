@@ -79,12 +79,21 @@ const LETHAL_IMPACT_SPEED: f64 = 21.0;
 /// The health a fall takes from a character that lands at `speed` metres per second: nothing up to the safe
 /// speed, then the kinetic energy beyond it (it grows with the square of the speed) until it takes all of 100.
 pub(super) fn fall_damage(speed: f64) -> i32 {
+    fall_damage_of(speed, 1.0, 1.0)
+}
+
+/// The same for a body `size` times as tall as a man's (a drop is as hard as it is long compared with the body, so
+/// the speeds that count grow with the square root of the size) that endures `toughness` times as much.
+pub(super) fn fall_damage_of(speed: f64, size: f64, toughness: f64) -> i32 {
+    let speed = speed / size.max(0.1).sqrt();
     if !speed.is_finite() || speed <= SAFE_IMPACT_SPEED {
         return 0;
     }
     let share = (speed * speed - SAFE_IMPACT_SPEED * SAFE_IMPACT_SPEED)
         / (LETHAL_IMPACT_SPEED * LETHAL_IMPACT_SPEED - SAFE_IMPACT_SPEED * SAFE_IMPACT_SPEED);
-    (share * 100.0).round().clamp(0.0, 100.0) as i32
+    ((share * 100.0) / toughness.max(1.0))
+        .round()
+        .clamp(0.0, 100.0) as i32
 }
 const COLLISION_SKIN: f64 = 0.001;
 const WALKABLE_NORMAL: f64 = 0.8192319205190405;
@@ -1990,7 +1999,24 @@ pub(super) async fn walk(
             super::survival::jump(&mut transaction, player_id, intent.run).await?;
         }
         // Landing hurts by the speed it comes with: a fall from a high ziggurat leaves a hero at death's door.
-        let damage = fall_damage(flight.impact);
+        let mut damage = fall_damage(flight.impact);
+        if damage > 0 {
+            // A tall, tough character (a demigod of a datadisk) is hurt less than a man.
+            if let Some((character, body)) = super::story::world::player_body(&state).await {
+                let looks: String =
+                    sqlx::query_scalar("SELECT character FROM players WHERE id = $1")
+                        .bind(player_id)
+                        .fetch_one(&mut *transaction)
+                        .await?;
+                if looks == character {
+                    damage = fall_damage_of(
+                        flight.impact,
+                        body.height_m / super::story::disk::MAN_HEIGHT_M,
+                        body.toughness,
+                    );
+                }
+            }
+        }
         if damage > 0
             && super::survival::hurt(
                 &mut transaction,
@@ -2382,6 +2408,23 @@ mod tests {
             "20 m leaves a hero at death's door: {tower}"
         );
         assert_eq!(fall_damage(speed(25.0)), 100);
+        // A demigod of 3 m who endures half again as much: the ziggurat is a bruise-and-a-limp, a tower is not.
+        let demigod = |metres: f64| fall_damage_of(speed(metres), 3.0 / 1.8, 1.5);
+        assert!(
+            demigod(13.5) < terrace / 2,
+            "13.5 m: {} vs a man's {terrace}",
+            demigod(13.5)
+        );
+        assert!((20..45).contains(&demigod(20.0)), "20 m: {}", demigod(20.0));
+        assert!(
+            demigod(60.0) >= 100 && demigod(30.0) < 100,
+            "a demigod dies beyond 50 m"
+        );
+        assert_eq!(
+            fall_damage_of(speed(20.0), 1.0, 1.0),
+            tower,
+            "a man is unchanged"
+        );
         assert_eq!(fall_damage(f64::NAN), 0);
         let mut previous = 0;
         for tenth in 0..400 {

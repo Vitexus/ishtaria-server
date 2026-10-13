@@ -41,6 +41,8 @@ pub struct DiskInfo {
     pub player_character: Option<String>,
     /// URL path of the model clients draw for that character instead of its pack look.
     pub player_model: Option<String>,
+    /// How tall and tough that character is, when the disk says.
+    pub player_body: Option<disk::PlayerBody>,
 }
 
 /// Several datadisks composed into one world's story. Every id is `<disk>:<id>`.
@@ -138,6 +140,7 @@ impl Story {
                 .as_deref()
                 .map(|cover| world::media_url(&format!("{id}/{cover}"))),
             player_character: disk.manifest.player_character.clone(),
+            player_body: disk.manifest.player_body,
             player_model: disk
                 .manifest
                 .player_model

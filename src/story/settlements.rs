@@ -84,6 +84,7 @@ fn manifest(id: &str, name: &str) -> Manifest {
         cover: None,
         player_character: None,
         player_model: None,
+        player_body: None,
         languages: vec!["en".to_owned(), "cs".to_owned()],
         requires: Vec::new(),
         conflicts: Vec::new(),
@@ -350,6 +351,7 @@ pub fn world_disk(seed: &str, count: usize) -> Disk {
             bio_key: Some("gate_guard.bio".to_owned()),
             portrait: None,
             tags: vec!["guard".to_owned()],
+            size: None,
         });
     }
     if guarded {
@@ -693,6 +695,7 @@ pub fn finish(
                 bio_key: Some("trader.bio".to_owned()),
                 portrait: None,
                 tags: vec!["shop".to_owned(), "shop:general".to_owned()],
+                size: None,
             });
             sites.insert(site.id.clone(), site.clone());
         }
@@ -741,6 +744,7 @@ pub fn finish(
                 bio_key: Some("shipwright.bio".to_owned()),
                 portrait: None,
                 tags: vec!["shop".to_owned()],
+                size: None,
             });
             sites.insert(site.id.clone(), site.clone());
         }
