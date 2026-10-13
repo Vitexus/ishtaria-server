@@ -15,6 +15,9 @@ use axum::{
     Json, Router,
 };
 use players::Error;
+
+/// How far a walking character may have gone from a player it is talking to.
+const ONGOING_RANGE_M: f64 = 25.0;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Transaction};
@@ -178,11 +181,16 @@ async fn apply_ops(tx: &mut Tx<'_>, player_id: i64, ops: &[Op]) -> Result<(), Er
 }
 
 /// Locks the player row and checks that the player stands near the NPC.
+///
+/// A walking character is where its route puts it now, and once a conversation is on it may have walked
+/// on while the player reads: it then counts as near within `ONGOING_RANGE_M`.
 async fn near_npc<'a>(
+    state: &AppState,
     tx: &mut Tx<'_>,
     story: &'a StoryWorld,
     player_id: i64,
     npc_id: &str,
+    ongoing: bool,
 ) -> Result<&'a world::NpcDescriptor, Error> {
     let position: Option<(Option<f64>, Option<f64>, Option<f64>)> = sqlx::query_as(
         "SELECT position_x, position_y, position_z FROM players WHERE id = $1 FOR UPDATE",
@@ -198,7 +206,13 @@ async fn near_npc<'a>(
         .iter()
         .find(|npc| npc.id == npc_id)
         .ok_or_else(|| status(StatusCode::NOT_FOUND, "unknown character"))?;
-    if world::distance([x, y, z], npc) > TALK_RANGE_M {
+    let here = world::position_now(state, npc).await;
+    let range = if ongoing && npc.movement.is_some() {
+        ONGOING_RANGE_M
+    } else {
+        TALK_RANGE_M
+    };
+    if world::distance([x, y, z], &here) > range {
         return Err(status(StatusCode::FORBIDDEN, "character is out of reach"));
     }
     Ok(npc)
@@ -263,7 +277,7 @@ async fn start(
     let story = story_of(&state).await?;
     advance_reach(&state, &story, player_id).await?;
     let mut tx = state.pool.begin().await?;
-    let npc = near_npc(&mut tx, &story, player_id, &request.npc_id).await?;
+    let npc = near_npc(&state, &mut tx, &story, player_id, &request.npc_id, false).await?;
     let definition = &story.story.npcs[&npc.id];
     let dialogue = &story.story.dialogues[&definition.dialogue];
     let mut player_state = load_state(&mut tx, player_id).await?;
@@ -303,7 +317,7 @@ async fn choose(
     let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
     let story = story_of(&state).await?;
     let mut tx = state.pool.begin().await?;
-    let npc = near_npc(&mut tx, &story, player_id, &request.npc_id).await?;
+    let npc = near_npc(&state, &mut tx, &story, player_id, &request.npc_id, true).await?;
     let session: Option<(String, String, i64)> = sqlx::query_as(
         "SELECT npc_id, node_id, seq FROM dialogue_sessions WHERE player_id = $1 FOR UPDATE",
     )

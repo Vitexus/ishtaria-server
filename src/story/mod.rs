@@ -9,6 +9,7 @@ pub mod disk;
 pub mod engine;
 pub mod placement;
 pub mod settlements;
+pub mod walking;
 pub mod world;
 
 #[cfg(test)]

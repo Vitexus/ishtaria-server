@@ -352,6 +352,7 @@ pub fn world_disk(seed: &str, count: usize) -> Disk {
             portrait: None,
             tags: vec!["guard".to_owned()],
             size: None,
+            movement: None,
         });
     }
     if guarded {
@@ -696,6 +697,7 @@ pub fn finish(
                 portrait: None,
                 tags: vec!["shop".to_owned(), "shop:general".to_owned()],
                 size: None,
+                movement: None,
             });
             sites.insert(site.id.clone(), site.clone());
         }
@@ -745,6 +747,7 @@ pub fn finish(
                 portrait: None,
                 tags: vec!["shop".to_owned()],
                 size: None,
+                movement: None,
             });
             sites.insert(site.id.clone(), site.clone());
         }

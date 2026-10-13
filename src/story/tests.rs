@@ -189,6 +189,36 @@ fn a_disk_may_decide_the_character_of_new_players() {
 }
 
 #[test]
+fn a_character_may_walk_and_the_movement_is_validated() {
+    let a = scratch("walk");
+    base(&a, "walker", "1.0.0", "");
+    let with = |movement: &str| {
+        write(
+            &a,
+            "npcs/n.yaml",
+            &format!("- {{id: hermit, name_key: npc.hermit, place: hut, character: {{pack: retro, skin: humanMaleA}}, dialogue: hermit, movement: {movement}}}\n"),
+        );
+        Story::load(std::slice::from_ref(&a), false)
+    };
+    let story = with("{kind: wander, radius_m: 30, speed_m_s: 1.2}").unwrap();
+    let movement = story.npcs["walker:hermit"].movement.clone().unwrap();
+    assert_eq!(movement.kind, super::disk::MovementKind::Wander);
+    assert!((movement.pause_s - 6.0).abs() < 1e-9, "default pause");
+    assert!(with("{kind: patrol, waypoints: [[0, 0], [20, 0], [20, 20]]}").is_ok());
+    assert!(
+        with("{kind: patrol, waypoints: [[0, 0]]}").is_err(),
+        "one waypoint is no beat"
+    );
+    assert!(
+        with("{kind: wander, waypoints: [[0, 0], [5, 5]]}").is_err(),
+        "a wanderer has no beat"
+    );
+    assert!(with("{kind: wander, speed_m_s: 30}").is_err(), "too fast");
+    assert!(with("{kind: fly}").is_err(), "unknown kind");
+    assert!(with("{kind: wander, radius_m: 900}").is_err(), "too far");
+}
+
+#[test]
 fn an_npc_model_is_shipped_validated_and_announced() {
     let a = scratch("model");
     base(&a, "zeta", "1.0.0", "");

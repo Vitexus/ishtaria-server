@@ -228,6 +228,47 @@ pub struct Npc {
     pub tags: Vec<String>,
     /// How many times taller than the model as authored the character stands (a god towers over men).
     pub size: Option<f64>,
+    /// A character that walks instead of standing at its place.
+    pub movement: Option<Movement>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MovementKind {
+    /// Walks to spots near its place, standing between walks.
+    Wander,
+    /// Walks the loop of `waypoints`.
+    Patrol,
+}
+
+/// How a character of a datadisk walks (see `story::walking`).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Movement {
+    pub kind: MovementKind,
+    /// How far from its place a wanderer goes.
+    #[serde(default = "default_radius")]
+    pub radius_m: f64,
+    #[serde(default = "default_speed")]
+    pub speed_m_s: f64,
+    /// How long it stands between walks.
+    #[serde(default = "default_pause")]
+    pub pause_s: f64,
+    /// The loop of a patrol: metres east and south of the place, as `offset_m` of a building.
+    #[serde(default)]
+    pub waypoints: Vec<[f64; 2]>,
+}
+
+fn default_radius() -> f64 {
+    25.0
+}
+
+fn default_speed() -> f64 {
+    1.0
+}
+
+fn default_pause() -> f64 {
+    6.0
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -928,6 +969,36 @@ impl Disk {
             );
         }
         for npc in &self.npcs {
+            if let Some(movement) = &npc.movement {
+                ensure!(
+                    (1.0..=200.0).contains(&movement.radius_m)
+                        && (0.2..=8.0).contains(&movement.speed_m_s)
+                        && (0.0..=120.0).contains(&movement.pause_s),
+                    "{id}: npc {} movement needs radius_m 1..200, speed_m_s 0.2..8 and pause_s 0..120",
+                    npc.id
+                );
+                match movement.kind {
+                    MovementKind::Patrol => ensure!(
+                        (2..=16).contains(&movement.waypoints.len())
+                            && movement
+                                .waypoints
+                                .iter()
+                                .all(|spot| spot[0].abs() <= 1000.0 && spot[1].abs() <= 1000.0),
+                        "{id}: npc {} patrol needs 2 to 16 waypoints within 1000 m",
+                        npc.id
+                    ),
+                    MovementKind::Wander => ensure!(
+                        movement.waypoints.is_empty(),
+                        "{id}: npc {} wanders: waypoints belong to a patrol",
+                        npc.id
+                    ),
+                }
+                ensure!(
+                    !npc.tags.iter().any(|tag| tag.starts_with("shop:")),
+                    "{id}: npc {} keeps a shop and cannot walk away from it",
+                    npc.id
+                );
+            }
             if let Some(size) = npc.size {
                 ensure!(
                     (0.5..=4.0).contains(&size),

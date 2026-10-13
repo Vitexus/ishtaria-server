@@ -58,6 +58,16 @@ pub struct NpcDescriptor {
     /// The shop of etc/shops.json this NPC keeps (tag `shop:<id>`), when it is a merchant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shop: Option<String>,
+    /// How the character walks, when it does: not sent, the route is.
+    #[serde(skip)]
+    pub movement: Option<super::disk::Movement>,
+    /// Unit direction of the place of the character (the origin of the waypoints of a patrol).
+    #[serde(skip)]
+    pub site: [f64; 3],
+    /// Waypoints `[unix milliseconds, x, y, z]` of a walking character, from the start of the current slot
+    /// on; `position` is where the character stands now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wander: Option<Vec<[f64; 4]>>,
 }
 
 /// A region around a place where a track plays; clients fade it in and out by distance.
@@ -444,9 +454,40 @@ pub fn npc_descriptors(
                 .iter()
                 .find_map(|tag| tag.strip_prefix("shop:"))
                 .map(str::to_owned),
+            movement: npc.movement.clone(),
+            site: site.direction,
+            wander: None,
         });
     }
     npcs
+}
+
+/// The character as it is at `now_ms`: a walking one gets its route and stands where the route puts it.
+/// `home` is where it was put, unit direction `position / |position|`.
+pub fn walking(ground: &dyn placement::Ground, npc: &NpcDescriptor, now_ms: i64) -> NpcDescriptor {
+    let Some(movement) = &npc.movement else {
+        return npc.clone();
+    };
+    let home = crate::movement::unit(npc.position);
+    let route = super::walking::route(ground, &npc.id, home, npc.site, movement, now_ms);
+    let mut here = npc.clone();
+    if route.is_empty() {
+        return here;
+    }
+    here.position = super::walking::position_at(&route, npc.position, now_ms);
+    here.wander = Some(route);
+    here
+}
+
+/// Where the character is now (its place for one that stands).
+pub async fn position_now(state: &AppState, npc: &NpcDescriptor) -> NpcDescriptor {
+    if npc.movement.is_none() {
+        return npc.clone();
+    }
+    match movement::terrain(state).await {
+        Ok(terrain) => walking(&*terrain, npc, movement::unix_now_ms()),
+        Err(_) => npc.clone(),
+    }
 }
 
 /// Props of places near a point (buildings, graveyard fences, ships). Like NPCs, they never
@@ -506,17 +547,41 @@ pub async fn player_body(state: &AppState) -> Option<(String, super::disk::Playe
 
 /// NPCs near a point. A broken or missing story never disturbs the rest of the world.
 pub async fn npcs_near(state: &AppState, point: [f64; 3]) -> Vec<NpcDescriptor> {
-    match world(state).await {
-        Ok(Some(world)) => world
-            .npcs
-            .iter()
-            .filter(|npc| {
-                length(std::array::from_fn(|axis| npc.position[axis] - point[axis])) <= NPC_RADIUS_M
+    let Ok(Some(world)) = world(state).await else {
+        return Vec::new();
+    };
+    // A walking character may be far from where it was put.
+    let reach = |npc: &NpcDescriptor| {
+        NPC_RADIUS_M
+            + npc.movement.as_ref().map_or(0.0, |movement| {
+                movement
+                    .waypoints
+                    .iter()
+                    .fold(movement.radius_m, |far, spot| {
+                        far.max(spot[0].hypot(spot[1]))
+                    })
+                    * 2.0
             })
-            .cloned()
-            .collect(),
-        _ => Vec::new(),
-    }
+    };
+    let near: Vec<&NpcDescriptor> = world
+        .npcs
+        .iter()
+        .filter(|npc| {
+            length(std::array::from_fn(|axis| npc.position[axis] - point[axis])) <= reach(npc)
+        })
+        .collect();
+    let terrain = if near.iter().any(|npc| npc.movement.is_some()) {
+        movement::terrain(state).await.ok()
+    } else {
+        None
+    };
+    let now = movement::unix_now_ms();
+    near.into_iter()
+        .map(|npc| match &terrain {
+            Some(terrain) => walking(&**terrain, npc, now),
+            None => npc.clone(),
+        })
+        .collect()
 }
 
 /// Music areas whose region is near a point (the client works out the distance itself).
