@@ -121,6 +121,35 @@ fn a_disk_may_decide_the_character_of_new_players() {
         story.infos[0].player_character.as_deref(),
         Some("protagonists/criminalMaleA")
     );
+    // A model of the disk replaces the look: it must be shipped, and needs the character it stands for.
+    let d = scratch("hero4");
+    base(
+        &d,
+        "heroic",
+        "1.0.0",
+        "player_model: media/models/hero.glb\n",
+    );
+    assert!(
+        Story::load(std::slice::from_ref(&d), false).is_err(),
+        "no player_character"
+    );
+    let e = scratch("hero5");
+    base(
+        &e,
+        "heroic",
+        "1.0.0",
+        "player_character: protagonists/criminalMaleA\nplayer_model: media/models/hero.glb\n",
+    );
+    assert!(
+        Story::load(std::slice::from_ref(&e), false).is_err(),
+        "model not shipped"
+    );
+    write(&e, "media/models/hero.glb", "glTF");
+    let story = Story::load(&[e], false).unwrap();
+    assert_eq!(
+        story.infos[0].player_model.as_deref(),
+        Some("/story/media/heroic/media/models/hero.glb")
+    );
     let c = scratch("hero3");
     base(&c, "plain", "1.0.0", "");
     assert_eq!(

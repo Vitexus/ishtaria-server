@@ -16,7 +16,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
@@ -119,15 +122,59 @@ fn unavailable() -> Error {
     Error::Status(StatusCode::SERVICE_UNAVAILABLE, "story unavailable")
 }
 
+/// A rebuild of the story world is running in the background.
+static REFRESHING: AtomicBool = AtomicBool::new(false);
+
 /// The world's story, or `None` when no datadisk was applied to it.
+///
+/// Building the story (reading and hashing the disks, parsing their models, placing buildings and loading
+/// the landscape patches) takes seconds, more than a client waits for. So a story that is merely
+/// stale is returned at once and rebuilt in the background; only the very first build, or one after a
+/// failure, makes the request wait.
 pub async fn world(state: &AppState) -> Result<Option<Arc<StoryWorld>>, Error> {
     let mut cache = WORLD.lock().await;
     let key = state.world_id.to_string();
     if let Some((at, stored, world)) = cache.as_ref() {
-        if stored == &key && at.elapsed() < REFRESH {
-            return Ok(world.clone());
+        if stored == &key {
+            if at.elapsed() < REFRESH {
+                return Ok(world.clone());
+            }
+            if world.is_some() {
+                if !REFRESHING.swap(true, Ordering::AcqRel) {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        let built = compute(&state).await;
+                        let mut cache = WORLD.lock().await;
+                        // A failed rebuild keeps the story that works, and tries again after the next period.
+                        let kept = cache.as_ref().and_then(|(_, _, world)| world.clone());
+                        *cache = Some((
+                            Instant::now(),
+                            state.world_id.to_string(),
+                            built.ok().flatten().or(kept),
+                        ));
+                        REFRESHING.store(false, Ordering::Release);
+                    });
+                }
+                return Ok(world.clone());
+            }
         }
     }
+    match compute(state).await {
+        Ok(built) => {
+            *cache = Some((Instant::now(), key, built.clone()));
+            Ok(built)
+        }
+        Err(error) => {
+            eprintln!("story unavailable: {error:#}");
+            // Do not rebuild on every request: remember the failure for a while.
+            *cache = Some((Instant::now(), key, None));
+            Err(unavailable())
+        }
+    }
+}
+
+/// Reads the disk selection of the world and builds its story.
+async fn compute(state: &AppState) -> anyhow::Result<Option<Arc<StoryWorld>>> {
     let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT disk_id, version, sha256 FROM world_datadisks WHERE world_id = $1 ORDER BY position",
     )
@@ -135,21 +182,9 @@ pub async fn world(state: &AppState) -> Result<Option<Arc<StoryWorld>>, Error> {
     .fetch_all(&state.pool)
     .await?;
     if rows.is_empty() && super::settlements::count() == 0 {
-        *cache = Some((Instant::now(), key, None));
         return Ok(None);
     }
-    let built = match build(state, rows).await {
-        Ok(built) => built,
-        Err(error) => {
-            eprintln!("story unavailable: {error:#}");
-            // Do not rebuild on every request: remember the failure for a while.
-            *cache = Some((Instant::now(), key, None));
-            return Err(unavailable());
-        }
-    };
-    let built = Arc::new(built);
-    *cache = Some((Instant::now(), key, Some(built.clone())));
-    Ok(Some(built))
+    Ok(Some(Arc::new(build(state, rows).await?)))
 }
 
 async fn build(

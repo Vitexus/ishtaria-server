@@ -525,6 +525,14 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION"),
         listener.local_addr()?
     );
+    // Build the story now, not at the first request: it takes seconds and a client waits only a few.
+    let warm_state = AppState {
+        pool: pool.clone(),
+        world_id,
+    };
+    tokio::spawn(async move {
+        let _ = story::world::world(&warm_state).await;
+    });
     let guard = std::sync::Arc::new(guard::Guard::new(cfg.limits.clone().unwrap_or_default()));
     // The extension is the outer layer, so the guard middleware finds the guard in the request.
     let router = app(AppState {

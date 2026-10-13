@@ -39,6 +39,8 @@ pub struct DiskInfo {
     pub cover: Option<String>,
     /// The character new players of the world are given, when the disk decides it.
     pub player_character: Option<String>,
+    /// URL path of the model clients draw for that character instead of its pack look.
+    pub player_model: Option<String>,
 }
 
 /// Several datadisks composed into one world's story. Every id is `<disk>:<id>`.
@@ -136,6 +138,11 @@ impl Story {
                 .as_deref()
                 .map(|cover| world::media_url(&format!("{id}/{cover}"))),
             player_character: disk.manifest.player_character.clone(),
+            player_model: disk
+                .manifest
+                .player_model
+                .as_deref()
+                .map(|model| world::media_url(&format!("{id}/{model}"))),
         });
         let depends: Vec<&str> = disk
             .manifest

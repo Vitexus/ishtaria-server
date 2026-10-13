@@ -48,6 +48,10 @@ pub struct Manifest {
     /// character creator); players then choose only their nickname. Without it they choose a look.
     #[serde(default)]
     pub player_character: Option<String>,
+    /// A glTF binary below `media/models/` (with `Idle` and `Walk` clips) that clients draw for that
+    /// character instead of the pack look, which stays the fallback. Needs `player_character`.
+    #[serde(default)]
+    pub player_model: Option<String>,
     #[serde(default = "default_languages")]
     pub languages: Vec<String>,
     #[serde(default)]
@@ -567,6 +571,7 @@ impl Disk {
         }
         wanted.extend(music.iter().map(|m| m.file.as_str()));
         wanted.extend(manifest.cover.as_deref());
+        wanted.extend(manifest.player_model.as_deref());
         // Spoken lines: a file `media/voice/<language>/<text key>.ogg` for a key a dialogue node shows.
         let spoken: std::collections::BTreeSet<&str> = dialogues
             .iter()
@@ -876,6 +881,16 @@ impl Disk {
             ensure!(
                 crate::players::valid_character(character),
                 "{id}: player_character {character} is not a character of the creator"
+            );
+        }
+        if let Some(model) = &self.manifest.player_model {
+            ensure!(
+                self.manifest.player_character.is_some(),
+                "{id}: player_model needs player_character, the look it replaces"
+            );
+            ensure!(
+                model.starts_with("media/models/") && model.ends_with(".glb"),
+                "{id}: player_model {model} must be a .glb below media/models/"
             );
         }
         for npc in &self.npcs {

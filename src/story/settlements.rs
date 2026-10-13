@@ -83,6 +83,7 @@ fn manifest(id: &str, name: &str) -> Manifest {
         rating: None,
         cover: None,
         player_character: None,
+        player_model: None,
         languages: vec!["en".to_owned(), "cs".to_owned()],
         requires: Vec::new(),
         conflicts: Vec::new(),
