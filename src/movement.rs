@@ -71,6 +71,21 @@ const PLAYER_RADIUS: f64 = 0.35;
 const JUMP_SPEED: f64 = 6.5;
 const RUN_JUMP_SPEED: f64 = 8.5;
 const GRAVITY: f64 = 9.81;
+/// Landing speed up to which a fall does no harm: a run-jump lands at 8.5 m/s, a drop of three metres at 7.7.
+const SAFE_IMPACT_SPEED: f64 = 8.0;
+/// Landing speed that kills a character outright (a drop of about 22 m).
+const LETHAL_IMPACT_SPEED: f64 = 21.0;
+
+/// The health a fall takes from a character that lands at `speed` metres per second: nothing up to the safe
+/// speed, then the kinetic energy beyond it (it grows with the square of the speed) until it takes all of 100.
+pub(super) fn fall_damage(speed: f64) -> i32 {
+    if !speed.is_finite() || speed <= SAFE_IMPACT_SPEED {
+        return 0;
+    }
+    let share = (speed * speed - SAFE_IMPACT_SPEED * SAFE_IMPACT_SPEED)
+        / (LETHAL_IMPACT_SPEED * LETHAL_IMPACT_SPEED - SAFE_IMPACT_SPEED * SAFE_IMPACT_SPEED);
+    (share * 100.0).round().clamp(0.0, 100.0) as i32
+}
 const COLLISION_SKIN: f64 = 0.001;
 const WALKABLE_NORMAL: f64 = 0.8192319205190405;
 /// The highest step a walking character climbs without jumping (the risers of stairs are 0.3 m).
@@ -560,6 +575,8 @@ struct Flight {
     airborne: bool,
     vertical_speed: f64,
     horizontal: [f64; 3],
+    /// The downward speed (m/s) of the hardest landing since it was last read; the caller turns it into damage.
+    impact: f64,
 }
 
 #[derive(Serialize, FromRow)]
@@ -1107,6 +1124,7 @@ impl WalkingTerrain {
         point = recover_capsule(point, objects);
         let lift = step_lift(objects);
         for _ in 0..steps {
+            let flying = flight.airborne;
             let radius = length(point);
             let up = unit(point);
             let radial = dot(flight.horizontal, up);
@@ -1169,6 +1187,9 @@ impl WalkingTerrain {
                         grounded = true;
                     }
                 }
+            }
+            if grounded && flying {
+                flight.impact = flight.impact.max(-speed);
             }
             flight.airborne = !grounded;
             flight.vertical_speed = if grounded {
@@ -1950,6 +1971,7 @@ pub(super) async fn walk(
             airborne: position.airborne,
             vertical_speed,
             horizontal: [jump_x, jump_y, jump_z],
+            impact: 0.0,
         };
         let previous = [position.x, position.y, position.z];
         let (point, on_object) =
@@ -1966,6 +1988,21 @@ pub(super) async fn walk(
             .execute(&mut *transaction).await?;
         if takes_off {
             super::survival::jump(&mut transaction, player_id, intent.run).await?;
+        }
+        // Landing hurts by the speed it comes with: a fall from a high ziggurat leaves a hero at death's door.
+        let damage = fall_damage(flight.impact);
+        if damage > 0
+            && super::survival::hurt(
+                &mut transaction,
+                player_id,
+                damage,
+                super::survival::DamageCause::Fall,
+            )
+            .await?
+        {
+            let notice = super::survival::obituary(&mut transaction, player_id).await?;
+            transaction.commit().await?;
+            return Err(players::Error::Obituary(notice));
         }
         if moving
             && !super::survival::activity(&mut transaction, player_id, seconds, intent.run).await?
@@ -2049,6 +2086,7 @@ mod tests {
         assert!(floor > RADIUS + height + 0.1);
         let mut point = [floor + 1.0, 0.0, 0.0];
         let mut flight = Flight {
+            impact: 0.0,
             airborne: true,
             vertical_speed: -1.0,
             horizontal: [0.0; 3],
@@ -2156,6 +2194,7 @@ mod tests {
     fn a_walker_climbs_stairs_with_low_risers_and_comes_down_again() {
         let (terrain, object, ground) = staircase(0.3, 10);
         let mut flight = Flight {
+            impact: 0.0,
             airborne: false,
             vertical_speed: 0.0,
             horizontal: [0.0; 3],
@@ -2184,6 +2223,7 @@ mod tests {
         // Risers of 0.3 m and treads of 0.316 m: the 43 degrees of the stairs of the Anu ziggurat.
         let (terrain, object, ground) = staircase_with(0.3, 0.316, 25);
         let mut flight = Flight {
+            impact: 0.0,
             airborne: false,
             vertical_speed: 0.0,
             horizontal: [0.0; 3],
@@ -2229,6 +2269,7 @@ mod tests {
         );
         set_statics(key, vec![object]);
         let mut flight = Flight {
+            impact: 0.0,
             airborne: false,
             vertical_speed: 0.0,
             horizontal: [0.0; 3],
@@ -2259,6 +2300,7 @@ mod tests {
     fn a_wall_higher_than_a_step_stops_the_walker() {
         let (terrain, object, ground) = staircase(1.2, 1);
         let mut flight = Flight {
+            impact: 0.0,
             airborne: false,
             vertical_speed: 0.0,
             horizontal: [0.0; 3],
@@ -2322,6 +2364,75 @@ mod tests {
     }
 
     #[test]
+    fn fall_damage_grows_with_the_landing_speed() {
+        // Jumps and small drops are harmless: a run-jump lands at 8.5 m/s only slightly above the limit.
+        assert_eq!(fall_damage(0.0), 0);
+        assert_eq!(fall_damage(JUMP_SPEED), 0);
+        assert_eq!(fall_damage(SAFE_IMPACT_SPEED), 0);
+        let speed = |metres: f64| (2.0 * GRAVITY * metres).sqrt();
+        let (low, terrace, tower) = (
+            fall_damage(speed(5.0)),
+            fall_damage(speed(13.5)),
+            fall_damage(speed(20.0)),
+        );
+        assert!(low > 0 && low < 15, "5 m: {low}");
+        assert!(terrace > 40 && terrace < 70, "13.5 m: {terrace}");
+        assert!(
+            tower > 80 && tower < 100,
+            "20 m leaves a hero at death's door: {tower}"
+        );
+        assert_eq!(fall_damage(speed(25.0)), 100);
+        assert_eq!(fall_damage(f64::NAN), 0);
+        let mut previous = 0;
+        for tenth in 0..400 {
+            let damage = fall_damage(f64::from(tenth) / 10.0);
+            assert!(damage >= previous);
+            previous = damage;
+        }
+    }
+
+    #[test]
+    fn a_fall_accelerates_and_lands_with_the_speed_of_its_height() {
+        let pixels = vec![144; 16 * 16 * 6];
+        let mut terrain = WalkingTerrain {
+            size: 16,
+            environment: environment::generate(16, &pixels, "42", "test").unwrap(),
+            pixels,
+            catalog: Vec::new(),
+            removed: Default::default(),
+        };
+        terrain.environment.water_m.fill(environment::DRY);
+        terrain.environment.biomes.fill(4);
+        let ground = RADIUS + terrain.height([1.0, 0.0, 0.0]);
+        let mut point = [ground + 20.0, 0.0, 0.0];
+        let mut flight = Flight {
+            airborne: true,
+            ..Flight::default()
+        };
+        let mut speeds = Vec::new();
+        for _ in 0..80 {
+            (point, _) = terrain.advance(point, &Intent::default(), 0.1, &mut flight, false);
+            if !flight.airborne {
+                break;
+            }
+            speeds.push(flight.vertical_speed);
+        }
+        assert!(!flight.airborne, "it lands");
+        assert!(
+            speeds.windows(2).all(|pair| pair[1] < pair[0]),
+            "it gets faster every tick: {speeds:?}"
+        );
+        let expected = (2.0 * GRAVITY * 20.0).sqrt();
+        assert!(
+            (flight.impact - expected).abs() < 1.5,
+            "impact {} m/s, expected about {expected}",
+            flight.impact
+        );
+        let damage = fall_damage(flight.impact);
+        assert!((80..100).contains(&damage), "20 m fall: {damage}");
+    }
+
+    #[test]
     fn round_obstacles_without_a_mesh_block_sideways_but_not_a_jump() {
         let pixels = vec![144; 16 * 16 * 6];
         let mut terrain = WalkingTerrain {
@@ -2345,6 +2456,7 @@ mod tests {
         };
         let launch = |direction: [f64; 3]| {
             let mut flight = Flight {
+                impact: 0.0,
                 airborne: true,
                 vertical_speed: JUMP_SPEED,
                 horizontal: direction.map(|value| value * WALK_SPEED),
@@ -2405,6 +2517,7 @@ mod tests {
             std::slice::from_ref(&object)
         ));
         let mut flight = Flight {
+            impact: 0.0,
             airborne: true,
             vertical_speed: JUMP_SPEED,
             horizontal: [0.0, 0.0, WALK_SPEED],
@@ -2462,6 +2575,7 @@ mod tests {
             std::array::from_fn(|axis| original_point[axis] - original_center[axis]);
         let mut point = std::array::from_fn(|axis| center[axis] + offset[axis] + up[axis] * 2.0);
         let mut flight = Flight {
+            impact: 0.0,
             airborne: true,
             vertical_speed: -1.0,
             horizontal: [0.0; 3],
@@ -2503,6 +2617,7 @@ mod tests {
         trajectory.push(sample(point, &flight));
         point = std::array::from_fn(|axis| center[axis] + offset[axis]);
         flight = Flight {
+            impact: 0.0,
             horizontal: outward.map(|value| value * WALK_SPEED),
             ..Flight::default()
         };
