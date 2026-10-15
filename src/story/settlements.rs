@@ -88,6 +88,7 @@ fn manifest(id: &str, name: &str) -> Manifest {
         languages: vec!["en".to_owned(), "cs".to_owned()],
         requires: Vec::new(),
         conflicts: Vec::new(),
+        world: None,
     }
 }
 

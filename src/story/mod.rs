@@ -65,6 +65,17 @@ pub struct Story {
     pub voices: BTreeMap<(String, String), String>,
     /// Language -> qualified text key -> text.
     pub strings: BTreeMap<String, BTreeMap<String, String>>,
+    /// The real planet one of the disks defines, when any.
+    pub world: Option<WorldPlan>,
+}
+
+/// The real planet of a story: which disk defines it and the two equirectangular
+/// rasters below that disk (`ishtaria-worldgen --earth` strips them onto the
+/// cube-sphere instead of the procedural noise).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorldPlan {
+    pub disk: String,
+    pub terrain: disk::WorldTerrain,
 }
 
 fn qualify(disk: &str, reference: &str) -> String {
@@ -126,6 +137,21 @@ impl Story {
     pub fn add_disk(&mut self, disk: Disk) -> Result<()> {
         let story = self;
         let id = disk.manifest.id.clone();
+        match (&story.world, &disk.manifest.world) {
+            (Some(existing), Some(_)) => {
+                anyhow::bail!(
+                    "two datadisks define the world's planet: {} and {id}",
+                    existing.disk
+                )
+            }
+            (None, Some(world)) => {
+                story.world = Some(WorldPlan {
+                    disk: id.clone(),
+                    terrain: world.terrain.clone(),
+                });
+            }
+            _ => {}
+        }
         story.disks.push((
             id.clone(),
             disk.manifest.version.clone(),

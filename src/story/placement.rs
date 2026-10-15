@@ -27,6 +27,11 @@ pub trait Ground {
     fn height(&self, direction: [f64; 3]) -> f64;
     /// Open sea in a direction.
     fn is_sea(&self, direction: [f64; 3]) -> bool;
+    /// Whether a character walking the straight line from one direction to another would run into a
+    /// wall, fence, tree or rock. Walking characters of a datadisk do not make such walks.
+    fn blocked(&self, _from: [f64; 3], _to: [f64; 3]) -> bool {
+        false
+    }
 }
 
 impl Ground for WalkingTerrain {
@@ -38,6 +43,9 @@ impl Ground for WalkingTerrain {
     }
     fn is_sea(&self, direction: [f64; 3]) -> bool {
         WalkingTerrain::is_sea(self, direction)
+    }
+    fn blocked(&self, from: [f64; 3], to: [f64; 3]) -> bool {
+        self.walk_blocked(from, to)
     }
 }
 

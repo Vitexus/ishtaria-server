@@ -2,6 +2,7 @@
 //! stand, and where their NPCs are. Built lazily from the database and cached.
 
 use super::disk::MAN_HEIGHT_M;
+pub use super::walking::Pause;
 use super::{
     placement::{self, Placed},
     Story,
@@ -463,20 +464,113 @@ pub fn npc_descriptors(
 }
 
 /// The character as it is at `now_ms`: a walking one gets its route and stands where the route puts it.
-/// `home` is where it was put, unit direction `position / |position|`.
-pub fn walking(ground: &dyn placement::Ground, npc: &NpcDescriptor, now_ms: i64) -> NpcDescriptor {
+/// `home` is where it was put, unit direction `position / |position|`. While it talks to a player (`pause`, migration 0040)
+/// the time of its walk stands still: it stands where it is, and its route goes on from there afterwards, shifted by the time it stood.
+pub fn walking(
+    ground: &dyn placement::Ground,
+    npc: &NpcDescriptor,
+    now_ms: i64,
+    pause: Option<&Pause>,
+) -> NpcDescriptor {
     let Some(movement) = &npc.movement else {
         return npc.clone();
     };
+    let (clock, standing) = pause.map_or((now_ms, false), |pause| pause.clock(now_ms));
+    let offset = pause.map_or(0, |pause| pause.offset_ms(now_ms)) as f64;
     let home = crate::movement::unit(npc.position);
-    let route = super::walking::route(ground, &npc.id, home, npc.site, movement, now_ms);
+    let route = super::walking::route(ground, &npc.id, home, npc.site, movement, clock);
     let mut here = npc.clone();
     if route.is_empty() {
         return here;
     }
-    here.position = super::walking::position_at(&route, npc.position, now_ms);
-    here.wander = Some(route);
+    here.position = super::walking::position_at(&route, npc.position, clock);
+    here.wander = Some(if standing {
+        // Two waypoints one place: clients stand it there until they ask again.
+        let [x, y, z] = here.position;
+        vec![
+            [now_ms as f64, x, y, z],
+            [(now_ms + STANDING_ROUTE_MS) as f64, x, y, z],
+        ]
+    } else {
+        route
+            .into_iter()
+            .map(|[time, x, y, z]| [time + offset, x, y, z])
+            .collect()
+    });
     here
+}
+
+/// How far ahead the route of a character that stands in a conversation reaches.
+const STANDING_ROUTE_MS: i64 = 90_000;
+/// How long an answer keeps a conversation's stop open (leaving the conversation ends it at once).
+pub const KEEP_STANDING_MS: i64 = 5 * 60_000;
+
+/// The stops of the characters in conversation (migration 0040), by character; empty when they cannot be read, so that the
+/// characters simply walk on.
+async fn pauses(state: &AppState) -> HashMap<String, Pause> {
+    let rows: Result<Vec<(String, i64, i64, i64)>, sqlx::Error> = sqlx::query_as(
+        "SELECT npc_id, shift_ms, pause_from_ms, pause_to_ms FROM npc_pauses WHERE world_id = $1",
+    )
+    .bind(state.world_id)
+    .fetch_all(&state.pool)
+    .await;
+    rows.map(|rows| {
+        rows.into_iter()
+            .map(|(id, shift_ms, from_ms, to_ms)| {
+                (
+                    id,
+                    Pause {
+                        shift_ms,
+                        from_ms,
+                        to_ms,
+                    },
+                )
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// A character talks to a player: it stands still from `now_ms` for a few minutes more (every answer renews this). A stop
+/// that has already ended is added to the time the character has stood, and a new one begins.
+pub async fn keep_standing(
+    executor: impl sqlx::PgExecutor<'_>,
+    world_id: i64,
+    npc_id: &str,
+    now_ms: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO npc_pauses (world_id, npc_id, shift_ms, pause_from_ms, pause_to_ms) VALUES ($1, $2, 0, $3, $4) \
+         ON CONFLICT (world_id, npc_id) DO UPDATE SET \
+         shift_ms = CASE WHEN npc_pauses.pause_to_ms > $3 THEN npc_pauses.shift_ms ELSE npc_pauses.shift_ms + (npc_pauses.pause_to_ms - npc_pauses.pause_from_ms) END, \
+         pause_from_ms = CASE WHEN npc_pauses.pause_to_ms > $3 THEN npc_pauses.pause_from_ms ELSE $3 END, \
+         pause_to_ms = $4",
+    )
+    .bind(world_id)
+    .bind(npc_id)
+    .bind(now_ms)
+    .bind(now_ms + KEEP_STANDING_MS)
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+/// The conversation is over: the character walks on from where it stands.
+pub async fn let_walk(
+    executor: impl sqlx::PgExecutor<'_>,
+    world_id: i64,
+    npc_id: &str,
+    now_ms: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE npc_pauses SET pause_to_ms = greatest(pause_from_ms, least(pause_to_ms, $3)) WHERE world_id = $1 AND npc_id = $2",
+    )
+    .bind(world_id)
+    .bind(npc_id)
+    .bind(now_ms)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// Where the character is now (its place for one that stands).
@@ -485,7 +579,10 @@ pub async fn position_now(state: &AppState, npc: &NpcDescriptor) -> NpcDescripto
         return npc.clone();
     }
     match movement::terrain(state).await {
-        Ok(terrain) => walking(&*terrain, npc, movement::unix_now_ms()),
+        Ok(terrain) => {
+            let pauses = pauses(state).await;
+            walking(&*terrain, npc, movement::unix_now_ms(), pauses.get(&npc.id))
+        }
         Err(_) => npc.clone(),
     }
 }
@@ -576,9 +673,14 @@ pub async fn npcs_near(state: &AppState, point: [f64; 3]) -> Vec<NpcDescriptor> 
         None
     };
     let now = movement::unix_now_ms();
+    let pauses = if terrain.is_some() {
+        pauses(state).await
+    } else {
+        HashMap::new()
+    };
     near.into_iter()
         .map(|npc| match &terrain {
-            Some(terrain) => walking(&**terrain, npc, now),
+            Some(terrain) => walking(&**terrain, npc, now, pauses.get(&npc.id)),
             None => npc.clone(),
         })
         .collect()
@@ -679,6 +781,21 @@ fn load_patches(
             },
             None => None,
         };
+        // The mask of cleared ground has a size of its own (a street is a few metres wide).
+        let clear = match &terrain.clear {
+            Some(path) => match read(path) {
+                Ok((pixels, w, h)) => Some(movement::ClearMask {
+                    width: w,
+                    height: h,
+                    pixels: pixels.into_iter().map(|value| value > 0).collect(),
+                }),
+                Err(error) => {
+                    eprintln!("terrain patch {}: {error:#}", anchor.id);
+                    None
+                }
+            },
+            None => None,
+        };
         let (extent, feather) = (terrain.extent_m, terrain.feather_m.unwrap_or(100.0));
         let offset = terrain.offset_m.unwrap_or([0.0, 0.0]);
         let visible = terrain.visible_m.unwrap_or(1200.0);
@@ -692,6 +809,7 @@ fn load_patches(
             height,
             elevation,
             water: water.clone(),
+            clear,
         });
         descriptors.push(TerrainDescriptor {
             place: anchor.id.clone(),

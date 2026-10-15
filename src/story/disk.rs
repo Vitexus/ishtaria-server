@@ -62,6 +62,29 @@ pub struct Manifest {
     pub requires: Vec<Requirement>,
     #[serde(default)]
     pub conflicts: Vec<String>,
+    /// The real planet a world using this disk is generated on. Only one selected
+    /// disk may define it; `ishtaria-worldgen --earth` strips it onto the cube-sphere.
+    #[serde(default)]
+    pub world: Option<World>,
+}
+
+/// The real planet of a datadisk: equirectangular relief and water mask that
+/// replace the procedural noise when a world is generated with the disk.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct World {
+    pub terrain: WorldTerrain,
+}
+
+/// Two P5 PGMs of the same size (`width == 2 * height`, row 0 at +90 degrees):
+/// `heightmap` is 16-bit elevation in metres (0 is sea level, land positive,
+/// bathymetry negative), `water` an 8-bit mask (0 land, 255 water) that decides
+/// the coastline, holds the rivers and may reconstruct historical shorelines.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorldTerrain {
+    pub heightmap: String,
+    pub water: String,
 }
 
 /// The body of the character a datadisk gives its players (a demigod is taller and tougher than a man).
@@ -215,6 +238,9 @@ pub struct Terrain {
     /// An equally sized `.png`: 0 is dry land, other pixels the water surface in decimetres
     /// above the anchor (0x8000 = the anchor).
     pub water: Option<String>,
+    /// A `.png` (any size, 8 or 16 bit greyscale) over the whole rectangle: pixels above zero are
+    /// built or tilled ground (streets, houses, squares, fields) where no natural scenery stands.
+    pub clear: Option<String>,
     /// The size of the rectangle in the client's local x and z frame, centred on `offset_m`.
     pub extent_m: [f64; 2],
     /// The centre of the rectangle from the anchor, in metres along the local x and z axes.
@@ -465,6 +491,8 @@ pub const MAX_MUSIC_BYTES: u64 = 8 << 20;
 pub const MAX_MODEL_BYTES: u64 = 4 << 20;
 /// Largest landscape patch (16-bit `.png`) a datadisk may ship.
 pub const MAX_TERRAIN_BYTES: u64 = 4 << 20;
+/// Largest equirectangular world raster (16-bit `.pgm`) a datadisk may ship.
+pub const MAX_WORLD_TERRAIN_BYTES: u64 = 160 << 20;
 /// Largest spoken line and most spoken lines per language a datadisk may ship.
 pub const MAX_VOICE_BYTES: u64 = 2 << 20;
 pub const MAX_VOICES_PER_LANGUAGE: usize = 4000;
@@ -476,8 +504,70 @@ pub fn media_type(path: &str) -> Option<&'static str> {
         "jpg" => Some("image/jpeg"),
         "ogg" => Some("audio/ogg"),
         "glb" => Some("model/gltf-binary"),
+        "pgm" => Some("image/x-portable-graymap"),
         _ => None,
     }
+}
+
+/// Parses the header of an equirectangular world raster (a binary P5 PGM of
+/// `width == 2 * height`, the `maximum` maxval) and checks that the file holds
+/// the whole raster. Only the header is read: `ishtaria-worldgen --earth`, not
+/// the server, consumes the pixels.
+fn world_pgm_header(path: &Path, maximum: u16) -> Result<(usize, usize)> {
+    let name = path.display();
+    let mut file = fs::File::open(path).with_context(|| format!("cannot read {name}"))?;
+    let mut head = [0u8; 128];
+    let read =
+        std::io::Read::read(&mut file, &mut head).with_context(|| format!("cannot read {name}"))?;
+    let length = fs::metadata(path)?.len();
+    let mut cursor = 0usize;
+    let mut tokens = Vec::with_capacity(4);
+    while tokens.len() < 4 && cursor < read {
+        if head[cursor] == b'#' {
+            while cursor < read && head[cursor] != b'\n' {
+                cursor += 1;
+            }
+            continue;
+        }
+        if (head[cursor] as char).is_ascii_whitespace() {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < read && !(head[cursor] as char).is_ascii_whitespace() && head[cursor] != b'#'
+        {
+            cursor += 1;
+        }
+        tokens.push(String::from_utf8_lossy(&head[start..cursor]).into_owned());
+    }
+    let invalid = |message: &str| anyhow!("{name}: {message}");
+    if tokens.first().map(String::as_str) != Some("P5") {
+        bail!("{}", invalid("expected a binary P5 PGM"));
+    }
+    let (width, height, maxval): (usize, usize, u16) = match (
+        tokens.get(1).and_then(|t| t.parse().ok()),
+        tokens.get(2).and_then(|t| t.parse().ok()),
+        tokens.get(3).and_then(|t| t.parse().ok()),
+    ) {
+        (Some(width), Some(height), Some(maxval)) => (width, height, maxval),
+        _ => bail!("{}", invalid("invalid PGM header")),
+    };
+    if width == 0 || height == 0 || width != 2 * height || maxval != maximum {
+        bail!(
+            "{}",
+            invalid(&format!(
+                "equirectangular map must be width = 2 x height with maxval {maximum}"
+            ))
+        );
+    }
+    let sample = u64::from(maxval > 255) + 1;
+    let offset = u64::try_from(cursor + 1).context("raster offset overflow")?;
+    ensure!(
+        length >= offset + width as u64 * height as u64 * sample,
+        "{}",
+        invalid("raster is truncated")
+    );
+    Ok((width, height))
 }
 
 /// A media path is `media/<dirs>/<name>.<ext>` of lowercase ASCII, with no traversal.
@@ -656,10 +746,17 @@ impl Disk {
         for terrain in places.iter().filter_map(|place| place.terrain.as_ref()) {
             wanted.push(terrain.heightmap.as_str());
             wanted.extend(terrain.water.as_deref());
+            wanted.extend(terrain.clear.as_deref());
         }
         wanted.extend(music.iter().map(|m| m.file.as_str()));
         wanted.extend(manifest.cover.as_deref());
         wanted.extend(manifest.player_model.as_deref());
+        let world_files: Vec<&str> = manifest
+            .world
+            .iter()
+            .flat_map(|w| [w.terrain.heightmap.as_str(), w.terrain.water.as_str()])
+            .collect();
+        wanted.extend(world_files.iter().copied());
         // Spoken lines: a file `media/voice/<language>/<text key>.ogg` for a key a dialogue node shows.
         let spoken: std::collections::BTreeSet<&str> = dialogues
             .iter()
@@ -692,7 +789,9 @@ impl Disk {
         for relative in wanted {
             ensure!(is_media_path(relative), "invalid media path {relative}");
             let path = dir.join(relative);
-            let limit = if relative.starts_with("media/voice/") {
+            let limit = if world_files.contains(&relative) {
+                MAX_WORLD_TERRAIN_BYTES
+            } else if relative.starts_with("media/voice/") {
                 MAX_VOICE_BYTES
             } else if relative.starts_with("media/terrain/") {
                 MAX_TERRAIN_BYTES
@@ -736,6 +835,30 @@ impl Disk {
 
     fn check(&self, allow_draft: bool) -> Result<()> {
         let id = &self.manifest.id;
+        if let Some(world) = &self.manifest.world {
+            let heightmap = world_pgm_header(
+                self.media
+                    .get(&world.terrain.heightmap)
+                    .map(|(path, _)| path.as_path())
+                    .context("the world heightmap is missing from the media list")?,
+                65535,
+            )
+            .with_context(|| format!("{id}: invalid world heightmap"))?;
+            let water = world_pgm_header(
+                self.media
+                    .get(&world.terrain.water)
+                    .map(|(path, _)| path.as_path())
+                    .context("the world water mask is missing from the media list")?,
+                255,
+            )
+            .with_context(|| format!("{id}: invalid world water mask"))?;
+            ensure!(
+                heightmap == water,
+                "{id}: the world water mask must match the heightmap size {}x{}",
+                heightmap.0,
+                heightmap.1
+            );
+        }
         let places: HashSet<&str> = unique(self.places.iter().map(|p| p.id.as_str()), "place")?;
         unique(self.npcs.iter().map(|n| n.id.as_str()), "npc")?;
         let dialogues: HashSet<&str> =
@@ -854,7 +977,10 @@ impl Disk {
                 );
             }
             if let Some(terrain) = &place.terrain {
-                for path in std::iter::once(&terrain.heightmap).chain(terrain.water.iter()) {
+                for path in std::iter::once(&terrain.heightmap)
+                    .chain(terrain.water.iter())
+                    .chain(terrain.clear.iter())
+                {
                     ensure!(
                         path.starts_with("media/terrain/") && path.ends_with(".png"),
                         "{id}: terrain patch {path} must be a .png below media/terrain/"

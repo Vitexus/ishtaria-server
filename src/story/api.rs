@@ -218,6 +218,42 @@ async fn near_npc<'a>(
     Ok(npc)
 }
 
+/// A walking character stands still while it talks to a player (migration 0040); one that stands anyway is left alone.
+async fn stand_still(
+    state: &AppState,
+    tx: &mut Tx<'_>,
+    npc: &world::NpcDescriptor,
+) -> Result<(), Error> {
+    if npc.movement.is_some() {
+        world::keep_standing(
+            &mut **tx,
+            state.world_id,
+            &npc.id,
+            crate::movement::unix_now_ms(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The conversation is over: the character walks on from where it stood.
+async fn walk_on(
+    state: &AppState,
+    tx: &mut Tx<'_>,
+    npc: &world::NpcDescriptor,
+) -> Result<(), Error> {
+    if npc.movement.is_some() {
+        world::let_walk(
+            &mut **tx,
+            state.world_id,
+            &npc.id,
+            crate::movement::unix_now_ms(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// The language of a request: two lowercase ASCII letters, anything else is ignored.
 fn request_language(lang: &Option<String>) -> Option<&str> {
     lang.as_deref()
@@ -297,6 +333,7 @@ async fn start(
         .bind(&shown.node)
         .fetch_one(&mut *tx)
         .await?;
+    stand_still(&state, &mut tx, npc).await?;
     tx.commit().await?;
     let player = players::profile(&state, player_id).await?;
     Ok(Json(reply(
@@ -343,6 +380,7 @@ async fn choose(
                 .bind(player_id)
                 .execute(&mut *tx)
                 .await?;
+            walk_on(&state, &mut tx, npc).await?;
             (None, seq + 1)
         }
         Choose::Next(shown) => {
@@ -352,6 +390,7 @@ async fn choose(
                 .bind(&shown.node)
                 .execute(&mut *tx)
                 .await?;
+            stand_still(&state, &mut tx, npc).await?;
             (Some(shown), seq + 1)
         }
     };
@@ -370,10 +409,20 @@ async fn choose(
 /// Closes the conversation without choosing (the player walked away or pressed escape).
 async fn leave(State(state): State<AppState>, headers: HeaderMap) -> Result<StatusCode, Error> {
     let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
-    sqlx::query("DELETE FROM dialogue_sessions WHERE player_id = $1")
-        .bind(player_id)
-        .execute(&state.pool)
+    let left: Option<String> =
+        sqlx::query_scalar("DELETE FROM dialogue_sessions WHERE player_id = $1 RETURNING npc_id")
+            .bind(player_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    if let Some(npc_id) = left {
+        world::let_walk(
+            &state.pool,
+            state.world_id,
+            &npc_id,
+            crate::movement::unix_now_ms(),
+        )
         .await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

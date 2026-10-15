@@ -375,3 +375,53 @@ async fn dialogue_is_server_authoritative_replay_safe_and_range_checked(pool: Pg
     world::reset_cache().await;
     let _ = fs::remove_dir_all(dir);
 }
+
+/// A conversation keeps a walking character standing (migration 0040): the stop is renewed by every answer, ended by leaving, and
+/// the time it lasted is added to what the character has stood when the next conversation begins.
+#[sqlx::test]
+async fn a_conversation_keeps_a_character_standing_and_the_time_it_stood_adds_up(pool: PgPool) {
+    let world_id = initialize_spawn_world(&pool).await;
+    let keep = world::KEEP_STANDING_MS;
+    let stop = || async {
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT shift_ms, pause_from_ms, pause_to_ms FROM npc_pauses WHERE world_id = $1 AND npc_id = 'play:walker'",
+        )
+        .bind(world_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    world::keep_standing(&pool, world_id, "play:walker", 1_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        stop().await,
+        (0, 1_000, 1_000 + keep),
+        "the first answer begins a stop"
+    );
+    world::keep_standing(&pool, world_id, "play:walker", 61_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        stop().await,
+        (0, 1_000, 61_000 + keep),
+        "the next answer renews the same stop"
+    );
+    world::let_walk(&pool, world_id, "play:walker", 100_000)
+        .await
+        .unwrap();
+    assert_eq!(stop().await, (0, 1_000, 100_000), "leaving ends it at once");
+    world::keep_standing(&pool, world_id, "play:walker", 200_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        stop().await,
+        (99_000, 200_000, 200_000 + keep),
+        "a new conversation adds the stop that is over to the time stood"
+    );
+    world::let_walk(&pool, world_id, "play:walker", 150_000)
+        .await
+        .unwrap();
+    let (_, from, to) = stop().await;
+    assert!(to >= from, "a stop never ends before it began");
+}

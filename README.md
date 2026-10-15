@@ -332,7 +332,7 @@ sudo apt install ishtaria-server ishtaria-content
 
 ```sh
 sudoedit /etc/ishtaria/server.toml        # server_name is permanent – choose carefully
-sudo ishtaria-server-init                 # generate a planet with ishtaria-worldgen and import it once
+sudo ishtaria-server-init                 # generate a planet (or a datadisk's real Earth) and import it once
 sudo systemctl enable --now ishtaria-server
 ```
 
@@ -494,7 +494,13 @@ places, characters, dialogue trees and quests to a world; several disks can be c
 `ishtaria-protocol/schemas/datadisk.schema.json`. Disks are chosen when the world is generated: the
 `ishtaria-admin` map dialog shows a checkbox per installed disk, or run
 `ishtaria-server-init <seed> <size> <disk-id> ...`. `ishtaria-server --list-datadisks` lists installed disks and
-`--check-datadisks a,b` checks that they can be combined. Migration `0026_story.sql` stores the selected disks
+`--check-datadisks a,b` checks that they can be combined. A disk may also define the world's real
+planet (`world.terrain`: equirectangular height and water rasters, at most one disk per world,
+ADR 0017): `ishtaria-server-init` and `ishtaria-admin` then render the world heightmap from them
+via `ishtaria-worldgen --earth` instead of the procedural noise — `ishtaria-server
+--print-world-terrain <ids>` prints the two rasters for that. As with the seed, the server cannot
+verify that a manually imported strip really comes from the disk's rasters; generate with the
+named tools. Migration `0026_story.sql` stores the selected disks
 (`world_datadisks`, content hash pinned on first load), the placed sites (`story_anchors`), quest stages, flags and
 once-only rewards. Endpoints: `POST /story/dialogue/start|choose`, `DELETE /story/dialogue`, `GET /story/quests`,
 `GET /story/strings` (every language; the server never learns the client's language) and

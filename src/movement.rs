@@ -173,6 +173,17 @@ pub struct TerrainPatch {
     /// The water mask (0 = dry land in the file, `i16::MIN` after the offset): other pixels the
     /// surface in decimetres above the anchor, row-major like `elevation`.
     pub water: Option<Vec<i16>>,
+    /// Where a datadisk has built or tilled the ground: no natural scenery stands on these pixels
+    /// (streets, houses, squares, fields). Its own size, nearest pixel.
+    pub clear: Option<ClearMask>,
+}
+
+/// A mask of cleared ground over the rectangle of a landscape patch (a pixel above zero is cleared).
+#[derive(Clone, Debug)]
+pub struct ClearMask {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<bool>,
 }
 
 /// Landscape patches of the datadisk places, for the key `<seed>:<heightmap hash>`.
@@ -224,6 +235,21 @@ impl TerrainPatch {
         (upper + (lower - upper) * (vertical - row as f64)) * unit
     }
 
+    /// Whether the clearing mask of the patch covers the local patch metres.
+    fn cleared(&self, x: f64, z: f64) -> bool {
+        let Some(mask) = self.clear.as_ref() else {
+            return false;
+        };
+        let column = (((x + self.extent_m[0] / 2.0) / self.extent_m[0] * mask.width as f64)
+            .clamp(0.0, mask.width as f64 - 1.0)) as usize;
+        let row = (((z + self.extent_m[1] / 2.0) / self.extent_m[1] * mask.height as f64)
+            .clamp(0.0, mask.height as f64 - 1.0)) as usize;
+        mask.pixels
+            .get(row * mask.width + column)
+            .copied()
+            .unwrap_or(false)
+    }
+
     /// The water surface in metres above the anchor at local patch metres, or nothing on dry
     /// land. Nearest pixel, so the mask keeps sharp banks instead of bleeding across them.
     fn surface(&self, x: f64, z: f64) -> Option<f64> {
@@ -254,6 +280,18 @@ fn patch_water(direction: [f64; 3]) -> Option<f64> {
         let (x, z, _) = patch.project(direction)?;
         let surface = patch.surface(x, z)?;
         Some(patch.anchor_height_m + surface)
+    })
+}
+
+/// Whether the clearing mask of a patch (streets, houses, fields of a datadisk) covers a direction.
+fn patch_cleared(direction: [f64; 3]) -> bool {
+    let Ok(stored) = PATCHES.read() else {
+        return false;
+    };
+    stored.1.iter().any(|patch| {
+        patch
+            .project(direction)
+            .is_some_and(|(x, z, _)| patch.cleared(x, z))
     })
 }
 
@@ -1374,6 +1412,10 @@ impl WalkingTerrain {
         if fauna && (biome < 3 || patch_water(point).is_some()) {
             return self.place_aquatic(id, point, index, biome, &sample);
         }
+        // Streets, houses and fields of a datadisk's city carry no wild trees, rocks, flowers or animals.
+        if patch_cleared(point) {
+            return None;
+        }
         let height = self.surface(point)?;
         if sample(2)
             > if fauna {
@@ -1760,6 +1802,36 @@ impl WalkingTerrain {
     #[cfg(test)]
     fn step(&self, point: [f64; 3], intent: [f64; 3], seconds: f64) -> Option<[f64; 3]> {
         self.step_at_speed(point, intent, seconds, WALK_SPEED)
+    }
+
+    /// Whether a character walking the straight line between two directions would meet a wall of a
+    /// building, a fence, a tree or a rock on the way (a step of 0.7 m is climbed, as by players).
+    pub(super) fn walk_blocked(&self, from: [f64; 3], to: [f64; 3]) -> bool {
+        let (from, to) = (unit(from), unit(to));
+        let ground =
+            |direction: [f64; 3]| direction.map(|v| v * (RADIUS + self.height(direction).max(0.0)));
+        let middle = unit(std::array::from_fn(|axis| (from[axis] + to[axis]) / 2.0));
+        let objects = self.walking_objects(ground(middle), 4);
+        let metres = RADIUS * dot(from, to).clamp(-1.0, 1.0).acos();
+        let steps = (metres / 2.0).ceil().max(1.0) as usize;
+        let mut previous = ground(from);
+        for index in 1..=steps {
+            let fraction = index as f64 / steps as f64;
+            let next = ground(unit(std::array::from_fn(|axis| {
+                from[axis] + (to[axis] - from[axis]) * fraction
+            })));
+            let up = unit(previous);
+            let lifted: [f64; 3] =
+                std::array::from_fn(|axis| previous[axis] + up[axis] * STAIR_STEP_HEIGHT);
+            let motion: [f64; 3] = std::array::from_fn(|axis| next[axis] - previous[axis]);
+            if !clear_path(previous, next, &objects)
+                || capsule_hit(lifted, motion, &objects).is_some()
+            {
+                return true;
+            }
+            previous = next;
+        }
+        false
     }
 
     fn step_at_speed(
@@ -3283,8 +3355,19 @@ mod tests {
                 height: 32,
                 elevation: vec![50; 32 * 32],
                 water: Some(vec![10; 32 * 32]),
+                clear: Some(ClearMask {
+                    width: 4,
+                    height: 4,
+                    // the middle two columns of the patch are cleared
+                    pixels: (0..16).map(|index| matches!(index % 4, 1 | 2)).collect(),
+                }),
             }],
         );
+        // A cleared strip is known to the scenery placement, ground outside it and outside the patch is not.
+        assert!(patch_cleared(at(100.0, 0.0)));
+        assert!(patch_cleared(at(-100.0, 300.0)));
+        assert!(!patch_cleared(at(400.0, 0.0)));
+        assert!(!patch_cleared(at(900.0, 0.0)));
         let plateau = anchor_height + 5.0;
         assert!((terrain.height(core) - plateau).abs() < 1.0e-9);
         let feathered = terrain.height(margin);

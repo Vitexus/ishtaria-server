@@ -975,3 +975,91 @@ fn a_structure_is_shipped_validated_and_excludes_generated_scenery() {
         "oversized model"
     );
 }
+
+#[test]
+fn a_disk_may_define_the_worlds_planet() {
+    let a = scratch("world-a");
+    base(&a, "worlda", "1.0.0", "");
+    write(
+        &a,
+        "datadisk.yaml",
+        "id: worlda\nversion: 1.0.0\nname: Test\nrequires_ruleset: \"1\"\nlicense: CC0-1.0\nattribution: Test\nlanguages: [en, cs]\nworld:\n  terrain: {heightmap: media/world/height.pgm, water: media/world/water.pgm}\n",
+    );
+    write_world_rasters(&a, (16, 8), (16, 8), true);
+    let story = Story::load(std::slice::from_ref(&a), false).unwrap();
+    let world = story.world.expect("the disk defines the planet");
+    assert_eq!(world.disk, "worlda");
+    assert_eq!(world.terrain.heightmap, "media/world/height.pgm");
+    assert_eq!(world.terrain.water, "media/world/water.pgm");
+    assert!(
+        story.media.contains_key("worlda/media/world/height.pgm"),
+        "the rasters are part of the disk's media"
+    );
+}
+
+#[test]
+fn two_disks_cannot_both_define_the_planet() {
+    let a = scratch("world-b");
+    let b = scratch("world-c");
+    for (root, id) in [(&a, "worldb"), (&b, "worldc")] {
+        base(root, id, "1.0.0", "");
+        write(
+            root,
+            "datadisk.yaml",
+            &format!(
+                "id: {id}\nversion: 1.0.0\nname: Test\nrequires_ruleset: \"1\"\nlicense: CC0-1.0\nattribution: Test\nlanguages: [en, cs]\nworld:\n  terrain: {{heightmap: media/world/height.pgm, water: media/world/water.pgm}}\n"
+            ),
+        );
+        write_world_rasters(root, (16, 8), (16, 8), true);
+    }
+    let error = Story::load(&[a, b], false).unwrap_err();
+    assert!(error.to_string().contains("world's planet"), "{error}");
+}
+
+#[test]
+fn world_rasters_must_be_matching_equirectangular_pgms() {
+    for (case, height, water, fine) in [
+        ("mismatched sizes", (16, 8), (8, 4), false),
+        ("not twice as wide", (8, 8), (8, 8), false),
+        ("wrong heightmap maxval", (16, 8), (16, 8), false),
+    ] {
+        let a = scratch("world-bad");
+        base(&a, "worldbad", "1.0.0", "");
+        write(
+            &a,
+            "datadisk.yaml",
+            "id: worldbad\nversion: 1.0.0\nname: Test\nrequires_ruleset: \"1\"\nlicense: CC0-1.0\nattribution: Test\nlanguages: [en, cs]\nworld:\n  terrain: {heightmap: media/world/height.pgm, water: media/world/water.pgm}\n",
+        );
+        write_world_rasters(&a, height, water, fine);
+        assert!(
+            Story::load(std::slice::from_ref(&a), false).is_err(),
+            "{case} must be rejected"
+        );
+    }
+}
+
+/// Writes the equirectangular world rasters a manifest names; `fine` picks a valid pair.
+fn write_world_rasters(root: &Path, height: (usize, usize), water: (usize, usize), fine: bool) {
+    let raster = |path: &str, size: (usize, usize), maxval: u16| {
+        let (width, rows) = size;
+        let sample = if maxval > 255 { 2 } else { 1 };
+        let mut bytes = format!("P5\n{width} {rows}\n{maxval}\n").into_bytes();
+        for _ in 0..width * rows {
+            let value = maxval;
+            if sample == 2 {
+                bytes.extend_from_slice(&value.to_be_bytes());
+            } else {
+                bytes.push(value as u8);
+            }
+        }
+        let file = root.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, bytes).unwrap();
+    };
+    raster(
+        "media/world/height.pgm",
+        height,
+        if fine { 65535 } else { 255 },
+    );
+    raster("media/world/water.pgm", water, 255);
+}

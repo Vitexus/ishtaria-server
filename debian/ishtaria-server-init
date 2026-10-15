@@ -8,17 +8,39 @@ SEED="${1:-$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')}"
 SIZE="${2:-256}"
 if [ $# -ge 2 ]; then shift 2; else shift $#; fi
 DISKS=""
-for disk in "$@"; do DISKS="$DISKS --datadisk $disk"; done
+IDS=""
+for disk in "$@"; do
+    DISKS="$DISKS --datadisk $disk"
+    IDS="${IDS:+$IDS,}$disk"
+done
 CONFIG="${ISHTARIA_CONFIG:-/etc/ishtaria/server.toml}"
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 command -v ishtaria-worldgen >/dev/null || { echo "ishtaria-worldgen is not installed" >&2; exit 1; }
-ishtaria-worldgen "$SEED" "$SIZE" > "$TMP"
+# A datadisk may define the real planet of the world (its own continent outlines and
+# heights); ishtaria-server prints the two rasters worldgen renders the map from.
+EARTH_ARGS=""
+if [ -n "$IDS" ]; then
+    if WORLD="$(ishtaria-server --print-world-terrain "$IDS" 2>/dev/null)"; then
+        HEIGHT="$(printf '%s' "$WORLD" | cut -f1)"
+        WATER="$(printf '%s' "$WORLD" | cut -f2)"
+        EARTH_ARGS="--earth $HEIGHT --water $WATER"
+    else
+        # Procedural worlds only: check the combination still holds before generating.
+        ishtaria-server --check-datadisks "$IDS" >/dev/null
+    fi
+fi
+if [ -n "$EARTH_ARGS" ]; then
+    # shellcheck disable=SC2086
+    ishtaria-worldgen $EARTH_ARGS "$SIZE" > "$TMP"
+else
+    ishtaria-worldgen "$SEED" "$SIZE" > "$TMP"
+fi
 chmod 0644 "$TMP"
 if [ "$(id -u)" = 0 ]; then
     runuser -u ishtaria -- ishtaria-server "$CONFIG" --import "$TMP" --seed "$SEED" --import-only $DISKS
 else
     ishtaria-server "$CONFIG" --import "$TMP" --seed "$SEED" --import-only $DISKS
 fi
-echo "World generated with seed $SEED, face size $SIZE."
+echo "World generated${EARTH_ARGS:+ from the datadisk's real planet} with seed $SEED, face size $SIZE."
 echo "Start the server: systemctl restart ishtaria-server"

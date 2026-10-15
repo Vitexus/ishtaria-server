@@ -8,6 +8,8 @@
 //! * `wander`: the character walks to a spot near its home (on land, within `radius_m`), stands for `pause_s`,
 //!   walks on to the next spot, and so on. A new spot every time slot, the slot being long enough for the
 //!   longest walk and the pause.
+//! * Walks that would run into a wall, fence, tree or rock are not made (`Ground::blocked`): a wanderer goes by its home,
+//!   a patrol by its place.
 //! * `patrol`: the character walks the loop of `waypoints` (metres east and south of its place, as for
 //!   buildings), standing `pause_s` at each; the start of the loop depends on the id so that several
 //!   characters on one beat do not walk in step.
@@ -65,7 +67,27 @@ fn leg(
         route.push(entry(ground, time, direction));
     }
     // Standing at the end until the next walk starts.
-    route.push(entry(ground, end_ms, to));
+    if route.last().map_or(true, |last| last[0] < end_ms as f64) {
+        route.push(entry(ground, end_ms, to));
+    }
+}
+
+/// Appends the walk from `from` to `to`; when a wall, fence or tree is in the way it goes by `via` (a spot known to
+/// be open, the home or the place of the character) instead, the two walks sharing the time up to `end_ms`.
+fn leg_around(
+    route: &mut Vec<[f64; 4]>,
+    ground: &dyn Ground,
+    [from, via, to]: [[f64; 3]; 3],
+    (start_ms, end_ms): (i64, i64),
+    speed: f64,
+) {
+    if !ground.blocked(from, to) {
+        return leg(route, ground, from, to, start_ms, end_ms, speed);
+    }
+    let first_ms = ((arc_m(from, via) / speed) * 1000.0).round() as i64;
+    let middle = (start_ms + first_ms).min(end_ms);
+    leg(route, ground, from, via, start_ms, middle, speed);
+    leg(route, ground, via, to, middle, end_ms, speed);
 }
 
 /// The spot a wandering character heads for in `slot`: on land near its home, else home itself.
@@ -76,7 +98,7 @@ fn waypoint(ground: &dyn Ground, id: &str, home: [f64; 3], slot: i64, radius: f6
         word(&hash, 1).sqrt() * radius,
         word(&hash, 0) * std::f64::consts::TAU,
     );
-    if ground.land_site(direction).is_some() {
+    if ground.land_site(direction).is_some() && !ground.blocked(home, direction) {
         direction
     } else {
         home
@@ -101,13 +123,11 @@ fn wander(
     loop {
         let from = waypoint(ground, id, home, slot, movement.radius_m);
         let to = waypoint(ground, id, home, slot + 1, movement.radius_m);
-        leg(
+        leg_around(
             &mut route,
             ground,
-            from,
-            to,
-            slot * slot_ms,
-            (slot + 1) * slot_ms,
+            [from, home, to],
+            (slot * slot_ms, (slot + 1) * slot_ms),
             movement.speed_m_s,
         );
         slot += 1;
@@ -125,6 +145,7 @@ fn patrol(
     ground: &dyn Ground,
     id: &str,
     points: &[[f64; 3]],
+    site: [f64; 3],
     movement: &Movement,
     now_ms: i64,
 ) -> Vec<[f64; 4]> {
@@ -132,7 +153,13 @@ fn patrol(
     let leg_ms: Vec<i64> = (0..points.len())
         .map(|index| {
             let next = points[(index + 1) % points.len()];
-            ((arc_m(points[index], next) / movement.speed_m_s) * 1000.0).round() as i64 + pause_ms
+            // A leg that a wall blocks goes by the place of the character.
+            let metres = if ground.blocked(points[index], next) {
+                arc_m(points[index], site) + arc_m(site, next)
+            } else {
+                arc_m(points[index], next)
+            };
+            ((metres / movement.speed_m_s) * 1000.0).round() as i64 + pause_ms
         })
         .collect();
     let cycle: i64 = leg_ms.iter().sum::<i64>().max(1);
@@ -149,13 +176,11 @@ fn patrol(
     let mut route = Vec::new();
     loop {
         let next = (index + 1) % points.len();
-        leg(
+        leg_around(
             &mut route,
             ground,
-            points[index],
-            points[next],
-            start,
-            start + leg_ms[index],
+            [points[index], site, points[next]],
+            (start, start + leg_ms[index]),
             movement.speed_m_s,
         );
         start += leg_ms[index];
@@ -200,9 +225,36 @@ pub fn route(
             if points.len() < 2 {
                 Vec::new()
             } else {
-                patrol(ground, id, &points, movement, now_ms)
+                patrol(ground, id, &points, site, movement, now_ms)
             }
         }
+    }
+}
+
+/// The stops of a character during conversations (migration 0040): the time of its walk stands still while it talks to a player.
+///
+/// `shift_ms` is how long it stood in earlier conversations; the current stop lasts from `from_ms` to `to_ms` (unix milliseconds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pause {
+    pub shift_ms: i64,
+    pub from_ms: i64,
+    pub to_ms: i64,
+}
+
+impl Pause {
+    /// The time of the character's walk at `now_ms`, and whether it stands still now. The walk's time never runs backwards and is
+    /// continuous: it is `now_ms` less everything the character has stood, and constant while it stands.
+    pub fn clock(&self, now_ms: i64) -> (i64, bool) {
+        let stood = (now_ms.min(self.to_ms) - self.from_ms).max(0);
+        (
+            now_ms - self.shift_ms - stood,
+            now_ms >= self.from_ms && now_ms < self.to_ms,
+        )
+    }
+
+    /// What the walk's times are to be shifted by to get unix times: everything stood until now (a stop that has not begun counts for nothing).
+    pub fn offset_ms(&self, now_ms: i64) -> i64 {
+        self.shift_ms + (now_ms.min(self.to_ms) - self.from_ms).max(0)
     }
 }
 
@@ -218,6 +270,28 @@ pub fn position_at(route: &[[f64; 4]], home: [f64; 3], now_ms: i64) -> [f64; 3] 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_conversation_stops_the_clock_and_the_walk_goes_on_from_there() {
+        let pause = Pause {
+            shift_ms: 5_000,
+            from_ms: 100_000,
+            to_ms: 160_000,
+        };
+        // before the stop only the earlier stops count
+        assert_eq!(pause.clock(90_000), (85_000, false));
+        // during the stop the walk's time stands still
+        assert_eq!(pause.clock(100_000), (95_000, true));
+        assert_eq!(pause.clock(130_000), (95_000, true));
+        assert_eq!(pause.clock(159_999), (95_000, true));
+        // after it the walk goes on from the same time, and the stop is part of the shift
+        assert_eq!(pause.clock(160_000), (95_000, false));
+        assert_eq!(pause.clock(200_000), (135_000, false));
+        assert_eq!(pause.offset_ms(200_000), 65_000);
+        // the walk's time never runs backwards
+        let times: Vec<i64> = (0..300).map(|i| pause.clock(i * 1_000).0).collect();
+        assert!(times.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
     use crate::story::placement::Ground;
 
     /// A flat world of land.
@@ -233,6 +307,67 @@ mod tests {
         fn is_sea(&self, _direction: [f64; 3]) -> bool {
             false
         }
+    }
+
+    /// A flat world of land in which every walk of any length runs into a wall.
+    struct Boxed;
+
+    impl Ground for Boxed {
+        fn land_site(&self, direction: [f64; 3]) -> Option<(u8, f64)> {
+            Flat.land_site(direction)
+        }
+        fn height(&self, direction: [f64; 3]) -> f64 {
+            Flat.height(direction)
+        }
+        fn is_sea(&self, _direction: [f64; 3]) -> bool {
+            false
+        }
+        fn blocked(&self, _from: [f64; 3], _to: [f64; 3]) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn characters_do_not_walk_through_walls() {
+        let home = unit([1.0, 0.2, 0.1]);
+        let now = 1_800_000_123_456;
+        let route = wander(&Boxed, "gilgamesh:potter", home, &wanderer(), now);
+        assert!(!route.is_empty());
+        assert!(
+            route
+                .iter()
+                .all(|waypoint| metres_from(home, [waypoint[1], waypoint[2], waypoint[3]]) < 0.1),
+            "a wanderer whose every walk is blocked stays at home"
+        );
+        assert!(
+            route.windows(2).all(|pair| pair[0][0] <= pair[1][0]),
+            "time never runs back"
+        );
+        // A patrol whose legs are blocked goes by its place and never through the wall between its waypoints.
+        let site = unit([1.0, 0.2, 0.1]);
+        let points = [
+            unit([1.0, 0.2, 0.1 + 0.00001]),
+            unit([1.0, 0.2, 0.1 - 0.00001]),
+        ];
+        let patrol_movement = Movement {
+            kind: MovementKind::Patrol,
+            radius_m: 0.0,
+            speed_m_s: 1.0,
+            pause_s: 2.0,
+            waypoints: Vec::new(),
+        };
+        let walked = patrol(
+            &Boxed,
+            "gilgamesh:royal_guard",
+            &points,
+            site,
+            &patrol_movement,
+            now,
+        );
+        assert!(walked.windows(2).all(|pair| pair[0][0] <= pair[1][0]));
+        assert!(walked
+            .iter()
+            .any(|waypoint| metres_from(site, [waypoint[1], waypoint[2], waypoint[3]]) < 0.2));
     }
 
     fn wanderer() -> Movement {

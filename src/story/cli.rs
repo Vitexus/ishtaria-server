@@ -1,7 +1,7 @@
 //! Command-line helpers used by `ishtaria-admin` and `ishtaria-server-init`.
 
 use super::{disk::Disk, world::disk_dir, Story};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use std::fs;
 
@@ -23,6 +23,29 @@ pub fn list() -> Result<()> {
     for (id, version, name) in found {
         println!("{id}\t{version}\t{}", name.replace(['\t', '\n'], " "));
     }
+    Ok(())
+}
+
+/// Prints the world terrain the selected disks define: the equirectangular heightmap
+/// and water mask, TAB separated. `ishtaria-server-init` and `ishtaria-admin` pass
+/// them to `ishtaria-worldgen --earth`. Fails when the disks do not combine or none
+/// of them defines the world's planet.
+pub fn world_terrain(ids: &[String]) -> Result<()> {
+    let story = check(ids)?;
+    let world = story
+        .world
+        .as_ref()
+        .context("none of the datadisks defines the world's planet")?;
+    let file = |relative: &str| {
+        story
+            .media
+            .get(&format!("{}/{}", world.disk, relative))
+            .map(|(path, _)| path.clone())
+            .with_context(|| format!("world raster {relative} is missing"))
+    };
+    let heightmap = file(&world.terrain.heightmap)?;
+    let water = file(&world.terrain.water)?;
+    println!("{}\t{}", heightmap.display(), water.display());
     Ok(())
 }
 
