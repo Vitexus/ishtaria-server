@@ -4,7 +4,7 @@
 //! disks always give the same sites. Results are persisted by the caller: once a place has
 //! a site it never moves.
 
-use super::{disk::BIOMES, Anchor, Story};
+use super::{disk::{BIOMES, Requires}, Anchor, Story};
 use crate::movement::{cross, direction_at, dot, unit, WalkingTerrain, RADIUS};
 use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
@@ -260,6 +260,102 @@ pub fn place_anchors(
     Ok(fresh)
 }
 
+/// What the `requires` of a place say about a site the story fixes anyway (a historical pin or a
+/// surveyed point): advice for the author, logged for the operator, never a constraint to move the
+/// place away from where history or the survey put it.
+fn requires_notes(requires: &Requires, ground: &dyn Ground, direction: [f64; 3]) -> Vec<String> {
+    let allowed: Vec<u8> = requires
+        .biome
+        .iter()
+        .filter_map(|name| {
+            BIOMES
+                .iter()
+                .find(|(known, _)| known == name)
+                .map(|(_, number)| *number)
+        })
+        .collect();
+    match ground.land_site(direction) {
+        None => vec!["the site is under water or sea".to_owned()],
+        Some((biome, height)) => {
+            let mut reasons = Vec::new();
+            if !allowed.is_empty() && !allowed.contains(&biome) {
+                reasons.push(format!("its biome is {}", BIOMES[biome as usize].0));
+            }
+            if requires.height_m.as_ref().is_some_and(|range| {
+                range.min.is_some_and(|min| height < min) || range.max.is_some_and(|max| height > max)
+            }) {
+                reasons.push(format!("its height is {height:.0} m"));
+            }
+            reasons
+        }
+    }
+}
+
+/// A place pinned to its historical site on the disk's real planet stands exactly there: history
+/// has already decided, so the `requires` of the place are only advice for its author. The
+/// ground around the site is the disk's business (a landscape patch of the place carries the
+/// real relief), so violations of `requires` are logged, not searched away.
+fn historical_site(anchor: &Anchor, ground: &dyn Ground) -> Option<Placed> {
+    let geo = anchor.place.geo.as_ref()?;
+    let direction = geo.direction();
+    let height_m = ground.height(direction);
+    let reasons = requires_notes(&anchor.place.requires, ground, direction);
+    if !reasons.is_empty() {
+        eprintln!(
+            "place {} stands at its historical site ({} N, {} E) although {}",
+            anchor.id,
+            geo.latitude_deg,
+            geo.longitude_deg,
+            reasons.join(" and ")
+        );
+    }
+    Some(Placed {
+        id: anchor.id.clone(),
+        direction,
+        height_m,
+    })
+}
+
+/// A place located with a zero tolerance stands exactly at its surveyed point: the survey
+/// decided, so its `requires` are advice for the author, logged like a historical pin's.
+fn surveyed_site(
+    anchor: &Anchor,
+    ground: &dyn Ground,
+    placed: &HashMap<String, Placed>,
+) -> Result<Option<Placed>> {
+    let Some(locate) = &anchor.place.locate else {
+        return Ok(None);
+    };
+    if locate.tolerance() != 0.0 {
+        return Ok(None);
+    }
+    let from = placed.get(&locate.from).ok_or_else(|| {
+        anyhow::anyhow!(
+            "place {} is located from {} before it stands",
+            anchor.id,
+            locate.from
+        )
+    })?;
+    let direction = offset_local(from.direction, locate.distance_m, locate.bearing_deg);
+    let height_m = ground.height(direction);
+    let reasons = requires_notes(&anchor.place.requires, ground, direction);
+    if !reasons.is_empty() {
+        eprintln!(
+            "place {} stands at its surveyed point ({} m at bearing {} from {}) although {}",
+            anchor.id,
+            locate.distance_m,
+            locate.bearing_deg,
+            locate.from,
+            reasons.join(" and ")
+        );
+    }
+    Ok(Some(Placed {
+        id: anchor.id.clone(),
+        direction,
+        height_m,
+    }))
+}
+
 /// A place pinned to a spot of its parent's walled town (`at`) stands exactly there.
 fn pinned_site(
     story: &Story,
@@ -300,6 +396,12 @@ fn find_site(
     seed: &str,
     placed: &HashMap<String, Placed>,
 ) -> Result<Placed> {
+    if let Some(site) = historical_site(anchor, ground) {
+        return Ok(site);
+    }
+    if let Some(site) = surveyed_site(anchor, ground, placed)? {
+        return Ok(site);
+    }
     if let Some(site) = pinned_site(story, anchor, ground, placed)? {
         return Ok(site);
     }

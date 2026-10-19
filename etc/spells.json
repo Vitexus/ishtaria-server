@@ -7,6 +7,8 @@
     {"id": "refresh", "name": "Refresh", "scroll": "scroll_refresh", "mana": 15, "cooldown_ms": 5000, "min_level": 1, "effect": {"kind": "refresh", "stamina": 40}},
     {"id": "firebolt", "name": "Firebolt", "scroll": "scroll_firebolt", "mana": 20, "cooldown_ms": 3000, "min_level": 2, "effect": {"kind": "bolt", "points": 3, "range_m": 14.0}},
     {"id": "heal", "name": "Healing hands", "scroll": "scroll_heal", "mana": 25, "cooldown_ms": 8000, "min_level": 3, "effect": {"kind": "heal", "health": 30}},
-    {"id": "ward", "name": "Ward", "scroll": "scroll_ward", "mana": 30, "cooldown_ms": 20000, "min_level": 4, "effect": {"kind": "ward", "seconds": 60}}
+    {"id": "ward", "name": "Ward", "scroll": "scroll_ward", "mana": 30, "cooldown_ms": 20000, "min_level": 4, "effect": {"kind": "ward", "seconds": 60}},
+    {"id": "day", "name": "Daybreak", "scroll": "scroll_day", "mana": 40, "cooldown_ms": 60000, "min_level": 5, "effect": {"kind": "day"}},
+    {"id": "night", "name": "Nightfall", "scroll": "scroll_night", "mana": 40, "cooldown_ms": 60000, "min_level": 6, "effect": {"kind": "night"}}
   ]
 }

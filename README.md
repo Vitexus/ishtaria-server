@@ -13,7 +13,7 @@ createdb ishtaria
 cargo run -- etc/server.toml --import ../ishtaria-worldgen/examples/planet-seed42-256.pgm --seed 42
 ```
 
-The bundled configuration uses the local PostgreSQL Unix socket with peer authentication. For another database, set `database_url` in the configuration or override it with `DATABASE_URL`. Do not commit passwords. Under systemd, provision a PostgreSQL role and database for the `ishtaria` service user.
+The bundled configuration uses the local PostgreSQL Unix socket with peer authentication. For another database, set `database_url` in the configuration or override it with `DATABASE_URL`. Do not commit passwords. Under systemd, provision a PostgreSQL role and database for the `ishtaria` service user: the role must own the database (the migrations create and alter its tables), so `createdb -O ishtaria ishtaria`; on PostgreSQL 15+ also make sure the role may create in the schema (`GRANT ALL ON SCHEMA public TO ishtaria`).
 
 The server applies the versioned SQL migrations in `migrations/` automatically before accepting requests. Migrations are embedded in the executable; add a new migration for schema changes rather than editing one already applied. Keep `Cargo.lock` in version control for reproducible `--locked` builds.
 
@@ -466,12 +466,15 @@ the character, whoever owns it. `POST /players/me/fish` needs a fishing rod in h
 every second cast. Limits: 40 things and 60 crops per character; nothing on water; spacing between things. Not implemented: protection
 of leased land, collision with placed things, storage chests, sleeping in a bed, soil quality or seasons for crops.
 
-**Magic (migration `0039_magic.sql`, `src/magic.rs`, `etc/spells.json`, ADR 0010).** Mana is a reserve of 0-100 that regenerates by the clock
+**Magic (migrations `0039_magic.sql` and `0041_day_night_scrolls.sql`, `src/magic.rs`, `etc/spells.json`, ADR 0010).** Mana is a reserve of 0-100 that regenerates by the clock
 (0.4/s, stored with `mana_updated_at`, so offline time counts); it is part of `stats` (`mana`, `mana_max`). Spells are data (cost, cooldown,
-minimum level and one of the effects `heal`, `refresh`, `ward`, `bolt`) and are learned from scrolls for good: `POST /players/me/learn`
+minimum level and one of the effects `heal`, `refresh`, `ward`, `bolt`, `day`, `night`) and are learned from scrolls for good: `POST /players/me/learn`
 (`{"item_id": "scroll_..."}`), `GET /players/me/spells` (known spells with `ready_in_ms`), `POST /players/me/cast` (`{"spell", "object_id"?}`).
 A bolt hits an animal in range like a weapon swing (drops, respawn, XP as in hunting) and avoids the bite of animals that would strike back in melee;
-a ward lets only half of a creature's bite through for a minute. Scrolls are crafted at a workbench from a rare quartz crystal and are not sold.
+a ward lets only half of a creature's bite through for a minute. The `day` and `night` spells (Scroll of Day, Scroll of Night) jump the world's
+shared solar clock to the caster's next dawn or dusk: the shift is stored per world (`worlds.solar_offset_seconds`, added to the real clock in
+`GET /world` on top of `--solar-offset-seconds`), everyone online hears about it through a `solar` event (they ask for `/world` again) and the cast
+answer carries the new `solar` document. Scrolls are crafted at a workbench from a rare quartz crystal and are not sold.
 No spell targets other players.
 
 **Protection and observation (`src/guard.rs`, `[limits]` in `server.toml`).** A middleware limits registration and login per address

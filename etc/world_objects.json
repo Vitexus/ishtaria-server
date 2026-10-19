@@ -2319,6 +2319,26 @@
         5
       ],
       "collision_radius": 0
+    },
+    {
+      "id": "nature.reed_clump",
+      "weight": 2.0,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [
+        2,
+        3,
+        4
+      ],
+      "collision_radius": 0.0
+    },
+    {
+      "id": "hyper3d.tamarisk",
+      "weight": 1.0,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [],
+      "collision_radius": 0.0
     }
   ]
 }

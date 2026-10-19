@@ -275,9 +275,14 @@ async fn world(
     let mut world: World = sqlx::query_as("SELECT server_name, ruleset, seed, face_size, sha256, atmosphere FROM worlds LEFT JOIN heightmaps ON heightmaps.world_id = worlds.id WHERE worlds.id = $1")
         .bind(state.world_id).fetch_one(&state.pool).await?;
     world.server_version = env!("CARGO_PKG_VERSION");
+    let stored_shift: i64 =
+        sqlx::query_scalar("SELECT solar_offset_seconds FROM worlds WHERE id = $1")
+            .bind(state.world_id)
+            .fetch_one(&state.pool)
+            .await?;
     world.solar = atmosphere::Solar::at(
         atmosphere::Solar::now().unix_seconds
-            + offset.map_or(0, |Extension(seconds)| seconds) as f64,
+            + (stored_shift + offset.map_or(0, |Extension(seconds)| seconds)) as f64,
     );
     let shutdown: Option<ShutdownRow> = sqlx::query_as(SHUTDOWN_QUERY)
         .bind(state.world_id)

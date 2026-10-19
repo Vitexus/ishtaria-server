@@ -51,9 +51,54 @@ impl Solar {
     }
 }
 
+/// The sun's centre sits this many degrees below the horizon when the day begins and ends:
+/// the same astronomical horizon the client uses for its clock.
+pub const HORIZON_ELEVATION_DEGREES: f64 = -0.833;
+
+/// The moment the sun crosses the horizon at `observer` (a unit vector pointing from the
+/// planet's centre) next after `after`. `rising` picks dawn over dusk: when the observer
+/// already stands on the requested side, the next crossing in that direction comes about a
+/// day later. When none fits one solar day (a polar night or midnight sun) the search gives
+/// up and returns `after`. The crossing is bracketed with quarter-hour steps and then
+/// bisected to below a second.
+pub fn next_horizon_crossing(observer: [f64; 3], after: f64, rising: bool) -> f64 {
+    let threshold = HORIZON_ELEVATION_DEGREES.to_radians().sin();
+    let above = |seconds: f64| {
+        let direction = Solar::at(seconds).direction;
+        observer[0] * direction[0] + observer[1] * direction[1] + observer[2] * direction[2]
+            >= threshold
+    };
+    let step = 300.0;
+    let mut beginning = after;
+    for index in 1..289 {
+        let end = after + index as f64 * step;
+        if above(end) == above(beginning) {
+            beginning = end;
+            continue;
+        }
+        // A crossing sits in (beginning, end), but only the asked-for direction ends it.
+        if above(beginning) == rising {
+            beginning = end;
+            continue;
+        }
+        let mut low = beginning;
+        let mut high = end;
+        for _ in 0..20 {
+            let middle = (low + high) * 0.5;
+            if above(middle) == above(low) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        return high;
+    }
+    after
+}
+
 #[cfg(test)]
 mod solar_tests {
-    use super::Solar;
+    use super::{next_horizon_crossing, HORIZON_ELEVATION_DEGREES, Solar};
 
     #[test]
     fn noon_midnight_and_unit_direction() {
@@ -87,6 +132,33 @@ mod solar_tests {
             let winter = Solar::at(december.unix_seconds + hours as f64 * 3600.0);
             assert!(summer.direction[1] > 0.0 && winter.direction[1] < 0.0);
         }
+    }
+
+    #[test]
+    fn dawn_and_dusk_follow_each_other_on_the_equator() {
+        let equator = [1.0, 0.0, 0.0];
+        let noon = 946728000.0;
+        let threshold = HORIZON_ELEVATION_DEGREES.to_radians().sin();
+        let elevation = |seconds: f64| {
+            let direction = Solar::at(seconds).direction;
+            equator[0] * direction[0] + equator[1] * direction[1] + equator[2] * direction[2]
+        };
+        let dusk = next_horizon_crossing(equator, noon, false);
+        assert!(dusk > noon && dusk < noon + 14.0 * 3600.0);
+        assert!((elevation(dusk) - threshold).abs() < 1e-6);
+        // Asking for a dusk while it is already night still finds the next one.
+        assert!(next_horizon_crossing(equator, dusk + 60.0, false) > dusk);
+        let dawn = next_horizon_crossing(equator, noon, true);
+        assert!(dawn > noon + 15.0 * 3600.0 && dawn < noon + 21.0 * 3600.0);
+        assert!((elevation(dawn) - threshold).abs() < 1e-6);
+        // Above the polar circle the sun may not cross the horizon at all.
+        let polar_night = [0.0, 1.0, 0.0];
+        let december = (2460666.0 - 2440587.5) * 86400.0;
+        assert_eq!(
+            next_horizon_crossing(polar_night, december, true),
+            december,
+            "no dawn during the polar night"
+        );
     }
 }
 

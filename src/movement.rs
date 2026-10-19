@@ -190,6 +190,19 @@ pub struct ClearMask {
 static PATCHES: std::sync::RwLock<(String, Vec<TerrainPatch>)> =
     std::sync::RwLock::new((String::new(), Vec::new()));
 
+/// A place's historical flora/fauna overlay: weighted catalog ids inside a radius.
+#[derive(Clone, Debug)]
+pub struct WildlifeZone {
+    pub direction: [f64; 3],
+    pub radius_m: f64,
+    pub density: f64,
+    pub flora: Vec<(String, f64)>,
+    pub fauna: Vec<(String, f64)>,
+}
+
+static WILDLIFE: std::sync::RwLock<(String, Vec<WildlifeZone>)> =
+    std::sync::RwLock::new((String::new(), Vec::new()));
+
 impl TerrainPatch {
     /// The patch rectangle around `direction`: local metres from its centre and the blend weight
     /// (1.0 inside the feathered core, easing to 0.0 at the rectangle edge), when inside at all.
@@ -283,6 +296,19 @@ fn patch_water(direction: [f64; 3]) -> Option<f64> {
     })
 }
 
+/// Whether a landscape patch covers this direction with dry ground (not its river mask).
+/// Early Dynastic Uruk sits on a coarse Earth cell that is sea or river; the patch is the real tell.
+fn patch_dry(direction: [f64; 3]) -> bool {
+    let Ok(stored) = PATCHES.read() else {
+        return false;
+    };
+    stored.1.iter().any(|patch| {
+        patch.project(direction).is_some_and(|(x, z, weight)| {
+            weight > 0.0 && patch.surface(x, z).is_none()
+        })
+    })
+}
+
 /// Whether the clearing mask of a patch (streets, houses, fields of a datadisk) covers a direction.
 fn patch_cleared(direction: [f64; 3]) -> bool {
     let Ok(stored) = PATCHES.read() else {
@@ -299,6 +325,23 @@ pub(super) fn set_patches(key: String, patches: Vec<TerrainPatch>) {
     if let Ok(mut stored) = PATCHES.write() {
         *stored = (key, patches);
     }
+}
+
+pub(super) fn set_wildlife(key: String, zones: Vec<WildlifeZone>) {
+    if let Ok(mut stored) = WILDLIFE.write() {
+        *stored = (key, zones);
+    }
+}
+
+/// The wildlife overlay covering a direction, if any (nearest / first match).
+fn wildlife_at(direction: [f64; 3]) -> Option<WildlifeZone> {
+    let stored = WILDLIFE.read().ok()?;
+    stored.1.iter().find_map(|zone| {
+        let distance = length(std::array::from_fn(|axis| {
+            (zone.direction[axis] - direction[axis]) * RADIUS
+        }));
+        (distance <= zone.radius_m).then(|| zone.clone())
+    })
 }
 
 pub(super) fn set_farms(key: String, sites: Vec<FarmSite>) {
@@ -966,7 +1009,12 @@ impl WalkingTerrain {
         let index = face * size * size
             + ((vertical * size as f64) as usize).min(size - 1) * size
             + ((horizontal * size as f64) as usize).min(size - 1);
-        Some((self.environment.biomes[index], height))
+        let mut biome = self.environment.biomes[index];
+        // A dry landscape patch over a drowned coarse cell is grassland for placement.
+        if patch_dry(direction) && biome < 3 {
+            biome = 4;
+        }
+        Some((biome, height))
     }
 
     /// The water within `reach_m` metres of a point on the surface (position in metres from the
@@ -1005,6 +1053,10 @@ impl WalkingTerrain {
             let direction = point.map(|value| value / length(point));
             if patch_water(direction).is_some() {
                 return WaterNear::Fresh;
+            }
+            // Standing on a dry tell/patch: the coarse sea or river under it is not drinkable here.
+            if patch_dry(direction) {
+                continue;
             }
             let (face, horizontal, vertical) = coordinates(direction);
             let size = self.environment.face_size;
@@ -1257,6 +1309,17 @@ impl WalkingTerrain {
     }
 
     fn surface(&self, direction: [f64; 3]) -> Option<f64> {
+        // A river of a landscape patch is no ground to stand scenery on.
+        if patch_water(direction).is_some() {
+            return None;
+        }
+        // Dry patch land is walkable even when the coarse planet cell is sea or river (Uruk on
+        // the Early Dynastic Gulf). Without this, near a city wall the capsule walker zeroes
+        // every horizontal step and only jumping still moves the character.
+        if patch_dry(direction) {
+            let height = self.height(direction);
+            return (height > 0.0).then_some(height);
+        }
         let (face, horizontal, vertical) = coordinates(direction);
         let size = self.environment.face_size;
         let index = face * size * size
@@ -1264,10 +1327,6 @@ impl WalkingTerrain {
             + ((horizontal * size as f64) as usize).min(size - 1);
         if self.environment.biomes[index] < 3 || self.environment.water_m[index] != environment::DRY
         {
-            return None;
-        }
-        // A river of a landscape patch is no ground to stand scenery on.
-        if patch_water(direction).is_some() {
             return None;
         }
         let height = self.height(direction);
@@ -1417,15 +1476,18 @@ impl WalkingTerrain {
             return None;
         }
         let height = self.surface(point)?;
-        if sample(2)
-            > if fauna {
-                FAUNA_PRESENCE
-            } else if biome == 5 {
-                0.7
-            } else {
-                0.18
-            }
-        {
+        let overlay = wildlife_at(point);
+        let density = overlay.as_ref().map(|zone| zone.density).unwrap_or(1.0);
+        let presence = if fauna {
+            FAUNA_PRESENCE
+        } else if biome == 5 {
+            0.7
+        } else {
+            0.18
+        };
+        // Higher density lowers the random threshold so more cells spawn.
+        let threshold = (presence * density).clamp(0.01, 0.95);
+        if sample(2) > threshold {
             return None;
         }
         let reference = if point[1].abs() < 0.9 {
@@ -1445,20 +1507,44 @@ impl WalkingTerrain {
                     / (RADIUS * 0.00001)
             })
             .fold(0.0, f64::max);
-        let candidates: Vec<_> = self
-            .catalog
-            .iter()
-            .filter(|kind| {
-                kind.fauna == fauna
-                    && !kind.aquatic
-                    && kind.biomes.contains(&biome)
-                    && slope <= kind.max_slope
-            })
-            .collect();
-        let total: f64 = candidates.iter().map(|kind| kind.weight).sum();
+        let overlay_weights: Option<&[(String, f64)]> = overlay.as_ref().map(|zone| {
+            if fauna {
+                zone.fauna.as_slice()
+            } else {
+                zone.flora.as_slice()
+            }
+        });
+        let candidates: Vec<_> = if let Some(weights) = overlay_weights.filter(|w| !w.is_empty()) {
+            weights
+                .iter()
+                .filter_map(|(model, weight)| {
+                    self.catalog.iter().find(|kind| {
+                        kind.id == *model
+                            && kind.fauna == fauna
+                            && !kind.aquatic
+                            && slope <= kind.max_slope
+                    }).map(|kind| (kind, *weight))
+                })
+                .collect()
+        } else {
+            self.catalog
+                .iter()
+                .filter(|kind| {
+                    kind.fauna == fauna
+                        && !kind.aquatic
+                        && kind.biomes.contains(&biome)
+                        && slope <= kind.max_slope
+                })
+                .map(|kind| (kind, kind.weight))
+                .collect()
+        };
+        let total: f64 = candidates.iter().map(|(_, weight)| *weight).sum();
+        if total <= 0.0 {
+            return None;
+        }
         let mut choice = sample(3) * total;
-        let kind = candidates.into_iter().find(|kind| {
-            choice -= kind.weight;
+        let (kind, _) = candidates.into_iter().find(|(_, weight)| {
+            choice -= weight;
             choice <= 0.0
         })?;
         let scale_m = kind.scale_m * (0.8 + sample(5) * 0.4);
@@ -3386,5 +3472,42 @@ mod tests {
         set_patches(String::new(), Vec::new());
         assert!((terrain.height(core) - plain_core).abs() < 1.0e-9);
         assert_eq!(terrain.water_near(here, 6.0), WaterNear::None);
+    }
+
+    #[test]
+    fn dry_landscape_patch_over_coarse_water_is_walkable_and_not_a_drink() {
+        let mut terrain = terrain_with(144, 0, Vec::new());
+        terrain.environment.biomes.fill(0);
+        terrain.environment.water_m.fill(0);
+        let anchor = [1.0, 0.0, 0.0];
+        let anchor_height = 40.0;
+        set_patches(
+            "42:uruk-sea".to_owned(),
+            vec![TerrainPatch {
+                anchor,
+                anchor_height_m: anchor_height,
+                extent_m: [800.0, 800.0],
+                offset_m: [0.0, 0.0],
+                feather_m: 50.0,
+                width: 16,
+                height: 16,
+                elevation: vec![0; 16 * 16],
+                water: Some(vec![i16::MIN; 16 * 16]),
+                clear: None,
+            }],
+        );
+        assert!(terrain.surface(anchor).is_some());
+        assert!((terrain.surface(anchor).unwrap() - anchor_height).abs() < 1.0e-9);
+        let site = terrain.land_site(anchor).unwrap();
+        assert_eq!(site.0, 4);
+        let here = anchor.map(|value| value * (RADIUS + anchor_height));
+        assert_eq!(terrain.water_near(here, 6.0), WaterNear::None);
+        // Horizontal walking must not be zeroed: surface stays dry under the patch.
+        let step = terrain
+            .step_at_speed(here, [0.0, 0.0, 1.0], 0.1, 4.0)
+            .expect("walk on dry patch over coarse sea");
+        assert!(length(std::array::from_fn(|axis| step[axis] - here[axis])) > 0.1);
+        set_patches(String::new(), Vec::new());
+        assert!(terrain.surface(anchor).is_none());
     }
 }

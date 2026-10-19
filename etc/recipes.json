@@ -602,6 +602,48 @@
         }
       ],
       "xp": 20
+    },
+    {
+      "id": "make_scroll_day",
+      "station": "workbench",
+      "inputs": [
+        {
+          "item": "quartz_crystal",
+          "quantity": 2
+        },
+        {
+          "item": "copper_ore",
+          "quantity": 2
+        }
+      ],
+      "outputs": [
+        {
+          "item": "scroll_day",
+          "quantity": 1
+        }
+      ],
+      "xp": 24
+    },
+    {
+      "id": "make_scroll_night",
+      "station": "workbench",
+      "inputs": [
+        {
+          "item": "quartz_crystal",
+          "quantity": 2
+        },
+        {
+          "item": "iron_ingot",
+          "quantity": 1
+        }
+      ],
+      "outputs": [
+        {
+          "item": "scroll_night",
+          "quantity": 1
+        }
+      ],
+      "xp": 28
     }
   ]
 }

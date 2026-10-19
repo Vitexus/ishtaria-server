@@ -429,6 +429,69 @@ fn unaffordable_effects_change_nothing() {
 }
 
 #[test]
+fn the_gilgamesh_disk_loads_wildlife_crowd_and_cover_music() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ishtaria-datadisk-gilgamesh");
+    if !path.join("datadisk.yaml").is_file() {
+        return;
+    }
+    let story = Story::load(std::slice::from_ref(&path), false).unwrap();
+    let info = story
+        .infos
+        .iter()
+        .find(|info| info.id == "gilgamesh")
+        .expect("gilgamesh announced");
+    assert!(info.cover_music.is_some(), "logo jingle");
+    assert!(info.ambient_music.is_some(), "plains ambient");
+    let uruk = story
+        .anchors
+        .iter()
+        .find(|a| a.id == "gilgamesh:uruk")
+        .expect("uruk place");
+    let wildlife = uruk.place.wildlife.as_ref().expect("uruk wildlife overlay");
+    assert!(
+        wildlife
+            .flora
+            .iter()
+            .any(|entry| entry.id == "nature.tree_palmTall"),
+        "date palms in the overlay"
+    );
+    assert!(
+        wildlife
+            .fauna
+            .iter()
+            .any(|entry| entry.id == "animal.duck" || entry.id == "animal.goose"),
+        "waterfowl in the overlay"
+    );
+    assert!(
+        story.npcs.contains_key("gilgamesh:crowd_fisherman")
+            && story.npcs["gilgamesh:crowd_fisherman"].place == "gilgamesh:river_bank",
+        "fisherman on the river bank"
+    );
+    assert!(
+        story.npcs.contains_key("gilgamesh:crowd_old_man")
+            && story.npcs.contains_key("gilgamesh:crowd_boy_8"),
+        "crowd NPCs with age-appropriate walks"
+    );
+    assert_eq!(
+        story.npcs["gilgamesh:crowd_old_man"]
+            .movement
+            .as_ref()
+            .map(|m| m.speed_m_s),
+        Some(0.48)
+    );
+    assert!(
+        story.npcs["gilgamesh:crowd_boy_8"]
+            .movement
+            .as_ref()
+            .map(|m| m.speed_m_s)
+            .unwrap_or(0.0)
+            > 1.5
+    );
+    assert!(story.music.contains_key("gilgamesh:logo"));
+    assert!(story.music.contains_key("gilgamesh:city"));
+}
+
+#[test]
 fn the_endland_disk_is_valid_and_its_graveyard_job_plays_through() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ishtaria-datadisk-endland");
     if !path.join("datadisk.yaml").is_file() {
@@ -585,7 +648,121 @@ fn a_located_place_is_validated() {
     assert!(with(&format!("{ok}- {{id: far, kind: landmark, name_key: place.hut, locate: {{from: nowhere, bearing_deg: 10, distance_m: 5000}}}}\n")).is_err(), "unknown place");
     assert!(with(&format!("{ok}- {{id: far, kind: landmark, name_key: place.hut, locate: {{from: hut, bearing_deg: 400, distance_m: 5000}}}}\n")).is_err(), "bearing");
     assert!(with(&format!("{ok}- {{id: far, kind: landmark, name_key: place.hut, locate: {{from: hut, bearing_deg: 10, distance_m: 90000000}}}}\n")).is_err(), "further than the planet is wide");
+    assert!(with(&format!("{ok}- {{id: far, kind: landmark, name_key: place.hut, locate: {{from: hut, bearing_deg: 10, distance_m: 5000, tolerance_m: 0}}}}\n")).is_ok(), "a zero tolerance is a surveyed point");
     assert!(with("- {id: hut, kind: building, name_key: place.hut, locate: {from: hut, bearing_deg: 10, distance_m: 5000}}\n").is_err(), "from itself");
+}
+
+#[test]
+fn a_place_pinned_to_its_historical_site_stands_exactly_there() {
+    use super::placement::{distance_m, place_anchors};
+    let a = scratch("geo-pin");
+    base(
+        &a,
+        "geopin",
+        "1.0.0",
+        "world:\n  terrain: {heightmap: media/world/height.pgm, water: media/world/water.pgm}\n",
+    );
+    write_world_rasters(&a, (16, 8), (16, 8), true);
+    write(
+        &a,
+        "places/p.yaml",
+        "- {id: hut, kind: building, name_key: place.hut}\n\
+         - {id: uruk, kind: city, name_key: place.hut, geo: {latitude_deg: 31.3228, longitude_deg: 45.6389}, requires: {biome: [temperate_forest]}}\n\
+         - {id: gate, kind: building, name_key: place.hut, parent: uruk, locate: {from: uruk, bearing_deg: 181, distance_m: 1370}}\n",
+    );
+    let story = Story::load(std::slice::from_ref(&a), false).unwrap();
+    let sites = place_anchors(&story, &Flat, "7", &[]).unwrap();
+    let site = |id: &str| sites.iter().find(|p| p.id == id).unwrap();
+    let (uruk, gate) = (site("geopin:uruk"), site("geopin:gate"));
+    // The frame of the world rasters: latitude = asin(y), longitude = atan2(z, x).
+    let latitude = 31.3228_f64.to_radians();
+    let longitude = 45.6389_f64.to_radians();
+    let expected = [
+        latitude.cos() * longitude.cos(),
+        latitude.sin(),
+        latitude.cos() * longitude.sin(),
+    ];
+    assert!(
+        distance_m(uruk.direction, expected) < 1.0,
+        "the historical site is where its coordinates say"
+    );
+    // History decides, so a requires the ground does not satisfy is advice, not a constraint.
+    assert_eq!(uruk.height_m, 50.0 + 30.0 * expected[1]);
+    let away = distance_m(uruk.direction, gate.direction);
+    assert!(
+        (1200.0..=1500.0).contains(&away),
+        "places around it locate themselves from it: {away} m"
+    );
+}
+
+#[test]
+fn a_surveyed_point_stands_exactly_where_it_was_measured() {
+    use super::placement::{distance_m, offset_local, place_anchors};
+    let a = scratch("survey");
+    base(
+        &a,
+        "survey",
+        "1.0.0",
+        "world:\n  terrain: {heightmap: media/world/height.pgm, water: media/world/water.pgm}\n",
+    );
+    write_world_rasters(&a, (16, 8), (16, 8), true);
+    write(
+        &a,
+        "places/p.yaml",
+        "- {id: hut, kind: building, name_key: place.hut}\n\
+         - {id: uruk, kind: city, name_key: place.hut, geo: {latitude_deg: 31.3228, longitude_deg: 45.6389}}\n\
+         - {id: harbour, kind: landmark, name_key: place.hut, locate: {from: uruk, bearing_deg: 180, distance_m: 3500000, tolerance_m: 0}, requires: {biome: [grassland], height_m: {min: 100, max: 200}}}\n",
+    );
+    let story = Story::load(std::slice::from_ref(&a), false).unwrap();
+    let sites = place_anchors(&story, &Flat, "7", &[]).unwrap();
+    let site = |id: &str| sites.iter().find(|p| p.id == id).unwrap();
+    let (uruk, harbour) = (site("survey:uruk"), site("survey:harbour"));
+    // A zero tolerance is a surveyed point: no search, not even for water it may not find.
+    let expected = offset_local(uruk.direction, 3_500_000.0, 180.0);
+    assert!(
+        distance_m(harbour.direction, expected) < 1.0,
+        "the surveyed point is exactly where it was measured"
+    );
+    assert_eq!(harbour.height_m, 50.0 + 30.0 * expected[1]);
+}
+
+#[test]
+fn a_historical_pin_is_validated() {
+    let a = scratch("geo-bad");
+    base(
+        &a,
+        "geobad",
+        "1.0.0",
+        "world:\n  terrain: {heightmap: media/world/height.pgm, water: media/world/water.pgm}\n",
+    );
+    write_world_rasters(&a, (16, 8), (16, 8), true);
+    let with = |places: &str| {
+        write(&a, "places/p.yaml", places);
+        Story::load(std::slice::from_ref(&a), false)
+    };
+    let pinned = "- {id: hut, kind: building, name_key: place.hut}\n- {id: uruk, kind: city, name_key: place.hut, geo: {latitude_deg: 31.32, longitude_deg: 45.64}}\n";
+    assert!(with(pinned).is_ok(), "a pinned site on the real planet");
+    let without_planet = scratch("geo-noplanet");
+    base(&without_planet, "geonone", "1.0.0", "");
+    write(
+        &without_planet,
+        "places/p.yaml",
+        "- {id: hut, kind: building, name_key: place.hut}\n- {id: uruk, kind: city, name_key: place.hut, geo: {latitude_deg: 31.32, longitude_deg: 45.64}}\n",
+    );
+    let error = Story::load(std::slice::from_ref(&without_planet), false).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not define the world's real planet"),
+        "{error}"
+    );
+    for (what, places) in [
+        ("also located", "- {id: hut, kind: building, name_key: place.hut}\n- {id: uruk, kind: city, name_key: place.hut, geo: {latitude_deg: 31.32, longitude_deg: 45.64}, locate: {from: hut, bearing_deg: 10, distance_m: 5000}}\n"),
+        ("also near", "- {id: hut, kind: building, name_key: place.hut}\n- {id: uruk, kind: city, name_key: place.hut, geo: {latitude_deg: 31.32, longitude_deg: 45.64}, requires: {near: [{place: hut, min_m: 1, max_m: 2}]}}\n"),
+        ("out of range", "- {id: hut, kind: building, name_key: place.hut}\n- {id: uruk, kind: city, name_key: place.hut, geo: {latitude_deg: 140.0, longitude_deg: 45.64}}\n"),
+    ] {
+        assert!(with(places).is_err(), "{what}");
+    }
 }
 
 #[test]

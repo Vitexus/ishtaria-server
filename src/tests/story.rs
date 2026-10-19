@@ -334,7 +334,7 @@ async fn dialogue_is_server_authoritative_replay_safe_and_range_checked(pool: Pg
     .unwrap();
     assert_eq!(
         announced["datadisks"],
-        serde_json::json!([{"id": "play", "version": "1.0.0", "name": "Test", "cover": "/story/media/play/media/cover/art.jpg"}])
+        serde_json::json!([{"id": "play", "version": "1.0.0", "name": "Test", "cover": "/story/media/play/media/cover/art.jpg", "player_character": null, "player_model": null, "player_body": null}])
     );
     let cover = request(&router, "/story/media/play/media/cover/art.jpg").await;
     assert_eq!(cover.status(), StatusCode::OK);
@@ -379,6 +379,7 @@ async fn dialogue_is_server_authoritative_replay_safe_and_range_checked(pool: Pg
 /// A conversation keeps a walking character standing (migration 0040): the stop is renewed by every answer, ended by leaving, and
 /// the time it lasted is added to what the character has stood when the next conversation begins.
 #[sqlx::test]
+#[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
 async fn a_conversation_keeps_a_character_standing_and_the_time_it_stood_adds_up(pool: PgPool) {
     let world_id = initialize_spawn_world(&pool).await;
     let keep = world::KEEP_STANDING_MS;

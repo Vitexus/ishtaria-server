@@ -16,6 +16,11 @@ if [ "$1" = "configure" ]; then
         if [ "$(runuser -u postgres -- psql -Atc "SELECT 1 FROM pg_database WHERE datname='ishtaria'")" != 1 ]; then
             runuser -u postgres -- createdb -O ishtaria ishtaria
         fi
+        # The server's migrations create and alter tables in schema public. PostgreSQL 15
+        # revoked CREATE on it from PUBLIC, so a database created or upgraded outside this
+        # script may deny the role access ("permission denied for schema public"). The grant
+        # is idempotent and never takes existing privileges away.
+        runuser -u postgres -- psql -d ishtaria -qc "GRANT ALL ON SCHEMA public TO ishtaria" >/dev/null
     else
         echo "ishtaria-server: PostgreSQL is not running; create role and database 'ishtaria' manually (see README)." >&2
     fi

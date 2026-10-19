@@ -29,6 +29,10 @@ enum Effect {
     Ward { seconds: i32 },
     /// Work points against an animal within range, like a weapon swing.
     Bolt { points: i32, range_m: f64 },
+    /// The world's shared solar clock jumps to the caster's next dawn.
+    Day,
+    /// The world's shared solar clock jumps to the caster's next dusk.
+    Night,
 }
 
 #[derive(Deserialize)]
@@ -129,6 +133,8 @@ fn effect_name(effect: &Effect) -> &'static str {
         Effect::Refresh { .. } => "refresh",
         Effect::Ward { .. } => "ward",
         Effect::Bolt { .. } => "bolt",
+        Effect::Day => "day",
+        Effect::Night => "night",
     }
 }
 
@@ -242,6 +248,8 @@ struct Cast_ {
     /// The model of the animal that was hit.
     target: Option<String>,
     player: players::Player,
+    /// The new sun of the world, when the spell turned its clock to dawn or dusk.
+    solar: Option<super::atmosphere::Solar>,
 }
 
 fn distance(first: [f64; 3], second: [f64; 3]) -> f64 {
@@ -309,6 +317,7 @@ async fn cast(
     }
     let mut strike = None;
     let mut target_model = None;
+    let mut solar = None;
     match &spell.effect {
         Effect::Heal { health } => {
             sqlx::query("UPDATE players SET health = least(100, health + $2) WHERE id = $1")
@@ -351,6 +360,42 @@ async fn cast(
             target_model = Some(target.model.clone());
             strike = Some(hit);
         }
+        Effect::Day | Effect::Night => {
+            // The sun belongs to the whole world: its clock jumps to the caster's next dawn
+            // or dusk, and everyone online is told to look at the sky again.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            let radius = caster
+                .into_iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .sqrt();
+            let observer = [caster[0] / radius, caster[1] / radius, caster[2] / radius];
+            let target = super::atmosphere::next_horizon_crossing(
+                observer,
+                now,
+                matches!(spell.effect, Effect::Day),
+            );
+            let shift = ((target - now).round() as i64).clamp(-86_400, 86_400);
+            sqlx::query("UPDATE worlds SET solar_offset_seconds = $2 WHERE id = $1")
+                .bind(state.world_id)
+                .bind(shift)
+                .execute(&mut *transaction)
+                .await?;
+            let caster_name: String =
+                sqlx::query_scalar("SELECT username FROM players WHERE id = $1")
+                    .bind(player_id)
+                    .fetch_one(&mut *transaction)
+                    .await?;
+            sqlx::query("INSERT INTO player_events (recipient_id, kind, subject) SELECT id, 'solar', $2 FROM players WHERE world_id = $1 AND died_at IS NULL AND banned_at IS NULL AND coalesce(greatest(last_seen_at, last_active_at) > clock_timestamp() - make_interval(secs => 30), false)")
+                .bind(state.world_id)
+                .bind(caster_name)
+                .execute(&mut *transaction)
+                .await?;
+            solar = Some(super::atmosphere::Solar::at(target));
+        }
     }
     sqlx::query("UPDATE players SET mana = $2, mana_updated_at = clock_timestamp() WHERE id = $1")
         .bind(player_id)
@@ -367,6 +412,7 @@ async fn cast(
         strike,
         target: target_model,
         player: players::profile(&state, player_id).await?,
+        solar,
     }))
 }
 
@@ -397,6 +443,7 @@ mod tests {
                 Effect::Bolt { points, range_m } => {
                     assert!((1..=10).contains(points) && *range_m > 0.0 && *range_m <= 30.0)
                 }
+                Effect::Day | Effect::Night => {}
             }
         }
     }

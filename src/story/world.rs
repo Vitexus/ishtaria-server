@@ -97,6 +97,9 @@ pub struct TerrainDescriptor {
     pub heightmap: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub water: Option<String>,
+    /// Cleared / built ground for the minimap city silhouette (ADR 0013 clear mask).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clear: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -330,6 +333,7 @@ async fn build(
     let npcs = npc_descriptors(&story, &sites, terrain.as_ref());
     let spawn = find_spawn(&story, &sites, &colliders, &npcs, terrain.as_ref(), &seed);
     let areas = area_descriptors(&story, &sites);
+    movement::set_wildlife(format!("{seed}:{heightmap}"), wildlife_zones(&story, &sites));
     movement::set_statics(format!("{seed}:{heightmap}"), colliders);
     movement::set_farms(format!("{seed}:{heightmap}"), farms);
     Ok(StoryWorld {
@@ -386,6 +390,39 @@ pub fn find_spawn(
         }
     }
     fallback
+}
+
+/// Historical flora/fauna overlays of placed story sites.
+pub fn wildlife_zones(
+    story: &Story,
+    sites: &HashMap<String, Placed>,
+) -> Vec<movement::WildlifeZone> {
+    story
+        .anchors
+        .iter()
+        .filter_map(|anchor| {
+            let wildlife = anchor.place.wildlife.as_ref()?;
+            let site = sites.get(&anchor.id)?;
+            Some(movement::WildlifeZone {
+                direction: site.direction,
+                radius_m: wildlife
+                    .radius_m
+                    .or(anchor.place.radius_m)
+                    .unwrap_or(500.0),
+                density: wildlife.density.unwrap_or(1.0),
+                flora: wildlife
+                    .flora
+                    .iter()
+                    .map(|entry| (entry.id.clone(), entry.weight))
+                    .collect(),
+                fauna: wildlife
+                    .fauna
+                    .iter()
+                    .map(|entry| (entry.id.clone(), entry.weight))
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 /// NPCs stand on a ring around their place; the spot comes from a hash of the NPC id.
@@ -822,6 +859,10 @@ fn load_patches(
             heightmap: media_url(&format!("{disk}/{}", terrain.heightmap)),
             water: terrain
                 .water
+                .as_ref()
+                .map(|path| media_url(&format!("{disk}/{path}"))),
+            clear: terrain
+                .clear
                 .as_ref()
                 .map(|path| media_url(&format!("{disk}/{path}"))),
         });

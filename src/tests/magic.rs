@@ -378,3 +378,92 @@ async fn a_bolt_hits_animals_from_afar(pool: PgPool) {
     );
     assert_eq!(reply["player"]["stats"]["mana"], 80);
 }
+
+#[sqlx::test]
+#[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
+async fn the_day_and_night_spells_turn_the_worlds_clock(pool: PgPool) {
+    let _auth_test = AUTH_TESTS.acquire().await.unwrap();
+    let world_id = initialize_spawn_world(&pool).await;
+    let router = app(AppState {
+        pool: pool.clone(),
+        world_id,
+    });
+    let token = create_session(&router, "mage").await;
+    sqlx::query("UPDATE players SET level = 6")
+        .execute(&pool)
+        .await
+        .unwrap();
+    give(&pool, "mage", &[("scroll_day", 1), ("scroll_night", 1)]).await;
+
+    assert_eq!(
+        cast(&router, &token, "day", None).await.status(),
+        StatusCode::FORBIDDEN,
+        "not learned yet"
+    );
+    assert_eq!(learn(&router, &token, "scroll_day").await, StatusCode::OK);
+    assert_eq!(learn(&router, &token, "scroll_night").await, StatusCode::OK);
+
+    let horizon = atmosphere::HORIZON_ELEVATION_DEGREES.to_radians().sin();
+    let home = position_of(
+        &pool,
+        sqlx::query_scalar("SELECT id FROM players")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+    )
+    .await;
+    let radius = (home[0] * home[0] + home[1] * home[1] + home[2] * home[2]).sqrt();
+    let observer = [home[0] / radius, home[1] / radius, home[2] / radius];
+    let elevation = |direction: [f64; 3]| {
+        observer[0] * direction[0] + observer[1] * direction[1] + observer[2] * direction[2]
+    };
+
+    let answer = response_json(cast(&router, &token, "day", None).await).await;
+    assert_eq!(answer["effect"], "day");
+    let shift: i64 = sqlx::query_scalar("SELECT solar_offset_seconds FROM worlds WHERE id = $1")
+        .bind(world_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(shift > 0 && shift <= 86_400, "the clock moved forward");
+    let seconds = answer["solar"]["unix_seconds"].as_f64().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    assert!(seconds > now && seconds <= now + 86_700.0);
+    // At the announced moment the sun stands on the caster's horizon, rising.
+    assert!((elevation(atmosphere::Solar::at(seconds).direction) - horizon).abs() < 1e-3);
+    let told: i64 = sqlx::query_scalar("SELECT count(*) FROM player_events WHERE kind = 'solar'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        told, 1,
+        "the online caster is told to look at the sky again"
+    );
+
+    assert_eq!(
+        cast(&router, &token, "day", None).await.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the spell rests"
+    );
+    rest(&pool).await;
+
+    let answer = response_json(cast(&router, &token, "night", None).await).await;
+    assert_eq!(answer["effect"], "night");
+    let night_shift: i64 =
+        sqlx::query_scalar("SELECT solar_offset_seconds FROM worlds WHERE id = $1")
+            .bind(world_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        (0..=86_400).contains(&night_shift),
+        "each cast replaces the offset instead of growing it"
+    );
+    let seconds = answer["solar"]["unix_seconds"].as_f64().unwrap();
+    assert!(seconds > now);
+    // The sun stands on the caster's horizon again, this time setting.
+    assert!((elevation(atmosphere::Solar::at(seconds).direction) - horizon).abs() < 1e-3);
+}

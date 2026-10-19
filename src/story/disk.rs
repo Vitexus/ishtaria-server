@@ -44,6 +44,12 @@ pub struct Manifest {
     /// Image below `media/` that clients show when they connect to a server using the disk.
     #[serde(default)]
     pub cover: Option<String>,
+    /// Track id from `music/*.yaml` played once while the cover is shown (logo jingle).
+    #[serde(default)]
+    pub cover_music: Option<String>,
+    /// Track id played as the default background outside every place music radius.
+    #[serde(default)]
+    pub ambient_music: Option<String>,
     /// The character every new player of a world using this disk plays (`<pack>/<skin>` as in the
     /// character creator); players then choose only their nickname. Without it they choose a look.
     #[serde(default)]
@@ -167,18 +173,42 @@ pub struct Place {
     pub at: Option<String>,
     /// Where on the planet the place lies, from another place: the real geography of a story.
     pub locate: Option<Locate>,
+    /// The historical site itself on the real planet of the disk, when the disk defines one.
+    pub geo: Option<Geo>,
     /// Track (id of the disk's music) that plays while the player is within `music_radius_m`.
     pub music: Option<String>,
     /// Distance from the place where its music is heard; defaults to `radius_m`.
     pub music_radius_m: Option<f64>,
+    /// Historical flora and fauna catalog weights inside `wildlife.radius_m`.
+    pub wildlife: Option<Wildlife>,
     #[serde(default)]
     pub requires: Requires,
+}
+
+/// Weighted scenery/fauna catalogs that replace the global biome table near a place.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Wildlife {
+    #[serde(default)]
+    pub flora: Vec<WildlifeEntry>,
+    #[serde(default)]
+    pub fauna: Vec<WildlifeEntry>,
+    pub radius_m: Option<f64>,
+    pub density: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WildlifeEntry {
+    pub id: String,
+    pub weight: f64,
 }
 
 /// A place put where history says: `distance_m` from `from` in the direction `bearing_deg` of the map of `from`
 /// (the frame of its landscape patch and buildings: 0 is north, up the map, 90 is east). The site is the nearest
 /// that satisfies the `requires` of the place within `tolerance_m` of that point, since the planet is not
-/// the Earth and its coasts and mountains lie elsewhere.
+/// the Earth and its coasts and mountains lie elsewhere. A `tolerance_m` of zero is a surveyed point: the
+/// place stands exactly there (its `requires` are advice for the author, logged at placement).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Locate {
@@ -186,6 +216,7 @@ pub struct Locate {
     pub bearing_deg: f64,
     pub distance_m: f64,
     /// How far from the exact point a site may lie; default a twentieth of the distance (at least 30 m).
+    /// Zero means the survey decided: no search, the place stands exactly at the point.
     pub tolerance_m: Option<f64>,
 }
 
@@ -193,6 +224,31 @@ impl Locate {
     pub fn tolerance(&self) -> f64 {
         self.tolerance_m
             .unwrap_or((self.distance_m / 20.0).max(30.0))
+    }
+}
+
+/// A place standing at its historical site on the real planet the disk defines (`world.terrain`):
+/// `latitude_deg` and `longitude_deg` in the frame of the rasters (`latitude = asin(y)`,
+/// `longitude = atan2(z, x)`). The place stands exactly there: history has already decided,
+/// so `requires` is advice for the author (its violations are logged at placement), not a
+/// constraint to search around. Places around it locate themselves from it as usual.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Geo {
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+}
+
+impl Geo {
+    /// Unit direction of the site, in the frame shared with `ishtaria-worldgen --earth`.
+    pub fn direction(&self) -> [f64; 3] {
+        let latitude = self.latitude_deg.to_radians();
+        let longitude = self.longitude_deg.to_radians();
+        [
+            latitude.cos() * longitude.cos(),
+            latitude.sin(),
+            latitude.cos() * longitude.sin(),
+        ]
     }
 }
 
@@ -902,7 +958,9 @@ impl Disk {
                         && (0.0..360.0).contains(&locate.bearing_deg)
                         && locate.distance_m.is_finite()
                         && (1.0..=20_000_000.0).contains(&locate.distance_m)
-                        && locate.tolerance_m.map_or(true, |t| (1.0..=5_000_000.0).contains(&t)),
+                        && locate
+                            .tolerance_m
+                            .map_or(true, |t| t.is_finite() && (0.0..=5_000_000.0).contains(&t)),
                     "{id}: place {} has an invalid location (bearing 0..360, distance 1 m to 20000 km)",
                     place.id
                 );
@@ -911,6 +969,32 @@ impl Disk {
                     "{id}: place {} cannot be both located and pinned",
                     place.id
                 );
+            }
+            if let Some(geo) = &place.geo {
+                ensure!(
+                    self.manifest.world.is_some(),
+                    "{id}: place {} is pinned to a historical site, but the disk does not define the world's real planet",
+                    place.id
+                );
+                ensure!(
+                    geo.latitude_deg.is_finite()
+                        && (-90.0..=90.0).contains(&geo.latitude_deg)
+                        && geo.longitude_deg.is_finite()
+                        && (-180.0..=180.0).contains(&geo.longitude_deg),
+                    "{id}: place {} has an invalid historical position",
+                    place.id
+                );
+                for (what, wrong) in [
+                    ("a parent", place.parent.is_some()),
+                    ("a town spot", place.at.is_some()),
+                    ("a location", place.locate.is_some()),
+                    ("near places", !place.requires.near.is_empty()),
+                ] {
+                    ensure!(
+                        !wrong,
+                        "{id}: a place pinned to a historical site cannot also have {what}",
+                    );
+                }
             }
             for near in &place.requires.near {
                 ensure!(
@@ -1113,6 +1197,47 @@ impl Disk {
                 cover.ends_with(".png") || cover.ends_with(".jpg"),
                 "{id}: cover {cover} must be a png or jpg"
             );
+        }
+        for (label, track) in [
+            ("cover_music", self.manifest.cover_music.as_deref()),
+            ("ambient_music", self.manifest.ambient_music.as_deref()),
+        ] {
+            if let Some(track) = track {
+                ensure!(
+                    tracks.contains(track),
+                    "{id}: {label} names unknown music {track}"
+                );
+            }
+        }
+        for place in &self.places {
+            if let Some(wildlife) = &place.wildlife {
+                ensure!(
+                    !wildlife.flora.is_empty() || !wildlife.fauna.is_empty(),
+                    "{id}: place {} wildlife needs flora or fauna entries",
+                    place.id
+                );
+                for entry in wildlife.flora.iter().chain(wildlife.fauna.iter()) {
+                    ensure!(
+                        (0.0..=1000.0).contains(&entry.weight) && entry.weight > 0.0,
+                        "{id}: place {} wildlife weight must be > 0 and <= 1000",
+                        place.id
+                    );
+                }
+                if let Some(radius) = wildlife.radius_m {
+                    ensure!(
+                        (1.0..=20000.0).contains(&radius),
+                        "{id}: place {} wildlife radius_m must be 1..20000",
+                        place.id
+                    );
+                }
+                if let Some(density) = wildlife.density {
+                    ensure!(
+                        (0.0..=8.0).contains(&density) && density > 0.0,
+                        "{id}: place {} wildlife density must be > 0 and <= 8",
+                        place.id
+                    );
+                }
+            }
         }
         if let Some(character) = &self.manifest.player_character {
             ensure!(

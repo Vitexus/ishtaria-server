@@ -38,12 +38,26 @@ pub struct DiskInfo {
     pub name: String,
     /// URL path of the cover image, when the disk has one.
     pub cover: Option<String>,
+    /// URL path of the cover/logo jingle, when the disk has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_music: Option<MusicRef>,
+    /// URL path of the default travel track outside place music radii.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ambient_music: Option<MusicRef>,
     /// The character new players of the world are given, when the disk decides it.
     pub player_character: Option<String>,
     /// URL path of the model clients draw for that character instead of its pack look.
     pub player_model: Option<String>,
     /// How tall and tough that character is, when the disk says.
     pub player_body: Option<disk::PlayerBody>,
+}
+
+/// A music track announced with a disk (cover jingle or ambient).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct MusicRef {
+    pub url: String,
+    #[serde(rename = "loop")]
+    pub looped: bool,
 }
 
 /// Several datadisks composed into one world's story. Every id is `<disk>:<id>`.
@@ -157,6 +171,14 @@ impl Story {
             disk.manifest.version.clone(),
             disk.sha256.clone(),
         ));
+        let track_ref = |local: &Option<String>| -> Option<MusicRef> {
+            let track_id = local.as_deref()?;
+            let track = disk.music.iter().find(|track| track.id == track_id)?;
+            Some(MusicRef {
+                url: world::media_url(&format!("{id}/{}", track.file)),
+                looped: track.looped,
+            })
+        };
         story.infos.push(DiskInfo {
             id: id.clone(),
             version: disk.manifest.version.clone(),
@@ -166,6 +188,8 @@ impl Story {
                 .cover
                 .as_deref()
                 .map(|cover| world::media_url(&format!("{id}/{cover}"))),
+            cover_music: track_ref(&disk.manifest.cover_music),
+            ambient_music: track_ref(&disk.manifest.ambient_music),
             player_character: disk.manifest.player_character.clone(),
             player_body: disk.manifest.player_body,
             player_model: disk

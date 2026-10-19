@@ -141,6 +141,78 @@
       "collision_radius": 0.0
     },
     {
+      "id": "animal.gazelle",
+      "biomes": [],
+      "weight": 1,
+      "scale_m": 1.0,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "animal.onager",
+      "biomes": [],
+      "weight": 1,
+      "scale_m": 1.0,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "animal.goat",
+      "biomes": [],
+      "weight": 1,
+      "scale_m": 1.0,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "animal.lizard",
+      "biomes": [],
+      "weight": 1,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "animal.turtle",
+      "biomes": [],
+      "weight": 1,
+      "scale_m": 1.0,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "animal.falcon",
+      "biomes": [],
+      "weight": 1,
+      "scale_m": 1.0,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "animal.pigeon",
+      "biomes": [],
+      "weight": 1,
+      "scale_m": 1.0,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "animal.duck",
+      "biomes": [],
+      "weight": 1,
+      "scale_m": 1.0,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "animal.goose",
+      "biomes": [],
+      "weight": 1,
+      "scale_m": 1.0,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
       "id": "animal.alpaca",
       "biomes": [
         6,
