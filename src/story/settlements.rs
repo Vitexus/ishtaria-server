@@ -24,6 +24,7 @@ const DEFAULT_COUNT: usize = 36;
 const SPACING_M: f64 = 120_000.0;
 const SHIPWRIGHT: &str = include_str!("../../etc/shipwright.yaml");
 const TRADER: &str = include_str!("../../etc/trader.yaml");
+const SHEPHERD: &str = include_str!("../../etc/shepherd.yaml");
 const GATE_GUARD: &str = include_str!("../../etc/gate_guard.yaml");
 /// Directory with the files the server itself ships (override with `ISHTARIA_ASSETS_DIR`).
 const DEFAULT_ASSETS_DIR: &str = "/usr/share/ishtaria-server";
@@ -573,6 +574,60 @@ fn clear_structures(
 /// Builds what depends on where the places ended up: the scenery of every place that has one,
 /// and a harbour with a shipwright for each settlement by the sea. Harbour sites are derived
 /// from the settlement's site, so they are not stored.
+/// Where a town's shepherd starts (the fold) and how he walks.
+type Shepherd = ([f64; 3], super::disk::Movement);
+
+/// The pasture a town's shepherd drives its flock to, a straight walk beyond the fold, and the shepherd's
+/// walk when the land allows it: land all the way, and the fold itself on land.
+fn flock_pasture(
+    ground: &dyn Ground,
+    seed: &str,
+    site_id: &str,
+    town: [f64; 3],
+    radius_m: f64,
+) -> (Option<[f64; 3]>, Option<Shepherd>) {
+    let heading = crate::movement::fold_heading(seed, site_id);
+    let fold_m = radius_m + crate::movement::FOLD_M;
+    let at = |distance: f64| {
+        scenery::world_from_local(
+            town,
+            heading.cos() * distance,
+            heading.sin() * distance,
+            |_| 0.0,
+            crate::movement::RADIUS,
+        )
+        .0
+    };
+    let steps = 7;
+    let all_land = (0..=steps).all(|step| {
+        let distance = fold_m + crate::herd::DRIVE_M * f64::from(step) / f64::from(steps);
+        ground.land_site(at(distance)).is_some()
+    });
+    if !all_land {
+        return (None, None);
+    }
+    let (fold, pasture) = (at(fold_m), at(fold_m + crate::herd::DRIVE_M));
+    let movement = super::disk::Movement {
+        kind: super::disk::MovementKind::Herd,
+        radius_m: crate::herd::DRIVE_M,
+        speed_m_s: crate::herd::SPEED_M_S,
+        pause_s: 0.0,
+        waypoints: vec![[
+            heading.cos() * crate::herd::DRIVE_M,
+            heading.sin() * crate::herd::DRIVE_M,
+        ]],
+        phase_s: herd_phase_ms(seed, site_id) as f64 / 1000.0,
+    };
+    (Some(pasture), Some((fold, movement)))
+}
+
+/// Where in its cycle a town's flock is at time zero: the flocks of a world are not all out at the same time.
+fn herd_phase_ms(seed: &str, site_id: &str) -> i64 {
+    let hash = Sha256::digest(format!("{seed}:herd-phase:{site_id}"));
+    let share = f64::from(u32::from_le_bytes(hash[0..4].try_into().unwrap())) / 4_294_967_296.0;
+    (share * crate::herd::cycle_ms() as f64) as i64
+}
+
 pub fn finish(
     story: &mut Story,
     sites: &mut HashMap<String, Placed>,
@@ -582,6 +637,8 @@ pub fn finish(
     let mut built = Built::default();
     let mut harbours: Vec<(usize, Placed)> = Vec::new();
     let mut markets: Vec<(usize, Placed)> = Vec::new();
+    // The folds of the towns with a pasture to drive the flock to, with the shepherd's walk to it.
+    let mut folds: Vec<(usize, Placed, super::disk::Movement)> = Vec::new();
     let anchors = story.anchors.clone();
     // Buildings of the datadisks first, so that the towns leave room for them.
     let mut structures: Vec<([f64; 3], f64)> = Vec::new();
@@ -615,10 +672,25 @@ pub fn finish(
                     },
                 ));
                 let sea = placement::sea_toward(ground, site.direction, placement::COAST_M);
+                let (pasture, shepherd) =
+                    flock_pasture(ground, seed, &anchor.id, site.direction, size.radius_m());
+                if let Some((fold, movement)) = shepherd {
+                    folds.push((
+                        index,
+                        Placed {
+                            id: format!("shepherds:fold_{index:02}"),
+                            direction: fold,
+                            height_m: ground.height(fold).max(0.0),
+                        },
+                        movement,
+                    ));
+                }
                 built.farms.push(crate::movement::FarmSite {
                     id: anchor.id.clone(),
                     direction: site.direction,
                     radius_m: size.radius_m(),
+                    pasture,
+                    phase_ms: herd_phase_ms(seed, &anchor.id),
                 });
                 to_props(
                     &anchor.id,
@@ -722,6 +794,59 @@ pub fn finish(
         disk.sha256 = format!(
             "{:x}",
             Sha256::digest(format!("markets:{}", markets.len()).as_bytes())
+        );
+        story.add_disk(disk)?;
+        story.check()?;
+    }
+    if !folds.is_empty() {
+        let file: DialogueFile = serde_yaml::from_str(SHEPHERD)?;
+        let mut disk = empty_disk(manifest("shepherds", "Shepherds"));
+        disk.dialogues.push(file.dialogue);
+        for (language, table) in file.strings {
+            disk.strings.entry(language).or_default().extend(table);
+        }
+        for (index, site, movement) in &folds {
+            let local = format!("fold_{index:02}");
+            disk.places.push(Place {
+                id: local.clone(),
+                kind: "landmark".to_owned(),
+                name_key: "fold.name".to_owned(),
+                parent: None,
+                radius_m: Some(6.0),
+                spacing_m: None,
+                spawn: false,
+                terrain: None,
+                at: None,
+                locate: None,
+                geo: None,
+                music: None,
+                music_radius_m: None,
+                wildlife: None,
+                scenery: None,
+                structure: None,
+                requires: Requires::default(),
+            });
+            disk.npcs.push(Npc {
+                id: format!("shepherd_{index:02}"),
+                name_key: "shepherd.name".to_owned(),
+                place: local,
+                character: super::disk::Character {
+                    pack: "survivors".to_owned(),
+                    skin: "survivorMaleB".to_owned(),
+                    model: None,
+                },
+                dialogue: "shepherd".to_owned(),
+                bio_key: Some("shepherd.bio".to_owned()),
+                portrait: None,
+                tags: Vec::new(),
+                size: None,
+                movement: Some(movement.clone()),
+            });
+            sites.insert(site.id.clone(), site.clone());
+        }
+        disk.sha256 = format!(
+            "{:x}",
+            Sha256::digest(format!("shepherds:{}", folds.len()).as_bytes())
         );
         story.add_disk(disk)?;
         story.check()?;

@@ -52,8 +52,15 @@ const WANDER_SLOTS: i64 = 3;
 const WILD_WANDER_M: f64 = 40.0;
 const FARM_WANDER_M: f64 = 14.0;
 /// Animals sent around each settlement and the room reserved for them in a reply.
-const FARM_ANIMALS_MAX: usize = 40;
+const FARM_ANIMALS_MAX: usize = 64;
 const FARM_RANGE_M: f64 = 400.0;
+/// Share of goats in a flock; the rest are sheep.
+const GOAT_SHARE: f64 = 0.3;
+/// How far a flock animal keeps from the centre of its herd, metres.
+const FLOCK_SPREAD_M: f64 = 9.0;
+/// Waypoints of a flock animal's route: one every step, covering two minutes.
+const FLOCK_STEP_MS: i64 = 10_000;
+const FLOCK_POINTS: i64 = 13;
 /// Models of the animals of a pasture, with their relative frequency.
 const FARM_SPECIES: [(&str, f64); 10] = [
     ("animal.chicken", 4.0),
@@ -149,6 +156,11 @@ pub(super) struct FarmSite {
     pub direction: [f64; 3],
     /// Radius of the built-up area in metres; the pasture lies beyond it.
     pub radius_m: f64,
+    /// Where a shepherd drives the flock of sheep and goats from the fold (unit direction); none when the
+    /// land beyond the fold does not allow it, and the flock then keeps to the fold.
+    pub pasture: Option<[f64; 3]>,
+    /// Shift of this flock's cycle, so that the flocks of a world are not all out at the same time.
+    pub phase_ms: i64,
 }
 
 static FARMS: std::sync::RwLock<(String, Vec<FarmSite>)> =
@@ -717,6 +729,27 @@ fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
+/// How many sheep and goats a shepherd drives from a settlement of this size.
+pub(super) fn flock_size(radius_m: f64) -> usize {
+    if radius_m < 40.0 {
+        5
+    } else if radius_m < 60.0 {
+        8
+    } else {
+        12
+    }
+}
+
+/// How far beyond the built-up area of a settlement its fold (the pasture beside it) lies.
+pub(super) const FOLD_M: f64 = 30.0;
+
+/// The direction in which a settlement's fold and pasture lie, radians in the local frame of the settlement.
+pub(super) fn fold_heading(seed: &str, site_id: &str) -> f64 {
+    let place = Sha256::digest(format!("{seed}:pasture:{site_id}"));
+    f64::from(u32::from_le_bytes(place[0..4].try_into().unwrap())) / 4_294_967_296.0
+        * std::f64::consts::TAU
 }
 
 /// How many animals graze beside a settlement of this size.
@@ -1636,7 +1669,7 @@ impl WalkingTerrain {
             })) <= FARM_RANGE_M + site.radius_m * 2.0;
             if near {
                 animals.extend(
-                    (0..farm_herd(site.radius_m))
+                    (0..farm_herd(site.radius_m) + flock_size(site.radius_m))
                         .filter_map(|number| self.farm_animal(site, number))
                         .filter(|animal| !self.is_removed(&animal.id)),
                 );
@@ -1646,7 +1679,22 @@ impl WalkingTerrain {
         animals
     }
 
-    /// One animal of a settlement's pasture: a herd that grazes together, beyond the buildings.
+    /// The fold of a settlement: the middle of the pasture beside it, where its flock rests.
+    fn fold_of(&self, site: &FarmSite) -> [f64; 3] {
+        let heading = fold_heading(&self.environment.seed, &site.id);
+        let distance = site.radius_m + FOLD_M;
+        crate::scenery::world_from_local(
+            site.direction,
+            heading.cos() * distance,
+            heading.sin() * distance,
+            |_| 0.0,
+            RADIUS,
+        )
+        .0
+    }
+
+    /// One animal of a settlement's pasture: a herd that grazes together, beyond the buildings. The numbers
+    /// beyond the village's own animals are its flock of sheep and goats, driven out by the shepherd.
     fn farm_animal(&self, site: &FarmSite, number: usize) -> Option<WorldObject> {
         let id = format!("{}:farm:{number}:{}", self.environment.seed, site.id);
         let word = |hash: &[u8], index: usize| {
@@ -1655,26 +1703,34 @@ impl WalkingTerrain {
             )) / 4_294_967_296.0
         };
         // The pasture of the whole settlement and the spot of this animal in it.
-        let place = Sha256::digest(format!("{}:pasture:{}", self.environment.seed, site.id));
         let hash = Sha256::digest(id.as_bytes());
-        let heading = word(&place, 0) * std::f64::consts::TAU;
-        let distance = site.radius_m + 30.0;
-        let spread = word(&hash, 1).sqrt() * 12.0;
+        let heading = fold_heading(&self.environment.seed, &site.id);
+        let distance = site.radius_m + FOLD_M;
+        let flock = number >= farm_herd(site.radius_m);
+        let spread = word(&hash, 1).sqrt() * if flock { FLOCK_SPREAD_M } else { 12.0 };
         let angle = word(&hash, 2) * std::f64::consts::TAU;
         let x = heading.cos() * distance + angle.cos() * spread;
         let z = heading.sin() * distance + angle.sin() * spread;
         let (direction, _) =
             crate::scenery::world_from_local(site.direction, x, z, |_| 0.0, RADIUS);
         let height = self.surface(direction)?;
-        let mut choice =
-            word(&hash, 0) * FARM_SPECIES.iter().map(|(_, weight)| weight).sum::<f64>();
-        let model = FARM_SPECIES
-            .iter()
-            .find(|(_, weight)| {
-                choice -= weight;
-                choice <= 0.0
-            })
-            .map_or(FARM_SPECIES[0].0, |(model, _)| model);
+        let model = if flock {
+            if word(&hash, 5) < GOAT_SHARE {
+                "animal.goat"
+            } else {
+                "animal.sheep"
+            }
+        } else {
+            let mut choice =
+                word(&hash, 0) * FARM_SPECIES.iter().map(|(_, weight)| weight).sum::<f64>();
+            FARM_SPECIES
+                .iter()
+                .find(|(_, weight)| {
+                    choice -= weight;
+                    choice <= 0.0
+                })
+                .map_or(FARM_SPECIES[0].0, |(model, _)| model)
+        };
         let kind = self.catalog.iter().find(|kind| kind.id == model)?;
         let scale_m = kind.scale_m * (0.8 + word(&hash, 3) * 0.4);
         Some(WorldObject {
@@ -1686,6 +1742,61 @@ impl WalkingTerrain {
             collision_radius_m: 0.0,
             biome: self.biome_at(direction),
         })
+    }
+
+    /// The route of an animal of a settlement's flock, from the start of the current time step: it walks with the
+    /// herd between fold and pasture and mills about its centre. `None` for any other animal.
+    fn flock_route(&self, animal: &WorldObject, now_ms: i64) -> Option<Vec<[f64; 4]>> {
+        let rest = animal
+            .id
+            .strip_prefix(&format!("{}:farm:", self.environment.seed))?;
+        let (number, site_id) = rest.split_once(':')?;
+        let number: usize = number.parse().ok()?;
+        let key = format!(
+            "{}:{}",
+            self.environment.seed, self.environment.heightmap_sha256
+        );
+        let farms = FARMS.read().ok()?;
+        let site = (farms.0 == key)
+            .then(|| farms.1.iter().find(|candidate| candidate.id == site_id))??;
+        if number < farm_herd(site.radius_m) {
+            return None;
+        }
+        let fold = self.fold_of(site);
+        let hash = Sha256::digest(animal.id.as_bytes());
+        let word = |index: usize| {
+            f64::from(u32::from_le_bytes(
+                hash[index * 4..index * 4 + 4].try_into().unwrap(),
+            )) / 4_294_967_296.0
+        };
+        // Its own place in the herd: a fixed spot about the centre, and a slow milling about that.
+        let angle = word(6) * std::f64::consts::TAU;
+        let (own_x, own_z) = (
+            angle.cos() * word(7).sqrt() * FLOCK_SPREAD_M,
+            angle.sin() * word(7).sqrt() * FLOCK_SPREAD_M,
+        );
+        let phase = word(0) * std::f64::consts::TAU;
+        let first = now_ms.div_euclid(FLOCK_STEP_MS) * FLOCK_STEP_MS;
+        Some(
+            (0..=FLOCK_POINTS)
+                .map(|step| {
+                    let time = first + step * FLOCK_STEP_MS;
+                    let centre = crate::herd::centre(fold, site.pasture, time + site.phase_ms);
+                    let sway = time as f64 / 1000.0 / 37.0 + phase;
+                    let (direction, _) = crate::scenery::world_from_local(
+                        centre,
+                        own_x + sway.sin() * 2.5,
+                        own_z + sway.cos() * 2.5,
+                        |_| 0.0,
+                        RADIUS,
+                    );
+                    let metres = RADIUS + self.height(direction).max(0.0);
+                    let round = |value: f64| (value * 100.0).round() / 100.0;
+                    let point = direction.map(|value| round(value * metres));
+                    [time as f64, point[0], point[1], point[2]]
+                })
+                .collect(),
+        )
     }
 
     /// Where an animal heads to at the start of a slot: a spot near where it was put, on land.
@@ -1718,6 +1829,9 @@ impl WalkingTerrain {
 
     /// Waypoints of a land animal from the start of the current slot onwards.
     pub(super) fn animal_route(&self, animal: &WorldObject, now_ms: i64) -> Vec<[f64; 4]> {
+        if let Some(route) = self.flock_route(animal, now_ms) {
+            return route;
+        }
         let radius = if animal.id.contains(":farm:") {
             FARM_WANDER_M
         } else {
@@ -1805,7 +1919,7 @@ impl WalkingTerrain {
             let farms = FARMS.read().ok()?;
             let site = (farms.0 == key)
                 .then(|| farms.1.iter().find(|candidate| candidate.id == site))??;
-            if number >= farm_herd(site.radius_m) {
+            if number >= farm_herd(site.radius_m) + flock_size(site.radius_m) {
                 return None;
             }
             self.farm_animal(site, number)?
@@ -3330,6 +3444,8 @@ mod tests {
             id: "world:town_00".into(),
             direction: unit([1.0, 0.1, 0.1]),
             radius_m: 55.0,
+            pasture: None,
+            phase_ms: 0,
         };
         let centre = site
             .direction
@@ -3338,11 +3454,20 @@ mod tests {
         let key = format!("42:{}", terrain.environment.heightmap_sha256);
         set_farms(key, vec![site.clone()]);
         let animals = terrain.farm_animals(centre);
-        assert_eq!(animals.len(), farm_herd(55.0));
+        assert_eq!(animals.len(), farm_herd(55.0) + flock_size(55.0));
         assert_eq!(animals, terrain.farm_animals(centre));
         for animal in &animals {
             assert!(animal.id.starts_with("42:farm:"), "{}", animal.id);
-            assert!(FARM_SPECIES.iter().any(|(model, _)| *model == animal.model));
+            let number: usize = animal.id.split(':').nth(2).unwrap().parse().unwrap();
+            if number < farm_herd(55.0) {
+                assert!(FARM_SPECIES.iter().any(|(model, _)| *model == animal.model));
+            } else {
+                assert!(
+                    ["animal.sheep", "animal.goat"].contains(&animal.model.as_str()),
+                    "{} is not of the flock",
+                    animal.model
+                );
+            }
             let away = distance(animal.position, centre);
             assert!(
                 (site.radius_m + 10.0..site.radius_m + 60.0).contains(&away),
@@ -3354,6 +3479,69 @@ mod tests {
         }
         assert_eq!(before, terrain.objects(centre, 4));
         assert!(terrain.farm_animals([-RADIUS, 0.0, 0.0]).is_empty());
+        let flock: Vec<_> = animals
+            .iter()
+            .filter(|animal| animal.model == "animal.sheep" || animal.model == "animal.goat")
+            .filter(|animal| {
+                let number: usize = animal.id.split(':').nth(2).unwrap().parse().unwrap();
+                number >= farm_herd(55.0)
+            })
+            .collect();
+        assert_eq!(flock.len(), flock_size(55.0));
+        // Across many flocks there are goats among the sheep, and more sheep than goats.
+        let models: Vec<_> = (0..40)
+            .filter_map(|number| {
+                let other = FarmSite {
+                    id: format!("world:town_{number:02}"),
+                    ..site.clone()
+                };
+                terrain.farm_animal(&other, farm_herd(55.0))
+            })
+            .map(|animal| animal.model)
+            .collect();
+        let goats = models
+            .iter()
+            .filter(|model| *model == "animal.goat")
+            .count();
+        assert!(
+            goats > 0 && goats < models.len() / 2,
+            "{goats} of {}",
+            models.len()
+        );
+        // Without a pasture the flock keeps to its fold at any time of the cycle.
+        let fold = terrain.fold_of(&site);
+        for animal in &flock {
+            for time in [0, 300_000, 600_000] {
+                let route = terrain.animal_route(animal, time);
+                let here = route_position(&route, time);
+                let at_fold = fold.map(|value| value * (RADIUS + terrain.height(fold)));
+                assert!(distance(here, at_fold) < 40.0);
+            }
+        }
+        // With one it rests in the fold, is driven out and grazes at the pasture.
+        let pasture =
+            crate::scenery::world_from_local(fold, crate::herd::DRIVE_M, 0.0, |_| 0.0, RADIUS).0;
+        let driven = FarmSite {
+            pasture: Some(pasture),
+            ..site.clone()
+        };
+        set_farms(
+            format!("42:{}", terrain.environment.heightmap_sha256),
+            vec![driven],
+        );
+        let animal = flock[0];
+        let resting = route_position(&terrain.animal_route(animal, 0), 0);
+        let grazing = route_position(&terrain.animal_route(animal, 300_000), 300_000);
+        let travelled = distance(resting, grazing);
+        assert!(
+            (crate::herd::DRIVE_M - 40.0..crate::herd::DRIVE_M + 40.0).contains(&travelled),
+            "the flock moved {travelled} m"
+        );
+        // Everyone agrees on the route: it is the same whenever it is asked within the step.
+        assert_eq!(
+            terrain.animal_route(animal, 300_000),
+            terrain.animal_route(animal, 304_999)
+        );
         set_farms(String::new(), Vec::new());
     }
 

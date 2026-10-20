@@ -431,6 +431,8 @@ harvested objects are stored as changes (`world_object_state`) and grow back; a 
 
 Land animals walk (their route is a pure function of id and time, sent as `wander` waypoints with `server_time_ms` in
 `GET /world/objects`) and graze in pastures beside generated settlements (`<seed>:farm:<n>:<place>`).
+Each settlement's flock of sheep and goats is driven by a generated shepherd (`shepherds:shepherd_NN`, `src/herd.rs`) between
+the fold and a pasture 140 m away in a cycle of about twelve minutes; the cycle is a pure function of the time, so no state is stored.
 `POST /players/me/butcher` (`{"object_id": …}`) swings the weapon in hand at an animal in reach and yields raw meat
 after several swings (`etc/creatures.json`; the animal returns later, stored in `world_object_state`);
 `POST /players/me/milk` lets a character drink from a cow (30 water, ten minutes per cow, `creature_milked`,

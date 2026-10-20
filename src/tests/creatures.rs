@@ -222,6 +222,8 @@ async fn a_cow_gives_a_drink_now_and_then(pool: PgPool) {
                 id: format!("world:town_{number:02}"),
                 direction,
                 radius_m: 85.0,
+                pasture: None,
+                phase_ms: 0,
             }],
         );
         let animals = terrain.farm_animals(centre);

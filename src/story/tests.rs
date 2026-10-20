@@ -1,6 +1,9 @@
 use super::engine::{self, Choose, Op, PlayerState};
 use super::placement::Ground;
-use super::{disk::Disk, Story};
+use super::{
+    disk::{Disk, MovementKind},
+    Story,
+};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -886,6 +889,29 @@ fn every_world_grows_towns_with_graveyards_and_harbours_with_shipwrights() {
         .all(|npc| npc.tags.contains(&"shop:general".to_owned())));
     assert!(story.dialogues.contains_key("markets:trader"));
     assert_eq!(story.strings["cs"]["markets:trader.name"], "Obchodník");
+    // Every town on land has a shepherd who drives its flock of sheep and goats to a pasture and home.
+    let shepherds: Vec<_> = story
+        .npcs
+        .values()
+        .filter(|npc| npc.id.contains("shepherd"))
+        .collect();
+    assert!(!shepherds.is_empty(), "towns have a shepherd");
+    assert!(shepherds.iter().all(|npc| npc
+        .movement
+        .as_ref()
+        .is_some_and(
+            |movement| movement.kind == MovementKind::Herd && movement.waypoints.len() == 1
+        )));
+    assert!(story.dialogues.contains_key("shepherds:shepherd"));
+    assert_eq!(story.strings["cs"]["shepherds:shepherd.name"], "Pastevec");
+    assert_eq!(
+        built
+            .farms
+            .iter()
+            .filter(|farm| farm.pasture.is_some())
+            .count(),
+        shepherds.len()
+    );
     assert_eq!(story.strings["cs"]["harbours:shipwright.name"], "Loďmistr");
     // The shop is plain dialogue: ships for gold, hidden while the player is poor.
     let dialogue = &story.dialogues["harbours:shipwright"];

@@ -10,6 +10,8 @@
 //!   longest walk and the pause.
 //! * Walks that would run into a wall, fence, tree or rock are not made (`Ground::blocked`): a wanderer goes by its home,
 //!   a patrol by its place.
+//! * `herd`: a shepherd of a generated settlement walks behind its flock, which rests in the fold, is driven to the
+//!   pasture, grazes and is driven home (`crate::herd`, the animals follow the same cycle).
 //! * `patrol`: the character walks the loop of `waypoints` (metres east and south of its place, as for
 //!   buildings), standing `pause_s` at each; the start of the loop depends on the id so that several
 //!   characters on one beat do not walk in step.
@@ -194,6 +196,24 @@ fn patrol(
     }
 }
 
+/// The route of a shepherd from the start of the current step: it walks a little behind the centre of its flock.
+fn herd(ground: &dyn Ground, fold: [f64; 3], movement: &Movement, now_ms: i64) -> Vec<[f64; 4]> {
+    let pasture = patrol_points(ground, fold, movement).first().copied();
+    let phase_ms = (movement.phase_s * 1000.0) as i64;
+    let first = now_ms.div_euclid(HERD_STEP_MS) * HERD_STEP_MS;
+    (0..=HERD_POINTS)
+        .map(|step| {
+            let time = first + step * HERD_STEP_MS;
+            let behind = time - crate::herd::SHEPHERD_LAG_MS + phase_ms;
+            entry(ground, time, crate::herd::centre(fold, pasture, behind))
+        })
+        .collect()
+}
+
+/// A shepherd's route has a waypoint every step and covers two minutes.
+const HERD_STEP_MS: i64 = 10_000;
+const HERD_POINTS: i64 = 13;
+
 /// The directions of the waypoints of a patrol, as far as they lie on land.
 pub fn patrol_points(ground: &dyn Ground, site: [f64; 3], movement: &Movement) -> Vec<[f64; 3]> {
     movement
@@ -220,6 +240,7 @@ pub fn route(
 ) -> Vec<[f64; 4]> {
     match movement.kind {
         MovementKind::Wander => wander(ground, id, home, movement, now_ms),
+        MovementKind::Herd => herd(ground, site, movement, now_ms),
         MovementKind::Patrol => {
             let points = patrol_points(ground, site, movement);
             if points.len() < 2 {
@@ -355,6 +376,7 @@ mod tests {
             speed_m_s: 1.0,
             pause_s: 2.0,
             waypoints: Vec::new(),
+            phase_s: 0.0,
         };
         let walked = patrol(
             &Boxed,
@@ -370,6 +392,42 @@ mod tests {
             .any(|waypoint| metres_from(site, [waypoint[1], waypoint[2], waypoint[3]]) < 0.2));
     }
 
+    #[test]
+    fn a_shepherd_walks_behind_its_flock_to_the_pasture_and_back() {
+        let fold = unit([1.0, 0.2, 0.1]);
+        let herd_movement = Movement {
+            kind: MovementKind::Herd,
+            radius_m: crate::herd::DRIVE_M,
+            speed_m_s: crate::herd::SPEED_M_S,
+            pause_s: 0.0,
+            waypoints: vec![[crate::herd::DRIVE_M, 0.0]],
+            phase_s: 0.0,
+        };
+        let at = |time: i64| {
+            let walk = route(
+                &Flat,
+                "shepherds:shepherd_00",
+                fold,
+                fold,
+                &herd_movement,
+                time,
+            );
+            assert!(walk.len() >= 13, "a route covers two minutes");
+            assert!(walk.windows(2).all(|pair| pair[0][0] < pair[1][0]));
+            assert!(walk[0][0] <= time as f64 && walk.last().unwrap()[0] >= (time + 90_000) as f64);
+            position_at(&walk, [0.0; 3], time)
+        };
+        let resting = at(10_000);
+        let grazing = at(400_000);
+        assert!(metres_from(fold, resting) < 1.0);
+        let out = metres_from(fold, grazing);
+        assert!(
+            (crate::herd::DRIVE_M - 1.0..=crate::herd::DRIVE_M + 1.0).contains(&out),
+            "{out}"
+        );
+        assert!(metres_from(fold, at(crate::herd::cycle_ms() + 30_000)) < 1.0);
+    }
+
     fn wanderer() -> Movement {
         Movement {
             kind: MovementKind::Wander,
@@ -377,6 +435,7 @@ mod tests {
             speed_m_s: 1.2,
             pause_s: 8.0,
             waypoints: Vec::new(),
+            phase_s: 0.0,
         }
     }
 
@@ -467,6 +526,7 @@ mod tests {
             speed_m_s: 1.5,
             pause_s: 5.0,
             waypoints: vec![[0.0, 0.0], [30.0, 0.0], [30.0, 30.0], [0.0, 30.0]],
+            phase_s: 0.0,
         };
         let now = 1_800_000_000_000;
         let first = route(&Flat, "a", site, site, &beat, now);

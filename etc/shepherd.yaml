@@ -1,0 +1,45 @@
+# The shepherd of every generated town: drives the town's sheep and goats to pasture and home again.
+dialogue:
+  id: shepherd
+  status: reviewed
+  start: greet
+  nodes:
+    greet:
+      text_key: shepherd.greet
+      choices:
+        - {text_key: shepherd.ask_flock, goto: flock}
+        - {text_key: shepherd.ask_wolves, goto: wolves}
+        - {text_key: shepherd.leave}
+    flock:
+      text_key: shepherd.flock
+      choices:
+        - {text_key: shepherd.more, goto: greet}
+        - {text_key: shepherd.leave}
+    wolves:
+      text_key: shepherd.wolves
+      choices:
+        - {text_key: shepherd.more, goto: greet}
+        - {text_key: shepherd.leave}
+strings:
+  en:
+    shepherd.greet: "Mind the flock, traveller. They scatter if you run through them."
+    shepherd.ask_flock: Where do you take the sheep and goats?
+    shepherd.ask_wolves: Is the pasture safe?
+    shepherd.flock: "Out to the green land beyond the fold in the morning, home again before the day is old. Sheep follow the bell, goats follow the sheep, and I follow both."
+    shepherd.wolves: "Wolves keep to the wild country, but I walk behind the flock all the same. Better a tired shepherd than an empty fold."
+    shepherd.more: Something else...
+    shepherd.leave: Walk well.
+    shepherd.name: Shepherd
+    shepherd.bio: Drives the town's sheep and goats to pasture and home again.
+    fold.name: Fold
+  cs:
+    shepherd.greet: "Dávejte pozor na stádo, pocestný. Rozutečou se, když jimi proběhnete."
+    shepherd.ask_flock: Kam hnáte ovce a kozy?
+    shepherd.ask_wolves: Je pastvina bezpečná?
+    shepherd.flock: "Ráno ven na zelenou pastvu za ohradou a domů dřív, než se den překlopí. Ovce jdou za zvonkem, kozy za ovcemi a já za nimi oběma."
+    shepherd.wolves: "Vlci se drží divočiny, ale za stádem chodím přesto. Radši unavený pastevec než prázdná ohrada."
+    shepherd.more: Ještě něco...
+    shepherd.leave: Šťastnou cestu.
+    shepherd.name: Pastevec
+    shepherd.bio: Hání ovce a kozy města na pastvu a zase domů.
+    fold.name: Ohrada

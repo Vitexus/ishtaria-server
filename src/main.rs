@@ -15,6 +15,7 @@ mod gathering;
 mod glb;
 mod guard;
 mod hall;
+mod herd;
 mod land;
 mod magic;
 mod movement;

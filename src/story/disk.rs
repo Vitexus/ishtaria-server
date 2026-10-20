@@ -344,6 +344,10 @@ pub enum MovementKind {
     Wander,
     /// Walks the loop of `waypoints`.
     Patrol,
+    /// Drives a flock from its fold (the place) to the one pasture in `waypoints` and home again (`herd`). Only the
+    /// settlements generated for a world have shepherds; a datadisk cannot ask for this.
+    #[serde(skip_deserializing)]
+    Herd,
 }
 
 /// How a character of a datadisk walks (see `story::walking`).
@@ -362,6 +366,9 @@ pub struct Movement {
     /// The loop of a patrol: metres east and south of the place, as `offset_m` of a building.
     #[serde(default)]
     pub waypoints: Vec<[f64; 2]>,
+    /// How far into its cycle a shepherd's flock is at time zero (seconds); a herd only.
+    #[serde(default)]
+    pub phase_s: f64,
 }
 
 fn default_radius() -> f64 {
@@ -1287,6 +1294,11 @@ impl Disk {
                     MovementKind::Wander => ensure!(
                         movement.waypoints.is_empty(),
                         "{id}: npc {} wanders: waypoints belong to a patrol",
+                        npc.id
+                    ),
+                    MovementKind::Herd => ensure!(
+                        movement.waypoints.len() == 1,
+                        "{id}: npc {} drives a herd to exactly one pasture",
                         npc.id
                     ),
                 }
