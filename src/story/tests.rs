@@ -222,6 +222,71 @@ fn a_character_may_walk_and_the_movement_is_validated() {
 }
 
 #[test]
+fn a_character_tells_a_knowledge_card_and_the_card_is_validated() {
+    let a = scratch("knowledge");
+    base(&a, "wise", "1.0.0", "");
+    write(&a, "i18n/en.yaml", "place.hut: Hut\nnpc.hermit: Hermit\nhi: Hi\nbye: Bye\nq: Quest\nq.s1: One\nq.s2: Two\nk.t: Hermits\nk.x: Hermits live alone.\nk.c: A painting, public domain.\n");
+    write(&a, "i18n/cs.yaml", "place.hut: Chata\nnpc.hermit: Poustevnik\nhi: Ahoj\nbye: Nashle\nq: Ukol\nq.s1: Jedna\nq.s2: Dva\nk.t: Poustevnici\nk.x: Poustevnici zijí o samotě.\nk.c: Obraz, volné dílo.\n");
+    write(&a, "media/knowledge/hermit.jpg", "not really a picture");
+    let with = |wikipedia: &str, image: &str, about: &str| {
+        write(
+            &a,
+            "knowledge.yaml",
+            &format!("- {{id: hermit, title_key: k.t, text_key: k.x, image: {image}, credit_key: k.c, wikipedia: {wikipedia}}}\n"),
+        );
+        write(
+            &a,
+            "npcs/n.yaml",
+            &format!("- {{id: hermit, name_key: npc.hermit, place: hut, character: {{pack: retro, skin: humanMaleA}}, dialogue: hermit, about: {about}}}\n"),
+        );
+        Story::load(std::slice::from_ref(&a), false)
+    };
+    let story = with(
+        "{en: Hermit, cs: Poustevník}",
+        "media/knowledge/hermit.jpg",
+        "hermit",
+    )
+    .unwrap();
+    let card = &story.knowledge["wise:hermit"];
+    assert_eq!(card.text_key, "wise:k.x");
+    assert_eq!(card.image, "wise/media/knowledge/hermit.jpg");
+    assert_eq!(
+        story.npcs["wise:hermit"].about.as_deref(),
+        Some("wise:hermit")
+    );
+    assert!(story.media.contains_key("wise/media/knowledge/hermit.jpg"));
+    assert!(
+        with("{en: Hermit}", "media/knowledge/hermit.jpg", "nobody").is_err(),
+        "an unknown card"
+    );
+    assert!(
+        with("{cs: Poustevník}", "media/knowledge/hermit.jpg", "hermit").is_err(),
+        "the English title is required"
+    );
+    for bad in [
+        "{en: Two words}",
+        "{en: 'a?b=c'}",
+        "{en: 'a#b'}",
+        "{en: a/b}",
+        "{en: _x}",
+        "{en: Hermit, czech: Poustevník}",
+    ] {
+        assert!(
+            with(bad, "media/knowledge/hermit.jpg", "hermit").is_err(),
+            "{bad}"
+        );
+    }
+    assert!(
+        with("{en: Hermit}", "media/portraits/hermit.jpg", "hermit").is_err(),
+        "pictures live below media/knowledge/"
+    );
+    assert!(
+        with("{en: Hermit}", "media/knowledge/missing.jpg", "hermit").is_err(),
+        "a missing picture"
+    );
+}
+
+#[test]
 fn an_npc_model_is_shipped_validated_and_announced() {
     let a = scratch("model");
     base(&a, "zeta", "1.0.0", "");
@@ -903,6 +968,24 @@ fn every_world_grows_towns_with_graveyards_and_harbours_with_shipwrights() {
             |movement| movement.kind == MovementKind::Herd && movement.waypoints.len() == 1
         )));
     assert!(story.dialogues.contains_key("shepherds:shepherd"));
+    // The characters of generated towns tell their knowledge cards, with a picture and an article to read.
+    for npc in story.npcs.values().filter(|npc| {
+        ["trader", "shepherd", "guard", "shipwright"]
+            .iter()
+            .any(|role| npc.id.contains(role))
+    }) {
+        let card = &story.knowledge[npc.about.as_ref().expect("a card to tell")];
+        assert!(story.media.contains_key(&card.image), "{}", card.image);
+        assert!(card.wikipedia.contains_key("en") && card.wikipedia.contains_key("cs"));
+        for language in ["en", "cs"] {
+            for key in [&card.title_key, &card.text_key, &card.credit_key] {
+                assert!(
+                    story.strings[language].contains_key(key),
+                    "{language} {key}"
+                );
+            }
+        }
+    }
     assert_eq!(story.strings["cs"]["shepherds:shepherd.name"], "Pastevec");
     assert_eq!(
         built

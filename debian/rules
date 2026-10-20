@@ -14,6 +14,8 @@ override_dh_auto_install:
 	install -D -m 0755 target/release/ishtaria-server debian/ishtaria-server/usr/bin/ishtaria-server
 	install -D -m 0755 debian/ishtaria-server-init debian/ishtaria-server/usr/bin/ishtaria-server-init
 	install -D -m 0644 assets/music/graveyard_midnightcem.ogg debian/ishtaria-server/usr/share/ishtaria-server/music/graveyard_midnightcem.ogg
+	install -d debian/ishtaria-server/usr/share/ishtaria-server/knowledge
+	install -m 0644 assets/knowledge/*.jpg debian/ishtaria-server/usr/share/ishtaria-server/knowledge/
 	install -D -m 0640 etc/server.toml debian/ishtaria-server/etc/ishtaria/server.toml
 
 override_dh_auto_clean:

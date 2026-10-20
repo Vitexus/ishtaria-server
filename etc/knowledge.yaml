@@ -1,0 +1,57 @@
+# Knowledge cards of the characters of generated settlements ("Tell me about yourself"). Each card is added to the
+# disk of the character that tells it, so that its text keys are qualified like the character's own. The pictures
+# are public-domain paintings from Wikimedia Commons, installed in `assets/knowledge/`; a card whose picture is not
+# installed is left out and its character has no such option. Wikipedia: article titles only, the host follows
+# the language of the client.
+cards:
+  - id: shepherd
+    title_key: knowledge.shepherd.title
+    text_key: knowledge.shepherd.text
+    image: media/knowledge/shepherd.jpg
+    credit_key: knowledge.shepherd.credit
+    wikipedia: {en: Shepherd, cs: Pastýř}
+  - id: trader
+    title_key: knowledge.trader.title
+    text_key: knowledge.trader.text
+    image: media/knowledge/trader.jpg
+    credit_key: knowledge.trader.credit
+    wikipedia: {en: Merchant, cs: Kupec}
+  - id: guard
+    title_key: knowledge.guard.title
+    text_key: knowledge.guard.text
+    image: media/knowledge/guard.jpg
+    credit_key: knowledge.guard.credit
+    wikipedia: {en: City_guard, cs: Stráž}
+  - id: shipwright
+    title_key: knowledge.shipwright.title
+    text_key: knowledge.shipwright.text
+    image: media/knowledge/shipwright.jpg
+    credit_key: knowledge.shipwright.credit
+    wikipedia: {en: Shipbuilding, cs: Loděnice}
+strings:
+  en:
+    knowledge.shepherd.title: The shepherd
+    knowledge.shepherd.text: "People have kept flocks of sheep and goats for about ten thousand years. A shepherd led the animals to fresh pasture by day, brought them home at night and guarded them against wolves and thieves. Wool, milk, meat and hides made a flock one of the first forms of wealth."
+    knowledge.shepherd.credit: "Vincent van Gogh, Shepherd with a Flock of Sheep (1884). Public domain, via Wikimedia Commons."
+    knowledge.trader.title: The merchant
+    knowledge.trader.text: "A merchant buys goods where they are plentiful and sells them where they are scarce. Markets and long trade routes carried grain, metal, cloth and ideas between towns. Scales, written accounts and later coins made such exchange fair and easy to check."
+    knowledge.trader.credit: "Pieter Aertsen, Market Woman with Vegetable Stall (1567). Public domain, via Wikimedia Commons."
+    knowledge.guard.title: The gate guard
+    knowledge.guard.text: "A guard at the gate watched who came into a walled town and who left it. Town guards also kept the watch at night, raised the alarm against fire and enemies and collected tolls from travellers. In many cities the citizens took turns in the watch themselves."
+    knowledge.guard.credit: "Rembrandt, The Night Watch (1642), a civic guard company. Public domain, via Wikimedia Commons."
+    knowledge.shipwright.title: The shipwright
+    knowledge.shipwright.text: "A shipwright builds and repairs boats and ships from timber, pitch and rope. A wooden hull grows around a keel and ribs, and its planks are sealed to keep the water out. Shipyards were among the busiest and most skilled workplaces of their time."
+    knowledge.shipwright.credit: "Francis Holman, A Small Shipyard on the Thames (1774). Public domain, via Wikimedia Commons and the Royal Museums Greenwich."
+  cs:
+    knowledge.shepherd.title: Pastevec
+    knowledge.shepherd.text: "Stáda ovcí a koz chová lidé zhruba deset tisíc let. Pastevec hnal zvířata přes den na čerstvou pastvu, na noc je vedl domů a bránil je před vlky a zloději. Vlna, mléko, maso a kůže udělaly ze stáda jednu z prvních podob bohatství."
+    knowledge.shepherd.credit: "Vincent van Gogh, Pastýř se stádem ovcí (1884). Volné dílo, přes Wikimedia Commons."
+    knowledge.trader.title: Obchodník
+    knowledge.trader.text: "Obchodník nakupuje zboží tam, kde je ho dost, a prodává ho tam, kde chybí. Trhy a dlouhé obchodní cesty vozily mezi městy obilí, kovy, látky i myšlenky. Váhy, písemné účty a později mince udělaly z výměny spravedlivou a snadno kontrolovatelnou věc."
+    knowledge.trader.credit: "Pieter Aertsen, Trhovkyně u stánku se zeleninou (1567). Volné dílo, přes Wikimedia Commons."
+    knowledge.guard.title: Strážce brány
+    knowledge.guard.text: "Stráž u brány hlídala, kdo vchází do opevněného města a kdo z něj odchází. Městské stráže také držely noční hlídky, vyhlašovaly poplach při požáru a před nepřítelem a vybíraly od cestujících clo. V mnoha městech se v hlídce střídali sami měšťané."
+    knowledge.guard.credit: "Rembrandt, Noční hlídka (1642), setnina městské gardy. Volné dílo, přes Wikimedia Commons."
+    knowledge.shipwright.title: Loďmistr
+    knowledge.shipwright.text: "Loďmistr staví a opravuje čluny a lodě ze dřeva, smoly a lan. Dřevěný trup roste kolem kýlu a žeber a jeho prkna se těsní, aby dovnitř nepronikla voda. Loděnice patřily k nejrušnějším a nejodbornějším pracovištím své doby."
+    knowledge.shipwright.credit: "Francis Holman, Malá loděnice na Temži (1774). Volné dílo, přes Wikimedia Commons a Royal Museums Greenwich."

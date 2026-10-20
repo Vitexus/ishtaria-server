@@ -19,6 +19,19 @@ License: CC0-1.0
 Comment: Default music of generated graveyards. The source is 8 kHz and very quiet,
  so it was raised by 10 dB and converted to OGG Vorbis.
 
+Files: assets/knowledge/shepherd.jpg assets/knowledge/trader.jpg assets/knowledge/guard.jpg assets/knowledge/shipwright.jpg
+Copyright: Vincent van Gogh (shepherd.jpg, 1884), Pieter Aertsen (trader.jpg, 1567),
+ Rembrandt (guard.jpg, 1642), Francis Holman (shipwright.jpg, 1774)
+License: public-domain
+Comment: Paintings in the public domain (the authors died long ago), scaled down copies from Wikimedia Commons:
+ File:Vincent van Gogh - Shepherd with a Flock of Sheep (1884) - F42.jpg,
+ File:1567 Aertsen Marktfrau am Gemuesestand anagoria.JPG, File:The Night Watch - HD.jpg and
+ File:A Small Shipyard on the Thames RMG BHC1059.tiff. They illustrate the knowledge cards of generated
+ characters (etc/knowledge.yaml).
+
+License: public-domain
+ The works are in the public domain; no permission is needed to copy, modify or distribute them.
+
 License: CC0-1.0
  On Debian systems, the full text of the Creative Commons Zero 1.0 Universal
  license can be found in /usr/share/common-licenses/CC0-1.0.

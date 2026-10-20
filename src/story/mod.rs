@@ -79,6 +79,8 @@ pub struct Story {
     pub voices: BTreeMap<(String, String), String>,
     /// Language -> qualified text key -> text.
     pub strings: BTreeMap<String, BTreeMap<String, String>>,
+    /// Knowledge cards by qualified id; `image` is the media key (`<disk>/media/knowledge/…`).
+    pub knowledge: BTreeMap<String, disk::KnowledgeCard>,
     /// The real planet one of the disks defines, when any.
     pub world: Option<WorldPlan>,
 }
@@ -246,6 +248,7 @@ impl Story {
             npc.dialogue = qualify(&id, &npc.dialogue);
             npc.name_key = qualify(&id, &npc.name_key);
             npc.bio_key = npc.bio_key.map(|k| qualify(&id, &k));
+            npc.about = npc.about.map(|k| qualify(&id, &k));
             npc.portrait = npc.portrait.map(|p| format!("{id}/{p}"));
             // A model below `media/models/` is served like a portrait: under the id of its disk.
             npc.character.model = npc.character.model.map(|m| format!("{id}/{m}"));
@@ -319,6 +322,14 @@ impl Story {
                 target.insert(qualify(&id, &key), text);
             }
         }
+        for mut card in disk.knowledge {
+            card.id = qualify(&id, &card.id);
+            card.title_key = qualify(&id, &card.title_key);
+            card.text_key = qualify(&id, &card.text_key);
+            card.credit_key = qualify(&id, &card.credit_key);
+            card.image = format!("{id}/{}", card.image);
+            story.knowledge.insert(card.id.clone(), card);
+        }
         Ok(())
     }
 
@@ -356,6 +367,15 @@ impl Story {
                 npc.id,
                 npc.dialogue
             );
+        }
+        for npc in self.npcs.values() {
+            if let Some(about) = &npc.about {
+                ensure!(
+                    self.knowledge.contains_key(about),
+                    "{}: unknown knowledge card {about}",
+                    npc.id
+                );
+            }
         }
         for quest in self.quests.values() {
             let guides = quest

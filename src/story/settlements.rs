@@ -25,6 +25,7 @@ const SPACING_M: f64 = 120_000.0;
 const SHIPWRIGHT: &str = include_str!("../../etc/shipwright.yaml");
 const TRADER: &str = include_str!("../../etc/trader.yaml");
 const SHEPHERD: &str = include_str!("../../etc/shepherd.yaml");
+const KNOWLEDGE: &str = include_str!("../../etc/knowledge.yaml");
 const GATE_GUARD: &str = include_str!("../../etc/gate_guard.yaml");
 /// Directory with the files the server itself ships (override with `ISHTARIA_ASSETS_DIR`).
 const DEFAULT_ASSETS_DIR: &str = "/usr/share/ishtaria-server";
@@ -105,6 +106,7 @@ fn empty_disk(manifest: Manifest) -> Disk {
         quests: Vec::new(),
         lore: Vec::new(),
         music: Vec::new(),
+        knowledge: Vec::new(),
         media: BTreeMap::new(),
         voices: BTreeMap::new(),
         strings: BTreeMap::from([
@@ -174,6 +176,38 @@ fn graveyard_music(disk: &mut Disk) -> Option<String> {
         );
     }
     Some("graveyard".to_owned())
+}
+
+/// The knowledge cards of the built-in characters (`etc/knowledge.yaml`).
+#[derive(Deserialize)]
+struct KnowledgeFile {
+    cards: Vec<super::disk::KnowledgeCard>,
+    strings: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// Adds the knowledge card `id` and its picture to a generated disk when the picture is installed, and returns the
+/// card's id for the `about` of the character that tells it.
+fn add_knowledge(disk: &mut Disk, id: &str) -> Option<String> {
+    let file: KnowledgeFile =
+        serde_yaml::from_str(KNOWLEDGE).expect("the built-in knowledge cards are valid");
+    let card = file.cards.into_iter().find(|card| card.id == id)?;
+    let name = card.image.strip_prefix("media/knowledge/")?;
+    let path = assets_dir().join("knowledge").join(name);
+    let bytes = std::fs::read(&path).ok()?;
+    disk.media.insert(
+        card.image.clone(),
+        (path, format!("{:x}", Sha256::digest(&bytes))),
+    );
+    let prefix = format!("knowledge.{id}.");
+    for (language, table) in file.strings {
+        disk.strings.entry(language).or_default().extend(
+            table
+                .into_iter()
+                .filter(|(key, _)| key.starts_with(&prefix)),
+        );
+    }
+    disk.knowledge.push(card);
+    Some(id.to_owned())
 }
 
 /// The built-in disk `world`: `count` settlements and their graveyards.
@@ -365,6 +399,7 @@ pub fn world_disk(seed: &str, count: usize) -> Disk {
             },
             dialogue: "gate_guard".to_owned(),
             bio_key: Some("gate_guard.bio".to_owned()),
+            about: None,
             portrait: None,
             tags: vec!["guard".to_owned()],
             size: None,
@@ -374,6 +409,14 @@ pub fn world_disk(seed: &str, count: usize) -> Disk {
     if guarded {
         let file: DialogueFile =
             serde_yaml::from_str(GATE_GUARD).expect("the built-in gate guard is valid");
+        let about = add_knowledge(&mut disk, "guard");
+        for npc in disk
+            .npcs
+            .iter_mut()
+            .filter(|npc| npc.dialogue == "gate_guard")
+        {
+            npc.about = about.clone();
+        }
         disk.dialogues.push(file.dialogue);
         for (language, table) in file.strings {
             disk.strings.entry(language).or_default().extend(table);
@@ -748,6 +791,7 @@ pub fn finish(
     if !markets.is_empty() {
         let file: DialogueFile = serde_yaml::from_str(TRADER)?;
         let mut disk = empty_disk(manifest("markets", "Markets"));
+        let about = add_knowledge(&mut disk, "trader");
         disk.dialogues.push(file.dialogue);
         for (language, table) in file.strings {
             disk.strings.entry(language).or_default().extend(table);
@@ -784,6 +828,7 @@ pub fn finish(
                 },
                 dialogue: "trader".to_owned(),
                 bio_key: Some("trader.bio".to_owned()),
+                about: about.clone(),
                 portrait: None,
                 tags: vec!["shop".to_owned(), "shop:general".to_owned()],
                 size: None,
@@ -801,6 +846,7 @@ pub fn finish(
     if !folds.is_empty() {
         let file: DialogueFile = serde_yaml::from_str(SHEPHERD)?;
         let mut disk = empty_disk(manifest("shepherds", "Shepherds"));
+        let about = add_knowledge(&mut disk, "shepherd");
         disk.dialogues.push(file.dialogue);
         for (language, table) in file.strings {
             disk.strings.entry(language).or_default().extend(table);
@@ -837,6 +883,7 @@ pub fn finish(
                 },
                 dialogue: "shepherd".to_owned(),
                 bio_key: Some("shepherd.bio".to_owned()),
+                about: about.clone(),
                 portrait: None,
                 tags: Vec::new(),
                 size: None,
@@ -854,6 +901,7 @@ pub fn finish(
     if !harbours.is_empty() {
         let file: DialogueFile = serde_yaml::from_str(SHIPWRIGHT)?;
         let mut disk = empty_disk(manifest("harbours", "Harbours"));
+        let about = add_knowledge(&mut disk, "shipwright");
         disk.dialogues.push(file.dialogue);
         for (language, table) in file.strings {
             disk.strings.entry(language).or_default().extend(table);
@@ -890,6 +938,7 @@ pub fn finish(
                 },
                 dialogue: "shipwright".to_owned(),
                 bio_key: Some("shipwright.bio".to_owned()),
+                about: about.clone(),
                 portrait: None,
                 tags: vec!["shop".to_owned()],
                 size: None,

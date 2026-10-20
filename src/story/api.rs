@@ -34,6 +34,7 @@ pub fn routes() -> Router<AppState> {
         .route("/story/dialogue/start", post(start))
         .route("/story/dialogue/choose", post(choose))
         .route("/story/dialogue", delete(leave))
+        .route("/story/npcs/{npc_id}/about", get(about))
         .route("/story/quests", get(quests))
         .route("/story/markers", get(markers))
         .layer(DefaultBodyLimit::max(1024))
@@ -81,6 +82,8 @@ struct Reply {
     node: Option<Shown>,
     #[serde(skip_serializing_if = "Option::is_none")]
     portrait: Option<String>,
+    /// Whether the character has a knowledge card to tell (`GET /story/npcs/{id}/about`).
+    about: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     music: Option<Music>,
     player: players::Player,
@@ -299,6 +302,11 @@ fn reply(
         open: node.is_some(),
         node,
         portrait: npc.portrait.clone(),
+        about: story
+            .story
+            .npcs
+            .get(&npc.id)
+            .is_some_and(|found| found.about.is_some()),
         music,
         player,
     }
@@ -486,6 +494,44 @@ async fn advance_reach(state: &AppState, story: &StoryWorld, player_id: i64) -> 
         }
     }
     Ok(())
+}
+
+/// What a character tells about itself: a knowledge card. Texts are keys of `/story/strings` and the picture is a
+/// media path, so the language and the link to the article (`https://<language>.wikipedia.org/wiki/<title>`) are
+/// the client's to choose; nothing is stored.
+#[derive(Serialize)]
+struct About {
+    title_key: String,
+    text_key: String,
+    image: String,
+    credit_key: String,
+    wikipedia: std::collections::BTreeMap<String, String>,
+}
+
+async fn about(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(npc_id): Path<String>,
+) -> Result<Json<About>, Error> {
+    let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
+    let story = story_of(&state).await?;
+    let mut tx = state.pool.begin().await?;
+    let npc = near_npc(&state, &mut tx, &story, player_id, &npc_id, false).await?;
+    drop(tx);
+    let card = story
+        .story
+        .npcs
+        .get(&npc.id)
+        .and_then(|found| found.about.as_ref())
+        .and_then(|id| story.story.knowledge.get(id))
+        .ok_or_else(|| status(StatusCode::NOT_FOUND, "this character has nothing to tell"))?;
+    Ok(Json(About {
+        title_key: card.title_key.clone(),
+        text_key: card.text_key.clone(),
+        image: world::media_url(&card.image),
+        credit_key: card.credit_key.clone(),
+        wikipedia: card.wikipedia.clone(),
+    }))
 }
 
 async fn quests(

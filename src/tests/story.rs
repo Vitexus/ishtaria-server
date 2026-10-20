@@ -18,7 +18,7 @@ fn install_disk() -> PathBuf {
     let _ = fs::remove_dir_all(&dir);
     let root = dir.join("play");
     write(&root, "datadisk.yaml", "id: play\nversion: 1.0.0\nname: Test\nrequires_ruleset: \"1\"\nlicense: CC0-1.0\nattribution: Test\nlanguages: [en, cs]\ncover: media/cover/art.jpg\n");
-    let strings = "place.hut: Hut\nnpc.hermit: Hermit\nhi: Hi\nbye: Bye\nq: Quest\nq.s1: One\nq.s2: Two\nmusic.t: Tune\nr: Walk\nr.a: Go\nr.b: Arrived\n";
+    let strings = "place.hut: Hut\nnpc.hermit: Hermit\nhi: Hi\nbye: Bye\nq: Quest\nq.s1: One\nq.s2: Two\nmusic.t: Tune\nr: Walk\nr.a: Go\nr.b: Arrived\nk.t: Hermits\nk.x: Hermits live alone.\nk.c: A painting, public domain.\n";
     write(&root, "i18n/en.yaml", strings);
     write(&root, "i18n/cs.yaml", strings);
     write(
@@ -26,7 +26,8 @@ fn install_disk() -> PathBuf {
         "places/p.yaml",
         "- {id: hut, kind: building, name_key: place.hut, spawn: true, music: t, music_radius_m: 50}\n",
     );
-    write(&root, "npcs/n.yaml", "- {id: hermit, name_key: npc.hermit, place: hut, character: {pack: retro, skin: humanMaleA}, dialogue: hermit, portrait: media/portraits/hermit.jpg}\n");
+    write(&root, "npcs/n.yaml", "- {id: hermit, name_key: npc.hermit, place: hut, character: {pack: retro, skin: humanMaleA}, dialogue: hermit, about: hermit, portrait: media/portraits/hermit.jpg}\n");
+    write(&root, "knowledge.yaml", "- {id: hermit, title_key: k.t, text_key: k.x, image: media/knowledge/hermit.jpg, credit_key: k.c, wikipedia: {en: Hermit, cs: Poustevník}}\n");
     write(
         &root,
         "music/m.yaml",
@@ -36,6 +37,12 @@ fn install_disk() -> PathBuf {
     write(&root, "quests/r.yaml", "id: r\ntitle_key: r\nstart_stage: a\nstages:\n  a: {text_key: r.a, reach: {place: hut, radius_m: 30, goto: b}}\n  b: {text_key: r.b, final: true}\n");
     write(&root, "dialogues/hermit.yaml", "id: hermit\nmusic: t\nstart: hi\nnodes:\n  hi:\n    text_key: hi\n    choices:\n      - {text_key: bye, if: {gold_at_least: 5}, effects: [{gold: -5}, {once: {key: reward, effects: [{gold: 20}, {set_stage: {quest: q, stage: s2}}]}}, {set_flag: met}, {set_stage: {quest: r, stage: a}}]}\n");
     fs::create_dir_all(root.join("media/portraits")).unwrap();
+    fs::create_dir_all(root.join("media/knowledge")).unwrap();
+    fs::write(
+        root.join("media/knowledge/hermit.jpg"),
+        b"\xff\xd8not a picture",
+    )
+    .unwrap();
     fs::create_dir_all(root.join("media/music")).unwrap();
     fs::create_dir_all(root.join("media/cover")).unwrap();
     fs::write(
@@ -178,6 +185,13 @@ async fn dialogue_is_server_authoritative_replay_safe_and_range_checked(pool: Pg
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response =
+        player_request(&router, "GET", "/story/npcs/play:hermit/about", "", &token).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "too far to listen"
+    );
 
     teleport(&pool, player_id, npc.position).await;
     let response = post(
@@ -199,6 +213,22 @@ async fn dialogue_is_server_authoritative_replay_safe_and_range_checked(pool: Pg
         "/story/media/play/media/music/t.ogg"
     );
     assert_eq!(started["music"]["loop"], true);
+    assert_eq!(started["about"], true, "the character has a card to tell");
+    let response =
+        player_request(&router, "GET", "/story/npcs/play:hermit/about", "", &token).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let card = response_json(response).await;
+    assert_eq!(card["text_key"], "play:k.x");
+    assert_eq!(card["credit_key"], "play:k.c");
+    assert_eq!(
+        card["image"],
+        "/story/media/play/media/knowledge/hermit.jpg"
+    );
+    assert_eq!(card["wikipedia"]["cs"], "Poustevník");
+    assert_eq!(card["wikipedia"]["en"], "Hermit");
+    let response =
+        player_request(&router, "GET", "/story/npcs/play:nobody/about", "", &token).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let seq = started["seq"].as_i64().unwrap();
     let gold_before = gold_of(&pool, player_id).await;
 

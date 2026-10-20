@@ -327,6 +327,9 @@ pub struct Npc {
     pub character: Character,
     pub dialogue: String,
     pub bio_key: Option<String>,
+    /// The knowledge card (`knowledge.yaml`) that "tell me about yourself" shows.
+    #[serde(default)]
+    pub about: Option<String>,
     /// Image below `media/` shown beside the dialogue text.
     pub portrait: Option<String>,
     #[serde(default)]
@@ -433,6 +436,32 @@ pub struct Effect {
     pub set_flag: Option<String>,
     pub set_stage: Option<QuestStageRef>,
     pub once: Option<Once>,
+}
+
+/// A short piece of knowledge a character tells about itself or its trade (`knowledge.yaml`), shown with one
+/// picture and a link to the matching Wikipedia article. Texts are string keys; the client picks the language.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeCard {
+    pub id: String,
+    pub title_key: String,
+    pub text_key: String,
+    /// Picture below `media/knowledge/` (png or jpg) whose author and licence `credit_key` names.
+    pub image: String,
+    pub credit_key: String,
+    /// Title of the Wikipedia article by language (two lowercase letters); `en` is required.
+    pub wikipedia: BTreeMap<String, String>,
+}
+
+/// An article title as it goes into `https://<language>.wikipedia.org/wiki/<title>`: no spaces (underscores),
+/// no characters with a meaning in a URL, no control characters.
+pub fn is_wiki_title(title: &str) -> bool {
+    !title.is_empty()
+        && title.chars().count() <= 100
+        && !title.starts_with('_')
+        && !title
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "#?<>[]{}|\\/%\"&=+".contains(c))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -661,6 +690,8 @@ pub struct Disk {
     pub quests: Vec<Quest>,
     pub lore: Vec<Lore>,
     pub music: Vec<Music>,
+    /// Knowledge cards of the characters (`knowledge.yaml` at the disk root).
+    pub knowledge: Vec<KnowledgeCard>,
     /// Media files (path below the disk -> absolute file) with their sha256.
     pub media: BTreeMap<String, (PathBuf, String)>,
     /// Spoken lines: (language, local text key) -> media path, from `media/voice/<language>/<key>.ogg`.
@@ -783,6 +814,17 @@ impl Disk {
                     .collect(),
             });
         }
+        let knowledge = {
+            let path = dir.join("knowledge.yaml");
+            if path.is_file() {
+                count += 1;
+                ensure!(count <= MAX_FILES, "too many files in the datadisk");
+                let text = read_limited(&path, &mut hasher, dir)?;
+                parse::<Vec<KnowledgeCard>>(&path, &text)?
+            } else {
+                Vec::new()
+            }
+        };
         let mut strings = BTreeMap::new();
         for language in &manifest.languages {
             ensure!(
@@ -812,6 +854,7 @@ impl Disk {
             wanted.extend(terrain.clear.as_deref());
         }
         wanted.extend(music.iter().map(|m| m.file.as_str()));
+        wanted.extend(knowledge.iter().map(|card| card.image.as_str()));
         wanted.extend(manifest.cover.as_deref());
         wanted.extend(manifest.player_model.as_deref());
         let world_files: Vec<&str> = manifest
@@ -888,6 +931,7 @@ impl Disk {
             quests,
             lore,
             music,
+            knowledge,
             media,
             voices,
             strings,
@@ -1157,9 +1201,63 @@ impl Disk {
                 place.id
             );
         }
+        let mut cards = std::collections::HashSet::new();
+        for card in &self.knowledge {
+            ensure!(
+                is_id(&card.id, 48),
+                "{id}: invalid knowledge id {}",
+                card.id
+            );
+            ensure!(
+                cards.insert(card.id.as_str()),
+                "{id}: duplicate knowledge card {}",
+                card.id
+            );
+            key_ok(&card.title_key)?;
+            key_ok(&card.text_key)?;
+            key_ok(&card.credit_key)?;
+            ensure!(
+                is_media_path(&card.image)
+                    && card.image.starts_with("media/knowledge/")
+                    && (card.image.ends_with(".png") || card.image.ends_with(".jpg")),
+                "{id}: knowledge {} image {} must be a png or jpg below media/knowledge/",
+                card.id,
+                card.image
+            );
+            ensure!(
+                self.media.contains_key(&card.image),
+                "{id}: knowledge {} image {} is missing",
+                card.id,
+                card.image
+            );
+            ensure!(
+                card.wikipedia.contains_key("en"),
+                "{id}: knowledge {} needs an English Wikipedia title",
+                card.id
+            );
+            for (language, title) in &card.wikipedia {
+                ensure!(
+                    language.len() == 2 && language.bytes().all(|b| b.is_ascii_lowercase()),
+                    "{id}: knowledge {} has an invalid language {language}",
+                    card.id
+                );
+                ensure!(
+                    is_wiki_title(title),
+                    "{id}: knowledge {} has an invalid Wikipedia title {title}",
+                    card.id
+                );
+            }
+        }
         for npc in &self.npcs {
             ensure!(is_id(&npc.id, 48), "{id}: invalid npc id {}", npc.id);
             key_ok(&npc.name_key)?;
+            if let Some(about) = &npc.about {
+                ensure!(
+                    !local(about) || cards.contains(about.as_str()),
+                    "{id}: npc {} has unknown knowledge card {about}",
+                    npc.id
+                );
+            }
             if let Some(bio) = &npc.bio_key {
                 key_ok(bio)?;
             }
