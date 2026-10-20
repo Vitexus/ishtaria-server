@@ -264,7 +264,7 @@ async fn build(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     let active: i64 = sqlx::query_scalar("SELECT count(*) FROM portal_pacts WHERE world_id = $1 AND player_id = $2 AND role = 'builder' AND state <> 'closed'")
         .bind(state.world_id).bind(player_id).fetch_one(&mut *transaction).await?;
@@ -332,7 +332,7 @@ async fn contribute(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     let portal = own_portal(&mut transaction, &state, player_id, &id).await?;
     let (Some(x), Some(y), Some(z)) = (portal.site_x, portal.site_y, portal.site_z) else {

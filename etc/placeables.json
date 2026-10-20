@@ -11,7 +11,8 @@
     "workbench": {"model": "survival.workbench", "scale": 1.0, "spacing_m": 1.8, "station": "workbench"},
     "anvil": {"model": "survival.workbench-anvil", "scale": 1.0, "spacing_m": 1.5, "station": "anvil"},
     "tent": {"model": "survival.tent", "scale": 1.0, "spacing_m": 3.0},
-    "fence": {"model": "survival.fence", "scale": 1.0, "spacing_m": 0.6}
+    "fence": {"model": "survival.fence", "scale": 1.0, "spacing_m": 0.6},
+    "snare": {"model": "disk:gilgamesh:media/models/snare_trap.glb", "scale": 1.0, "spacing_m": 2.0}
   },
   "crops": {
     "seed_carrot": {"kind": "crop_carrot", "model": "food.carrot", "produce": "carrot", "min": 2, "max": 4, "grow_minutes": 20},

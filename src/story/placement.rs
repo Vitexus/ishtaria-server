@@ -4,7 +4,10 @@
 //! disks always give the same sites. Results are persisted by the caller: once a place has
 //! a site it never moves.
 
-use super::{disk::{BIOMES, Requires}, Anchor, Story};
+use super::{
+    disk::{Requires, BIOMES},
+    Anchor, Story,
+};
 use crate::movement::{cross, direction_at, dot, unit, WalkingTerrain, RADIUS};
 use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
@@ -282,7 +285,8 @@ fn requires_notes(requires: &Requires, ground: &dyn Ground, direction: [f64; 3])
                 reasons.push(format!("its biome is {}", BIOMES[biome as usize].0));
             }
             if requires.height_m.as_ref().is_some_and(|range| {
-                range.min.is_some_and(|min| height < min) || range.max.is_some_and(|max| height > max)
+                range.min.is_some_and(|min| height < min)
+                    || range.max.is_some_and(|max| height > max)
             }) {
                 reasons.push(format!("its height is {height:.0} m"));
             }

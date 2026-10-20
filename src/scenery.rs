@@ -308,7 +308,14 @@ pub fn settlement(
             "retro.tree-large",
             "retro.tree-shrub",
         ]);
-        props.push(LocalProp::new(model, x, z, rng.between(0.0, TAU), MODULE_M));
+        // Half to one and a half the module so neighbouring trees are not identical.
+        props.push(LocalProp::new(
+            model,
+            x,
+            z,
+            rng.between(0.0, TAU),
+            MODULE_M * rng.between(0.55, 1.45),
+        ));
     }
 
     landmarks(seed, id, size, &mut props);
@@ -610,26 +617,29 @@ pub fn graveyard(seed: &str, id: &str, radius: f64) -> Vec<LocalProp> {
         ));
     }
     // Weeping willows inside the fence, on both sides of the rows of graves.
-    let willows = [
+    let willows: Vec<(f64, f64, f64)> = [
         (-radius * 0.7, -radius * 0.05),
         (radius * 0.7, -radius * 0.05),
         (-radius * 0.62, radius * 0.38),
         (radius * 0.62, radius * 0.38),
-    ];
-    // A willow takes the place of the graves under its crown.
+    ]
+    .into_iter()
+    .map(|(x, z)| (x, z, WILLOW_M * rng.between(0.55, 1.45)))
+    .collect();
+    // A willow takes the place of the graves under its crown (crown grows with the tree).
     props.retain(|prop| {
         !(prop.model.starts_with("graveyard.grave") || prop.model == "graveyard.cross")
-            || willows
-                .iter()
-                .all(|(x, z)| (prop.x - x).hypot(prop.z - z) > WILLOW_CROWN_M)
+            || willows.iter().all(|(x, z, scale)| {
+                (prop.x - x).hypot(prop.z - z) > WILLOW_CROWN_M * (scale / WILLOW_M)
+            })
     });
-    for (x, z) in willows {
+    for (x, z, scale) in willows {
         props.push(LocalProp::new(
             "quaternius.willow",
             x,
             z,
             rng.between(0.0, TAU),
-            WILLOW_M,
+            scale,
         ));
     }
     // Pines outside the fence.
@@ -646,7 +656,7 @@ pub fn graveyard(seed: &str, id: &str, radius: f64) -> Vec<LocalProp> {
             distance * angle.cos(),
             distance * angle.sin(),
             rng.between(0.0, TAU),
-            GRAVE_M * 0.9,
+            GRAVE_M * rng.between(0.55, 1.35),
         ));
     }
     props
@@ -1196,9 +1206,9 @@ mod tests {
         assert!(yard
             .iter()
             .filter(|p| p.model.starts_with("graveyard.grave") || p.model == "graveyard.cross")
-            .all(|p| willows
-                .iter()
-                .all(|w| (p.x - w.x).hypot(p.z - w.z) > WILLOW_CROWN_M)));
+            .all(|p| willows.iter().all(|w| {
+                (p.x - w.x).hypot(p.z - w.z) > WILLOW_CROWN_M * (w.scale / WILLOW_M)
+            })));
     }
 
     #[test]

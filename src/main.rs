@@ -8,6 +8,7 @@ mod combat;
 mod creatures;
 mod durability;
 mod environment;
+mod escort;
 mod experience;
 mod federation;
 mod fishing;
@@ -16,9 +17,12 @@ mod glb;
 mod guard;
 mod hall;
 mod herd;
+mod hunting;
 mod land;
+mod love;
 mod magic;
 mod movement;
+mod npc_combat;
 mod placing;
 mod players;
 mod portals;
@@ -258,6 +262,8 @@ fn app(state: AppState) -> Router {
         .merge(placing::routes())
         .merge(fishing::routes())
         .merge(magic::routes())
+        .merge(love::routes())
+        .merge(npc_combat::routes())
         .merge(story::api::routes())
         // Nothing the API accepts is large; routes with their own limit keep it.
         .layer(axum::extract::DefaultBodyLimit::max(65_536))
@@ -528,6 +534,18 @@ async fn main() -> Result<()> {
             }
             if survival::settle_world(&survival_state).await.is_err() {
                 eprintln!("survival update failed");
+            }
+            if hunting::tick(&survival_state).await.is_err() {
+                eprintln!("hunting update failed");
+            }
+            if escort::tick(&survival_state).await.is_err() {
+                eprintln!("escort update failed");
+            }
+            if love::tick(&survival_state).await.is_err() {
+                eprintln!("love update failed");
+            }
+            if npc_combat::tick(&survival_state).await.is_err() {
+                eprintln!("npc combat update failed");
             }
         }
     });

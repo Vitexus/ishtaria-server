@@ -15,7 +15,7 @@ async fn strike(
                 .await
                 .unwrap()
         );
-        let counter = crate::combat::counter_attack(&mut transaction, player_id, model)
+        let counter = crate::combat::counter_attack(state, &mut transaction, player_id, model)
             .await
             .unwrap();
         transaction.commit().await.unwrap();
@@ -132,7 +132,7 @@ async fn dangerous_animals_bite_back_and_armour_helps(pool: PgPool) {
     let mut transaction = pool.begin().await.unwrap();
     for _ in 0..50 {
         assert!(
-            crate::combat::counter_attack(&mut transaction, id, "animal.pig")
+            crate::combat::counter_attack(&state, &mut transaction, id, "animal.pig")
                 .await
                 .unwrap()
                 .is_none()

@@ -4,7 +4,7 @@
 //! becomes `<disk>:<id>` once several disks are composed into one [`Story`].
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -62,6 +62,12 @@ pub struct Manifest {
     /// `player_character`.
     #[serde(default)]
     pub player_body: Option<PlayerBody>,
+    /// Granted once when a new player is created on a world that uses this disk.
+    #[serde(default)]
+    pub starting_items: Vec<ItemQty>,
+    /// Local quest ids begun at character creation (`start_stage` of each).
+    #[serde(default)]
+    pub auto_start_quests: Vec<String>,
     #[serde(default = "default_languages")]
     pub languages: Vec<String>,
     #[serde(default)]
@@ -426,6 +432,31 @@ pub struct Once {
     pub effects: Vec<Effect>,
 }
 
+/// One beat of a visual duel / flourish (no damage): NPC or player plays a clip.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FlourishStep {
+    /// `npc` or `player`.
+    pub actor: String,
+    /// Animation clip name as on the model (`box`, `kick`, …).
+    pub clip: String,
+}
+
+/// Hand the player another playable body (Tablet I hunter → Šamḫat → …).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetPlayable {
+    /// Pack look (`retro/humanFemaleA`, …); must pass `players::valid_character`.
+    pub character: String,
+    /// Optional `.glb` under this disk's `media/models/`.
+    pub model: Option<String>,
+    /// Local NPC id to suppress while the player wears this role (qualified on load).
+    pub hide_npc: Option<String>,
+    /// Filled when the disk is composed; not authored in YAML.
+    #[serde(skip)]
+    pub disk: Option<String>,
+}
+
 /// A structured effect: exactly one field is set.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -436,6 +467,12 @@ pub struct Effect {
     pub set_flag: Option<String>,
     pub set_stage: Option<QuestStageRef>,
     pub once: Option<Once>,
+    /// Short visual flourish sequence returned with the dialogue reply (not persisted).
+    pub flourish: Option<Vec<FlourishStep>>,
+    /// Change the player's avatar and optional story model.
+    pub set_playable: Option<SetPlayable>,
+    /// Move the player to a placed story place (qualified on load).
+    pub teleport_place: Option<String>,
 }
 
 /// A short piece of knowledge a character tells about itself or its trade (`knowledge.yaml`), shown with one
@@ -462,6 +499,36 @@ pub fn is_wiki_title(title: &str) -> bool {
         && !title
             .chars()
             .any(|c| c.is_whitespace() || c.is_control() || "#?<>[]{}|\\/%\"&=+".contains(c))
+}
+
+/// Hidden animation unlock for an NPC (Easter egg). Conditions are evaluated server-side.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EasterEgg {
+    pub id: String,
+    /// Local NPC id (qualified when the disk is composed).
+    pub npc: String,
+    /// Clip name on the NPC model (`Twerk`, `Dance`, …).
+    pub clip: String,
+    #[serde(rename = "if")]
+    pub condition: Option<EggCondition>,
+}
+
+/// Conditions for Easter eggs; extends dialogue conditions with night / known spells.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EggCondition {
+    pub all: Option<Vec<EggCondition>>,
+    pub any: Option<Vec<EggCondition>>,
+    pub not: Option<Box<EggCondition>>,
+    pub flag: Option<String>,
+    pub quest_stage: Option<QuestStageRef>,
+    pub has_item: Option<ItemQty>,
+    pub gold_at_least: Option<i64>,
+    /// True when the sun is below the horizon at the NPC.
+    pub night: Option<bool>,
+    /// Spell id the player has learned (`night`, `day`, …).
+    pub knows_spell: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -506,6 +573,14 @@ pub struct Dialogue {
     pub nodes: BTreeMap<String, Node>,
 }
 
+/// Where a failed / deadly attempt at this stage sends the player (quest checkpoint).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FailRestart {
+    pub stage: String,
+    pub place: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Stage {
@@ -515,6 +590,8 @@ pub struct Stage {
     pub reach: Option<Reach>,
     /// Place the player is pointed to while this stage is current (defaults to the reach place).
     pub guide: Option<String>,
+    /// Override quest start when the player dies or a companion fails on this stage.
+    pub fail_restart: Option<FailRestart>,
 }
 
 /// Moves the quest on when the player comes within `radius_m` of a place.
@@ -534,6 +611,15 @@ pub struct StageFile {
     pub final_stage: bool,
     pub reach: Option<Reach>,
     pub guide: Option<String>,
+    pub fail_restart: Option<FailRestart>,
+}
+
+/// Prologue lines for the client's tablet UI when a quest first appears.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QuestExcerpt {
+    pub paraphrase_key: String,
+    pub akkadian_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -544,6 +630,7 @@ pub struct QuestFile {
     pub start_stage: String,
     /// Place where the quest begins: shown as the next story point until the quest is started.
     pub start_place: Option<String>,
+    pub excerpt: Option<QuestExcerpt>,
     pub stages: BTreeMap<String, StageFile>,
 }
 
@@ -553,6 +640,7 @@ pub struct Quest {
     pub title_key: String,
     pub start_stage: String,
     pub start_place: Option<String>,
+    pub excerpt: Option<QuestExcerpt>,
     pub stages: BTreeMap<String, Stage>,
 }
 
@@ -690,6 +778,8 @@ pub struct Disk {
     pub quests: Vec<Quest>,
     pub lore: Vec<Lore>,
     pub music: Vec<Music>,
+    /// Optional Easter-egg unlocks (`easter_eggs.yaml` at the disk root).
+    pub easter_eggs: Vec<EasterEgg>,
     /// Knowledge cards of the characters (`knowledge.yaml` at the disk root).
     pub knowledge: Vec<KnowledgeCard>,
     /// Media files (path below the disk -> absolute file) with their sha256.
@@ -706,6 +796,15 @@ fn is_id(text: &str, max: usize) -> bool {
         && text
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn is_egg_id(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 48
+        && text.starts_with(|c: char| c.is_ascii_lowercase())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.'))
 }
 
 fn is_disk_id(text: &str) -> bool {
@@ -797,6 +896,7 @@ impl Disk {
                 title_key: file.title_key,
                 start_stage: file.start_stage,
                 start_place: file.start_place,
+                excerpt: file.excerpt,
                 stages: file
                     .stages
                     .into_iter()
@@ -808,12 +908,39 @@ impl Disk {
                                 final_stage: stage.final_stage,
                                 reach: stage.reach,
                                 guide: stage.guide,
+                                fail_restart: stage.fail_restart,
                             },
                         )
                     })
                     .collect(),
             });
         }
+        let easter_eggs = {
+            let path = dir.join("easter_eggs.yaml");
+            if path.is_file() {
+                count += 1;
+                ensure!(count <= MAX_FILES, "too many files in the datadisk");
+                let text = read_limited(&path, &mut hasher, dir)?;
+                let eggs: Vec<EasterEgg> = parse(&path, &text)?;
+                for egg in &eggs {
+                    ensure!(is_egg_id(&egg.id), "invalid easter egg id {}", egg.id);
+                    ensure!(is_id(&egg.npc, 48), "invalid easter egg npc {}", egg.npc);
+                    ensure!(
+                        !egg.clip.is_empty()
+                            && egg.clip.len() <= 48
+                            && egg
+                                .clip
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                        "invalid easter egg clip {}",
+                        egg.clip
+                    );
+                }
+                eggs
+            } else {
+                Vec::new()
+            }
+        };
         let knowledge = {
             let path = dir.join("knowledge.yaml");
             if path.is_file() {
@@ -917,9 +1044,14 @@ impl Disk {
             );
             let bytes = fs::read(&path)?;
             let digest = format!("{:x}", Sha256::digest(&bytes));
-            hasher.update((relative.len() as u64).to_le_bytes());
-            hasher.update(relative.as_bytes());
-            hasher.update(digest.as_bytes());
+            // Spoken lines are presentation (like UI language): they are served and size-checked,
+            // but must not change the world's pinned datadisk identity. Otherwise shipping a
+            // Piper dub for an already-generated world makes the story unload.
+            if !relative.starts_with("media/voice/") {
+                hasher.update((relative.len() as u64).to_le_bytes());
+                hasher.update(relative.as_bytes());
+                hasher.update(digest.as_bytes());
+            }
             media.insert(relative.to_owned(), (path, digest));
         }
         let disk = Self {
@@ -931,6 +1063,7 @@ impl Disk {
             quests,
             lore,
             music,
+            easter_eggs,
             knowledge,
             media,
             voices,
@@ -1435,6 +1568,12 @@ impl Disk {
         }
         for quest in self.quests.iter() {
             key_ok(&quest.title_key)?;
+            if let Some(excerpt) = &quest.excerpt {
+                key_ok(&excerpt.paraphrase_key)?;
+                if let Some(akkadian) = &excerpt.akkadian_key {
+                    key_ok(akkadian)?;
+                }
+            }
             ensure!(
                 quest.stages.contains_key(&quest.start_stage),
                 "{id}: quest {} has an unknown start stage",
@@ -1473,6 +1612,20 @@ impl Disk {
                         reach.radius_m >= 5.0 && reach.radius_m <= 2000.0,
                         "{id}: quest {} has an invalid reach radius",
                         quest.id
+                    );
+                }
+                if let Some(restart) = &stage.fail_restart {
+                    ensure!(
+                        quest.stages.contains_key(&restart.stage),
+                        "{id}: quest {} fail_restart names unknown stage {}",
+                        quest.id,
+                        restart.stage
+                    );
+                    ensure!(
+                        !local(&restart.place) || places.contains(restart.place.as_str()),
+                        "{id}: quest {} fail_restart names unknown place {}",
+                        quest.id,
+                        restart.place
                     );
                 }
             }
@@ -1658,6 +1811,9 @@ fn check_effects(
             effect.set_flag.is_some(),
             effect.set_stage.is_some(),
             effect.once.is_some(),
+            effect.flourish.is_some(),
+            effect.set_playable.is_some(),
+            effect.teleport_place.is_some(),
         ]
         .iter()
         .filter(|set| **set)
@@ -1685,6 +1841,43 @@ fn check_effects(
                 "once effects cannot nest"
             );
             check_effects(&once.effects, stage_ok)?;
+        }
+        if let Some(steps) = &effect.flourish {
+            ensure!(
+                (1..=8).contains(&steps.len()),
+                "flourish must have 1..=8 steps"
+            );
+            for step in steps {
+                ensure!(
+                    matches!(step.actor.as_str(), "npc" | "player"),
+                    "flourish actor must be npc or player"
+                );
+                ensure!(is_id(&step.clip, 32), "invalid flourish clip {}", step.clip);
+            }
+        }
+        if let Some(playable) = &effect.set_playable {
+            ensure!(
+                crate::players::valid_character(&playable.character),
+                "invalid playable character {}",
+                playable.character
+            );
+            if let Some(model) = &playable.model {
+                ensure!(
+                    is_media_path(model)
+                        && model.starts_with("media/models/")
+                        && model.ends_with(".glb"),
+                    "invalid playable model {model}"
+                );
+            }
+            if let Some(npc) = &playable.hide_npc {
+                ensure!(is_id(npc, 48), "invalid hide_npc {npc}");
+            }
+        }
+        if let Some(place) = &effect.teleport_place {
+            ensure!(
+                is_id(place, 48) || place.contains(':'),
+                "invalid teleport_place {place}"
+            );
         }
     }
     Ok(())

@@ -14,8 +14,13 @@ use sqlx::{FromRow, Postgres, Transaction};
 
 const REST_DELAY: f64 = 5.0;
 const STAMINA_RECOVERY: f64 = 0.5;
+/// Sitting on a rock: shorter wait and faster stamina recovery than standing idle.
+const SIT_REST_DELAY: f64 = 1.0;
+const SIT_STAMINA_RECOVERY: f64 = 1.25;
 const WATER_IDLE_RATE: f64 = 0.01;
 const DEHYDRATION_DAMAGE: f64 = 0.2;
+/// Health a character in water loses per second: a full reserve lasts about a minute.
+const DROWNING_DAMAGE: f64 = 100.0 / 60.0;
 /// A character is present while their client reports (events poll) or they move within this
 /// many seconds. Sleeping characters lose no water: only present time is charged.
 const PRESENCE_SECONDS: f64 = 120.0;
@@ -54,8 +59,19 @@ async fn save_reserves(
 
 async fn rest(transaction: &mut Transaction<'_, Postgres>, id: i64) -> Result<bool, Error> {
     let mut value = reserves(transaction, id).await?;
-    let resting = value.elapsed.min((value.idle - REST_DELAY).max(0.0));
-    value.stamina = (value.stamina + resting * STAMINA_RECOVERY).min(100.0);
+    let sitting: bool =
+        sqlx::query_scalar("SELECT sitting_object_id IS NOT NULL FROM players WHERE id = $1")
+            .bind(id)
+            .fetch_one(&mut **transaction)
+            .await?;
+    let delay = if sitting { SIT_REST_DELAY } else { REST_DELAY };
+    let rate = if sitting {
+        SIT_STAMINA_RECOVERY
+    } else {
+        STAMINA_RECOVERY
+    };
+    let resting = value.elapsed.min((value.idle - delay).max(0.0));
+    value.stamina = (value.stamina + resting * rate).min(100.0);
     if resting > 0.0 {
         value.activity_seconds = 0.0;
     }
@@ -83,6 +99,23 @@ async fn rest(transaction: &mut Transaction<'_, Postgres>, id: i64) -> Result<bo
         return Ok(false);
     }
     Ok(true)
+}
+
+/// Charges a character in water the health they lose by drowning during `seconds`. Returns whether
+/// they died (permanently, as with any other damage).
+pub(super) async fn drown(
+    state: &AppState,
+    transaction: &mut Transaction<'_, Postgres>,
+    id: i64,
+    seconds: f64,
+) -> Result<bool, Error> {
+    let mut value = reserves(transaction, id).await?;
+    value.health = (value.health - seconds.clamp(0.0, 0.25) * DROWNING_DAMAGE).max(0.0);
+    save_reserves(transaction, id, &value).await?;
+    if value.health < 1.0 {
+        return lethal(state, transaction, id, DamageCause::Drowning).await;
+    }
+    Ok(false)
 }
 
 /// Charges the stamina of a take-off.
@@ -364,13 +397,16 @@ pub(super) struct Obituary {
     lived_days: String,
     lifetime_gold: String,
     friends_count: String,
+    /// How the character died (`creature`, `fall`, …); drives the client death clip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    death_cause: Option<String>,
 }
 
 pub(super) async fn obituary(
     transaction: &mut Transaction<'_, Postgres>,
     id: i64,
 ) -> Result<Obituary, Error> {
-    Ok(sqlx::query_as("SELECT player_name AS name, to_char(born_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS born_at, lived_days::text, lifetime_gold::text, friends_count::text FROM graves WHERE player_id = $1")
+    Ok(sqlx::query_as("SELECT player_name AS name, to_char(born_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS born_at, lived_days::text, lifetime_gold::text, friends_count::text, cause AS death_cause FROM graves WHERE player_id = $1")
         .bind(id).fetch_one(&mut **transaction).await?)
 }
 
@@ -382,6 +418,7 @@ pub(super) enum DamageCause {
     FallingTree,
     HostilePlayer,
     Creature,
+    Drowning,
 }
 
 impl DamageCause {
@@ -392,13 +429,16 @@ impl DamageCause {
             DamageCause::FallingTree => "falling_tree",
             DamageCause::HostilePlayer => "hostile_player",
             DamageCause::Creature => "creature",
+            DamageCause::Drowning => "drowning",
         }
     }
 }
 
 /// Hurts a living character that the caller has locked in `transaction`. Returns whether
-/// the damage killed them; death is permanent and leaves a grave like any other.
+/// the damage killed them permanently. During an active story quest, zero health soft-restarts
+/// the quest at its checkpoint instead of a memorial (see `story::checkpoint`).
 pub(super) async fn hurt(
+    state: &AppState,
     transaction: &mut Transaction<'_, Postgres>,
     id: i64,
     damage: i32,
@@ -415,9 +455,38 @@ pub(super) async fn hurt(
     .fetch_one(&mut **transaction)
     .await?;
     if health == 0 {
-        die(transaction, id, cause.name()).await?;
+        return lethal(state, transaction, id, cause).await;
     }
-    Ok(health == 0)
+    Ok(false)
+}
+
+/// Health reached zero: an immortal is healed, an active quest restarts at its checkpoint,
+/// anyone else dies. Returns whether the character died.
+async fn lethal(
+    state: &AppState,
+    transaction: &mut Transaction<'_, Postgres>,
+    id: i64,
+    cause: DamageCause,
+) -> Result<bool, Error> {
+    // Story flag from the Gilgamesh ending: the plant of youth was kept.
+    let immortal: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM player_story_flags WHERE player_id = $1 AND (flag = 'eternal_life' OR flag LIKE '%:eternal_life'))",
+    )
+    .bind(id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if immortal {
+        sqlx::query("UPDATE players SET health = 100 WHERE id = $1")
+            .bind(id)
+            .execute(&mut **transaction)
+            .await?;
+        return Ok(false);
+    }
+    if crate::story::checkpoint::restart_active_quest(state, transaction, id).await? {
+        return Ok(false);
+    }
+    die(transaction, id, cause.name()).await?;
+    Ok(true)
 }
 
 #[allow(dead_code)]
@@ -436,7 +505,7 @@ pub(super) async fn apply_damage(
         if player.starving {
             die(&mut transaction, id, "starvation").await?;
         } else {
-            hurt(&mut transaction, id, damage, cause).await?;
+            hurt(state, &mut transaction, id, damage, cause).await?;
         }
     }
     transaction.commit().await?;

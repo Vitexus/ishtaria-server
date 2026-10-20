@@ -69,6 +69,12 @@ pub struct NpcDescriptor {
     /// on; `position` is where the character stands now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wander: Option<Vec<[f64; 4]>>,
+    /// Clip names unlocked for this viewer (Easter eggs); empty for guests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unlocked_eggs: Vec<String>,
+    /// Health bar for this viewer: hidden until the NPC is hurt or hostile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<crate::npc_combat::HealthBar>,
 }
 
 /// A region around a place where a track plays; clients fade it in and out by distance.
@@ -333,7 +339,10 @@ async fn build(
     let npcs = npc_descriptors(&story, &sites, terrain.as_ref());
     let spawn = find_spawn(&story, &sites, &colliders, &npcs, terrain.as_ref(), &seed);
     let areas = area_descriptors(&story, &sites);
-    movement::set_wildlife(format!("{seed}:{heightmap}"), wildlife_zones(&story, &sites));
+    movement::set_wildlife(
+        format!("{seed}:{heightmap}"),
+        wildlife_zones(&story, &sites),
+    );
     movement::set_statics(format!("{seed}:{heightmap}"), colliders);
     movement::set_farms(format!("{seed}:{heightmap}"), farms);
     Ok(StoryWorld {
@@ -365,6 +374,7 @@ pub fn find_spawn(
     let reach = (anchor.place.radius_m.unwrap_or(20.0) * 0.4).clamp(3.0, 12.0);
     let mut random = crate::scenery::Rng::new(seed, &format!("spawn:{}", anchor.id));
     let mut fallback = None;
+    let mut wet = None;
     for attempt in 0..400 {
         // Closer spots first, spreading outwards as the nearest ones turn out to be taken.
         let distance = 2.5 + (reach - 2.5) * f64::from(attempt) / 400.0 + random.between(0.0, 1.0);
@@ -376,7 +386,6 @@ pub fn find_spawn(
             |direction| ground.height(direction).max(0.0),
             movement::RADIUS,
         );
-        let _ = direction;
         fallback.get_or_insert(position);
         let clear = |other: [f64; 3], radius: f64| {
             length(std::array::from_fn(|axis| position[axis] - other[axis])) > radius
@@ -386,10 +395,14 @@ pub fn find_spawn(
             .all(|c| clear(c.position, c.collision_radius_m + 1.2))
             && npcs.iter().all(|npc| clear(npc.position, 2.0))
         {
-            return Some(position);
+            // Dry ground first: a character put into water has to swim, and drowns.
+            if ground.land_site(direction).is_some() {
+                return Some(position);
+            }
+            wet.get_or_insert(position);
         }
     }
-    fallback
+    wet.or(fallback)
 }
 
 /// Historical flora/fauna overlays of placed story sites.
@@ -405,10 +418,7 @@ pub fn wildlife_zones(
             let site = sites.get(&anchor.id)?;
             Some(movement::WildlifeZone {
                 direction: site.direction,
-                radius_m: wildlife
-                    .radius_m
-                    .or(anchor.place.radius_m)
-                    .unwrap_or(500.0),
+                radius_m: wildlife.radius_m.or(anchor.place.radius_m).unwrap_or(500.0),
                 density: wildlife.density.unwrap_or(1.0),
                 flora: wildlife
                     .flora
@@ -465,18 +475,36 @@ pub fn npc_descriptors(
         ) else {
             continue;
         };
-        let hash = Sha256::digest(format!("ishtaria-npc:{}", npc.id).as_bytes());
-        let sample = |index: usize| {
-            f64::from(u32::from_le_bytes(
-                hash[index * 4..index * 4 + 4].try_into().unwrap(),
-            )) / 4_294_967_296.0
-        };
         let reach = (anchor.place.radius_m.unwrap_or(20.0) * 0.4).clamp(3.0, 12.0);
-        let direction = placement::offset(
-            site.direction,
-            2.0 + sample(0) * (reach - 2.0),
-            sample(1) * std::f64::consts::TAU,
-        );
+        // The first offset is the character's own place; if it is in water, a few more are tried
+        // so that a surveyed point on a river bank does not stand its people in the stream.
+        let mut chosen = None;
+        for attempt in 0..16 {
+            let key = if attempt == 0 {
+                format!("ishtaria-npc:{}", npc.id)
+            } else {
+                format!("ishtaria-npc:{}:{attempt}", npc.id)
+            };
+            let hash = Sha256::digest(key.as_bytes());
+            let sample = |index: usize| {
+                f64::from(u32::from_le_bytes(
+                    hash[index * 4..index * 4 + 4].try_into().unwrap(),
+                )) / 4_294_967_296.0
+            };
+            let direction = placement::offset(
+                site.direction,
+                2.0 + sample(0) * (reach - 2.0),
+                sample(1) * std::f64::consts::TAU,
+            );
+            let candidate = (direction, sample(2));
+            let dry = ground.land_site(direction).is_some();
+            chosen.get_or_insert(candidate);
+            if dry {
+                chosen = Some(candidate);
+                break;
+            }
+        }
+        let (direction, yaw_sample) = chosen.expect("at least one attempt");
         let height = ground.height(direction).max(0.0);
         npcs.push(NpcDescriptor {
             id: npc.id.clone(),
@@ -484,7 +512,7 @@ pub fn npc_descriptors(
             character: format!("{}/{}", npc.character.pack, npc.character.skin),
             model: npc.character.model.as_deref().map(media_url),
             position: direction.map(|axis| axis * (RADIUS + height)),
-            yaw: sample(2) * std::f64::consts::TAU,
+            yaw: yaw_sample * std::f64::consts::TAU,
             scale_m: MAN_HEIGHT_M * npc.size.unwrap_or(1.0),
             portrait: npc.portrait.as_deref().map(media_url),
             shop: npc
@@ -495,6 +523,8 @@ pub fn npc_descriptors(
             movement: npc.movement.clone(),
             site: site.direction,
             wander: None,
+            unlocked_eggs: Vec::new(),
+            health: None,
         });
     }
     npcs
@@ -667,6 +697,37 @@ pub async fn player_character(state: &AppState) -> Option<String> {
     })
 }
 
+/// Grants disk `starting_items` and begins `auto_start_quests` for a newly created character.
+/// Safe to call when the world has no story (then it does nothing). Never regrants on login.
+pub async fn apply_new_player(
+    state: &AppState,
+    player_id: i64,
+) -> Result<(), crate::players::Error> {
+    let Some(world) = world(state).await? else {
+        return Ok(());
+    };
+    if world.story.starting_items.is_empty() && world.story.auto_start_quests.is_empty() {
+        return Ok(());
+    }
+    let mut transaction = state.pool.begin().await?;
+    if !world.story.starting_items.is_empty() {
+        crate::gathering::add_items(&mut transaction, player_id, &world.story.starting_items)
+            .await?;
+    }
+    for (quest, stage) in &world.story.auto_start_quests {
+        sqlx::query(
+            "INSERT INTO player_quests (player_id, quest_id, stage) VALUES ($1, $2, $3) ON CONFLICT (player_id, quest_id) DO NOTHING",
+        )
+        .bind(player_id)
+        .bind(quest)
+        .bind(stage)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
 /// The body the datadisk of the world gives the players, as (character, body); the first disk that names a
 /// character decides. A character of another look is an ordinary person.
 pub async fn player_body(state: &AppState) -> Option<(String, super::disk::PlayerBody)> {
@@ -680,7 +741,12 @@ pub async fn player_body(state: &AppState) -> Option<(String, super::disk::Playe
 }
 
 /// NPCs near a point. A broken or missing story never disturbs the rest of the world.
-pub async fn npcs_near(state: &AppState, point: [f64; 3]) -> Vec<NpcDescriptor> {
+/// When `player_id` is set, each NPC carries Easter-egg clip names unlocked for that player.
+pub async fn npcs_near(
+    state: &AppState,
+    point: [f64; 3],
+    player_id: Option<i64>,
+) -> Vec<NpcDescriptor> {
     let Ok(Some(world)) = world(state).await else {
         return Vec::new();
     };
@@ -715,12 +781,117 @@ pub async fn npcs_near(state: &AppState, point: [f64; 3]) -> Vec<NpcDescriptor> 
     } else {
         HashMap::new()
     };
-    near.into_iter()
-        .map(|npc| match &terrain {
-            Some(terrain) => walking(&**terrain, npc, now, pauses.get(&npc.id)),
-            None => npc.clone(),
+    let egg_ctx = match player_id {
+        Some(id) if !world.story.easter_eggs.is_empty() => {
+            super::eggs::EggContext::load(state, id).await.ok()
+        }
+        _ => None,
+    };
+    let hidden_role: Option<String> = match player_id {
+        Some(id) => sqlx::query_scalar("SELECT story_role FROM players WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    // Escorted companion (Šamḫat) follows the player even far from her temple site.
+    let escort = match player_id {
+        Some(id) => crate::escort::active_for(state, id).await.ok().flatten(),
+        None => None,
+    };
+    // Love minigame: wild Enkidu weaves at the water-hole (server position).
+    let love = match player_id {
+        Some(id) => crate::love::active_for(state, id).await.ok().flatten(),
+        None => None,
+    };
+    let player_pos: Option<[f64; 3]> = match player_id {
+        Some(id) if escort.is_some() => sqlx::query_as(
+            "SELECT position_x, position_y, position_z FROM players WHERE id = $1 AND position_x IS NOT NULL",
+        )
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|(x, y, z): (f64, f64, f64)| [x, y, z]),
+        _ => None,
+    };
+    let escort_companion = escort.as_ref().map(|row| row.companion_id.as_str());
+    let mut listed: Vec<NpcDescriptor> = near
+        .into_iter()
+        .filter(|npc| hidden_role.as_deref() != Some(npc.id.as_str()))
+        .map(|npc| {
+            let mut described = match &terrain {
+                Some(terrain) => walking(&**terrain, npc, now, pauses.get(&npc.id)),
+                None => npc.clone(),
+            };
+            if let Some(ctx) = &egg_ctx {
+                described.unlocked_eggs = super::eggs::unlocked_clips(
+                    &world.story.easter_eggs,
+                    &described.id,
+                    described.position,
+                    ctx,
+                );
+            }
+            described
         })
-        .collect()
+        .collect();
+    if let (Some(companion_id), Some(player)) = (escort_companion, player_pos) {
+        if hidden_role.as_deref() != Some(companion_id) {
+            let follow = crate::escort::follow_position(player);
+            if let Some(index) = listed.iter().position(|npc| npc.id == companion_id) {
+                listed[index].position = follow;
+                listed[index].wander = None;
+                listed[index].movement = None;
+            } else if let Some(home) = world.npcs.iter().find(|npc| npc.id == companion_id) {
+                let mut described = home.clone();
+                described.position = follow;
+                described.wander = None;
+                described.movement = None;
+                if let Some(ctx) = &egg_ctx {
+                    described.unlocked_eggs = super::eggs::unlocked_clips(
+                        &world.story.easter_eggs,
+                        &described.id,
+                        described.position,
+                        ctx,
+                    );
+                }
+                listed.push(described);
+            }
+        }
+    }
+    if let Some(love) = love {
+        if let Some(index) = listed
+            .iter()
+            .position(|npc| crate::love::is_wild_enkidu(&npc.id))
+        {
+            listed[index].position = love.enkidu;
+            listed[index].wander = None;
+            listed[index].movement = None;
+        } else if let Some(home) = world
+            .npcs
+            .iter()
+            .find(|npc| crate::love::is_wild_enkidu(&npc.id))
+        {
+            if hidden_role.as_deref() != Some(home.id.as_str()) {
+                let mut described = home.clone();
+                described.position = love.enkidu;
+                described.wander = None;
+                described.movement = None;
+                listed.push(described);
+            }
+        }
+    }
+    if let Some(id) = player_id {
+        for npc in &mut listed {
+            if let Ok(Some(bar)) = crate::npc_combat::bar_for(state, id, &npc.id).await {
+                npc.health = Some(bar);
+            }
+        }
+    }
+    listed
 }
 
 /// Music areas whose region is near a point (the client works out the distance itself).

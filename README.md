@@ -231,6 +231,38 @@ invalid formats/characters 400, unknown JSON fields 422 and busy authentication
 429. Use TLS and deployment-level authentication rate limiting before exposing
 these endpoints publicly; CORS or the two-job hashing limit are not rate limiting.
 
+### Behind HAProxy (or another TLS reverse proxy)
+
+The client requires **HTTPS** for any non-localhost server address. Terminate TLS on
+HAProxy, nginx or Caddy and proxy plain HTTP to the world process. Set
+`public_url` to that HTTPS name and enable `trust_proxy` **under `[limits]`** (a
+top-level `trust_proxy` key is ignored):
+
+```toml
+listen = "0.0.0.0:7400"   # or a private address only the proxy can reach
+public_url = "https://world.example.org"
+
+[limits]
+trust_proxy = true        # last X-Forwarded-For hop (HAProxy option forwardfor)
+```
+
+HAProxy health checks must not use `GET /` (this server answers 404 there). Prefer
+`GET /world` with expect status 200, or a TCP check. Example backend:
+
+```
+backend world_example_org
+    mode http
+    option forwardfor
+    option httpchk GET /world
+    http-check send meth GET uri /world ver HTTP/1.1 hdr Host world.example.org
+    http-check expect status 200
+    server world 10.0.0.10:7400 check
+```
+
+Players connect with `https://world.example.org` (no `:7400`). Full notes:
+[hardening](https://vitexsoftware.github.io/ishtaria-docs/operations/hardening.html)
+in `ishtaria-docs`.
+
 ## Survival And Permanent Memorials
 
 Migration `0015_gold_in_inventory.sql` moves gold from a balance column into the `gold` inventory item (exact balances preserved, verified inside the migration).

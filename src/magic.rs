@@ -208,7 +208,7 @@ async fn learn(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     let level: i32 = sqlx::query_scalar("SELECT level FROM players WHERE id = $1")
         .bind(player_id)
@@ -287,7 +287,7 @@ async fn cast(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     let row: Option<(f64, f64, f64)> = sqlx::query_as("SELECT position_x, position_y, position_z FROM players WHERE id = $1 AND position_x IS NOT NULL")
         .bind(player_id).fetch_optional(&mut *transaction).await?;
@@ -343,6 +343,7 @@ async fn cast(
                 return Err(status(StatusCode::FORBIDDEN, "target is out of range"));
             }
             let hit = creatures::spell_strike(
+                &state,
                 state.world_id,
                 &mut transaction,
                 terrain,
@@ -355,7 +356,7 @@ async fn cast(
             if hit.counter.as_ref().is_some_and(|counter| counter.died) {
                 let notice = super::survival::obituary(&mut transaction, player_id).await?;
                 transaction.commit().await?;
-                return Err(Error::Obituary(notice));
+                return Err(Error::Obituary(Box::new(notice)));
             }
             target_model = Some(target.model.clone());
             strike = Some(hit);

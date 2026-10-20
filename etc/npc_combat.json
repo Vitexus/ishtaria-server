@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "max_health": 100,
+  "strike_damage": 20,
+  "counter_damage": 8,
+  "counter_chance": 0.65,
+  "counter_cooldown_seconds": 3.0,
+  "engage_range_m": 8.0,
+  "strike_range_m": 4.5,
+  "apology_gold": 50,
+  "defeat_health": 0
+}

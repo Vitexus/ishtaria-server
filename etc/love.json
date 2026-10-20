@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "quest_suffix": ":shamhat_and_the_wild_man",
+  "active_stage": "see_the_savage",
+  "won_stage": "teach_love",
+  "npc_suffix": ":enkidu",
+  "hits_to_win": 10,
+  "zone_radius_m": 1.0,
+  "zone_ttl_seconds": 10.0,
+  "throw_cooldown_seconds": 0.6,
+  "throw_range_m": 35.0,
+  "arena_radius_m": 55.0,
+  "dodge_radius_m": 18.0,
+  "dodge_speed_rad_s": 0.55,
+  "won_flag": "enkidu_tamed_by_love"
+}

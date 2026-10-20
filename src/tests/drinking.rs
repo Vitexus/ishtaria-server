@@ -104,3 +104,54 @@ async fn sleeping_characters_keep_their_water_and_food_and_drink_restore_it(pool
     let unauthenticated = player_request(&router, "POST", "/players/me/drink", "", "").await;
     assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[sqlx::test]
+#[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
+async fn a_character_in_water_loses_health_by_fractions_and_drowns(pool: PgPool) {
+    let _auth_test = AUTH_TESTS.acquire().await.unwrap();
+    let world_id = initialize_spawn_world(&pool).await;
+    let state = AppState {
+        pool: pool.clone(),
+        world_id,
+    };
+    let router = app(state.clone());
+    create_session(&router, "swimmer").await;
+    let id: i64 = sqlx::query_scalar("SELECT id FROM players")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // One step of a quarter second costs less than a point, and the rest is not lost.
+    let mut transaction = pool.begin().await.unwrap();
+    assert!(!survival::drown(&state, &mut transaction, id, 0.25)
+        .await
+        .unwrap());
+    transaction.commit().await.unwrap();
+    let health: f64 =
+        sqlx::query_scalar("SELECT (health + health_fraction)::float8 FROM players WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!((health - (100.0 - 0.25 * 100.0 / 60.0)).abs() < 1e-6);
+
+    // About a minute in the water kills for good, with its own cause.
+    let mut died = false;
+    for _ in 0..300 {
+        let mut transaction = pool.begin().await.unwrap();
+        died = survival::drown(&state, &mut transaction, id, 0.25)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        if died {
+            break;
+        }
+    }
+    assert!(died);
+    let cause: String = sqlx::query_scalar("SELECT cause FROM graves WHERE player_id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cause, "drowning");
+}

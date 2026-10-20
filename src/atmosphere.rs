@@ -98,7 +98,7 @@ pub fn next_horizon_crossing(observer: [f64; 3], after: f64, rising: bool) -> f6
 
 #[cfg(test)]
 mod solar_tests {
-    use super::{next_horizon_crossing, HORIZON_ELEVATION_DEGREES, Solar};
+    use super::{next_horizon_crossing, Solar, HORIZON_ELEVATION_DEGREES};
 
     #[test]
     fn noon_midnight_and_unit_direction() {

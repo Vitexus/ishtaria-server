@@ -6,9 +6,10 @@ ruleset = "core-rules@1.0"
 listen = "0.0.0.0:7400"
 database_url = "postgresql:///ishtaria?host=/var/run/postgresql"
 
-# Federation (optional). Set public_url to the address other worlds use to reach this
-# server; players can then invite players of other worlds to build a portal together.
-# public_url = "https://ishtaria.example.org:7400"
+# Federation (optional). Set public_url to the HTTPS address players and other worlds use
+# (the name on the reverse-proxy certificate). The client refuses remote accounts over plain
+# HTTP. Behind HAProxy/nginx/Caddy, prefer public_url without :7400, e.g.:
+# public_url = "https://ishtaria.example.org"
 # [federation]
 # policy = "approve"            # closed | approve (operator approves each pact) | open
 # allow_private_peers = false   # true only for development networks
@@ -18,7 +19,9 @@ database_url = "postgresql:///ishtaria?host=/var/run/postgresql"
 # auth_per_minute = 10          # registrations + logins per minute from one address
 # requests_per_second = 100     # sustained requests per second from one address ...
 # burst = 300                   # ... and the burst allowed on top of it
-# trust_proxy = false           # true ONLY behind your own reverse proxy: take the client address from
-#                               # the last entry of X-Forwarded-For
+# trust_proxy = false           # true ONLY under [limits] behind your own reverse proxy
+#                               # (HAProxy option forwardfor / nginx X-Forwarded-For): take the
+#                               # client address from the last entry of X-Forwarded-For.
+#                               # A top-level trust_proxy key is ignored.
 # access_log = "errors"         # "errors" (status >= 400 and slow requests), "all" or "off"
 # metrics_token = "long-random" # lets a remote scraper read /metrics; without it only loopback may

@@ -374,6 +374,7 @@ async fn configured_items_exist(pool: PgPool) {
         .chain(crate::combat::configured_items())
         .chain(crate::shops::configured_items())
         .chain(crate::placing::configured_items())
+        .chain(crate::hunting::configured_items())
         .chain(crate::magic::configured_items())
     {
         assert!(
@@ -602,4 +603,138 @@ async fn the_tool_in_hand_decides_what_can_be_harvested(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(held, 0, "a dead character holds nothing");
+}
+
+#[sqlx::test]
+#[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
+async fn sitting_on_a_rock_restores_stamina_faster(pool: PgPool) {
+    let _auth_test = AUTH_TESTS.acquire().await.unwrap();
+    let world_id = initialize_spawn_world(&pool).await;
+    let state = AppState {
+        pool: pool.clone(),
+        world_id,
+    };
+    let router = app(state.clone());
+    let token = create_session(&router, "resting-miner").await;
+    let player_id: i64 = sqlx::query_scalar("SELECT id FROM players")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let spawn = position_of(&pool, player_id).await;
+    let terrain = movement::terrain(&state).await.unwrap();
+    let rock = find_object(&terrain, spawn, "rock");
+    teleport(&pool, player_id, rock.position).await;
+    // Empty hands: sitting, not mining.
+    sqlx::query("UPDATE player_equipment SET hand = NULL WHERE player_id = $1")
+        .bind(player_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let far = [rock.position[0] + 40.0, rock.position[1], rock.position[2]];
+    teleport(&pool, player_id, far).await;
+    assert_eq!(
+        player_request(
+            &router,
+            "POST",
+            "/players/me/sit",
+            &serde_json::json!({ "object_id": rock.id }).to_string(),
+            &token,
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    teleport(&pool, player_id, rock.position).await;
+    let seated = response_json(
+        player_request(
+            &router,
+            "POST",
+            "/players/me/sit",
+            &serde_json::json!({ "object_id": rock.id }).to_string(),
+            &token,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(seated["sitting"], true);
+    assert_eq!(seated["player"]["sitting"], true);
+
+    sqlx::query(
+        "UPDATE players SET stamina = 40, stamina_fraction = 0, last_active_at = clock_timestamp() - interval '10 seconds', survival_updated_at = clock_timestamp() - interval '10 seconds' WHERE id = $1",
+    )
+    .bind(player_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let after_sit =
+        response_json(player_request(&router, "GET", "/players/me", "", &token).await).await;
+    let sit_stamina = after_sit["stats"]["stamina"].as_i64().unwrap();
+    // 10 s elapsed, 1 s sit delay → ~9 s × 1.25 ≈ 11 → stamina about 51.
+    assert!(
+        (50..=53).contains(&sit_stamina),
+        "sitting recovers quickly: {sit_stamina}"
+    );
+
+    assert_eq!(
+        player_request(&router, "POST", "/players/me/stand", "", &token)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    sqlx::query(
+        "UPDATE players SET stamina = 40, stamina_fraction = 0, sitting_object_id = NULL, last_active_at = clock_timestamp() - interval '10 seconds', survival_updated_at = clock_timestamp() - interval '10 seconds' WHERE id = $1",
+    )
+    .bind(player_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let after_stand =
+        response_json(player_request(&router, "GET", "/players/me", "", &token).await).await;
+    let stand_stamina = after_stand["stats"]["stamina"].as_i64().unwrap();
+    // 10 s elapsed, 5 s stand delay → 5 s × 0.5 = 2.5 → stamina about 42.
+    assert!(
+        (41..=44).contains(&stand_stamina),
+        "standing recovers slowly: {stand_stamina}"
+    );
+    assert!(
+        sit_stamina > stand_stamina + 5,
+        "sitting ({sit_stamina}) beats standing ({stand_stamina})"
+    );
+
+    // Walking stands the character up.
+    teleport(&pool, player_id, rock.position).await;
+    player_request(
+        &router,
+        "POST",
+        "/players/me/sit",
+        &serde_json::json!({ "object_id": rock.id }).to_string(),
+        &token,
+    )
+    .await;
+    let walk = response_json(
+        player_request(
+            &router,
+            "POST",
+            "/players/me/move",
+            &serde_json::json!({
+                "direction": [1.0, 0.0, 0.0],
+                "sequence": "2",
+                "run": false,
+                "jump": false
+            })
+            .to_string(),
+            &token,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(walk["sitting"], false);
+    let still: Option<String> =
+        sqlx::query_scalar("SELECT sitting_object_id FROM players WHERE id = $1")
+            .bind(player_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(still.is_none());
 }

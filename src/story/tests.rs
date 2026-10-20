@@ -351,6 +351,22 @@ fn spoken_lines_are_found_by_language_and_text_key_and_limited_in_size() {
 }
 
 #[test]
+fn spoken_lines_do_not_change_the_pinned_datadisk_identity() {
+    let a = scratch("voice-pin");
+    base(&a, "zeta", "1.0.0", "");
+    let without = Story::load(std::slice::from_ref(&a), false).unwrap();
+    write(&a, "media/voice/cs/hi.ogg", "OggS spoken");
+    let with = Story::load(std::slice::from_ref(&a), false).unwrap();
+    assert_eq!(
+        without.disks[0].2, with.disks[0].2,
+        "adding a Piper dub must not invalidate an already-generated world"
+    );
+    assert!(with
+        .voices
+        .contains_key(&("cs".to_owned(), "zeta:hi".to_owned())));
+}
+
+#[test]
 fn rejects_missing_dependencies_conflicts_and_drafts() {
     let a = scratch("dep");
     base(
@@ -510,6 +526,25 @@ fn the_gilgamesh_disk_loads_wildlife_crowd_and_cover_music() {
         .expect("gilgamesh announced");
     assert!(info.cover_music.is_some(), "logo jingle");
     assert!(info.ambient_music.is_some(), "plains ambient");
+    assert!(
+        story
+            .easter_eggs
+            .iter()
+            .any(|egg| egg.id == "gilgamesh:anu.dance" && egg.npc == "gilgamesh:anu"),
+        "anu night dance egg"
+    );
+    assert!(
+        story.dialogues.values().any(|dialogue| {
+            dialogue.nodes.values().any(|node| {
+                node.choices.as_ref().is_some_and(|choices| {
+                    choices
+                        .iter()
+                        .any(|c| c.effects.iter().any(|e| e.flourish.is_some()))
+                }) || node.effects.iter().any(|e| e.flourish.is_some())
+            })
+        }),
+        "gilgamesh dialogues include flourish set-pieces"
+    );
     let uruk = story
         .anchors
         .iter()

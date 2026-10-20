@@ -261,13 +261,14 @@ async fn a_ward_softens_the_bite_of_creatures(pool: PgPool) {
     give(&pool, "mage", &[("scroll_ward", 1)]).await;
     learn(&router, &token, "scroll_ward").await;
 
-    let bite = |pool: PgPool| async move {
+    let bite = |pool: PgPool, state: AppState| async move {
         for _ in 0..400 {
             let mut transaction = pool.begin().await.unwrap();
             assert!(survival::lock_alive(&mut transaction, 1, id).await.unwrap());
-            let counter = crate::combat::counter_attack(&mut transaction, id, "animal.wolf")
-                .await
-                .unwrap();
+            let counter =
+                crate::combat::counter_attack(&state, &mut transaction, id, "animal.wolf")
+                    .await
+                    .unwrap();
             transaction.commit().await.unwrap();
             if let Some(counter) = counter {
                 return counter;
@@ -275,13 +276,27 @@ async fn a_ward_softens_the_bite_of_creatures(pool: PgPool) {
         }
         panic!("the wolf never struck");
     };
-    let bare = bite(pool.clone()).await;
+    let bare = bite(
+        pool.clone(),
+        AppState {
+            pool: pool.clone(),
+            world_id,
+        },
+    )
+    .await;
     assert_eq!((bare.damage, bare.warded), (8, false));
     assert_eq!(
         cast(&router, &token, "ward", None).await.status(),
         StatusCode::OK
     );
-    let warded = bite(pool.clone()).await;
+    let warded = bite(
+        pool.clone(),
+        AppState {
+            pool: pool.clone(),
+            world_id,
+        },
+    )
+    .await;
     assert_eq!(
         (warded.damage, warded.warded),
         (4, true),
@@ -291,7 +306,19 @@ async fn a_ward_softens_the_bite_of_creatures(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(bite(pool.clone()).await.damage, 8, "a ward does not last");
+    assert_eq!(
+        bite(
+            pool.clone(),
+            AppState {
+                pool: pool.clone(),
+                world_id,
+            },
+        )
+        .await
+        .damage,
+        8,
+        "a ward does not last"
+    );
 }
 
 #[sqlx::test]

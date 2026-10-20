@@ -1,3 +1,15 @@
+ishtaria-server (0.2.1.18~trixie) unstable; urgency=medium
+
+  * Story teleport_place, quest fail_restart checkpoints, eternal_life flag.
+
+ -- Vítězslav Dvořák <cybervitexus@gmail.com>  Tue, 20 Oct 2026 19:30:00 +0200
+
+ishtaria-server (0.2.1.17~trixie) unstable; urgency=medium
+
+  * NPC combat health bars and hostility; escort, love minigame, snares.
+
+ -- Vítězslav Dvořák <cybervitexus@gmail.com>  Tue, 20 Oct 2026 14:18:57 +0200
+
 ishtaria-server (0.2.1) unstable; urgency=medium
 
   * Scale land animals to the size of the player avatar (2.09 units per metre).

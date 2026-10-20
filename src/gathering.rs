@@ -217,6 +217,8 @@ pub(super) fn configured_items() -> Vec<String> {
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
         .route("/players/me/harvest", post(harvest))
+        .route("/players/me/sit", post(sit))
+        .route("/players/me/stand", post(stand))
         .route("/players/me/craft", post(craft))
         .route("/players/me/equip", post(equip).delete(unequip))
         .route("/players/me/block", post(block))
@@ -350,7 +352,7 @@ async fn harvest(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     #[allow(clippy::type_complexity)]
     let row: Option<(f64, f64, f64, i32, Option<f64>)> = sqlx::query_as("SELECT position_x, position_y, position_z, stamina, extract(epoch FROM (clock_timestamp() - last_gathered_at))::float8 FROM players WHERE id = $1 AND position_x IS NOT NULL FOR UPDATE")
@@ -386,6 +388,11 @@ async fn harvest(
     if depleted {
         return Err(status(StatusCode::CONFLICT, "already harvested"));
     }
+    // Mining stands the character up.
+    sqlx::query("UPDATE players SET sitting_object_id = NULL WHERE id = $1 AND sitting_object_id IS NOT NULL")
+        .bind(player_id)
+        .execute(&mut *transaction)
+        .await?;
     // Hits are stored as work points: a swing of the axe on a tree is worth two, of the pickaxe one.
     let progress = if stale { points } else { hits + points };
     let needed = resource.hits * config.best_swing_points;
@@ -438,6 +445,109 @@ async fn harvest(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Sit {
+    object_id: String,
+}
+
+#[derive(Serialize)]
+struct SitReply {
+    sitting: bool,
+    object_id: Option<String>,
+    player: players::Player,
+}
+
+/// Sit on a generated rock within reach. Stamina then recovers faster than standing idle.
+async fn sit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<Sit>,
+) -> Result<Json<SitReply>, Error> {
+    let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
+    if input.object_id.len() > 100 || !input.object_id.is_ascii() {
+        return Err(status(StatusCode::BAD_REQUEST, "invalid object"));
+    }
+    let config = resources();
+    let terrain = super::movement::terrain(&state).await?;
+    let object = terrain
+        .object_by_id(&input.object_id)
+        .ok_or_else(|| status(StatusCode::NOT_FOUND, "object not found"))?;
+    let resource = resource_of(&object.model)
+        .ok_or_else(|| status(StatusCode::BAD_REQUEST, "object cannot be sat on"))?;
+    if resource.kind != "rock" {
+        return Err(status(StatusCode::BAD_REQUEST, "object cannot be sat on"));
+    }
+
+    let mut transaction = state.pool.begin().await?;
+    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+        let notice = super::survival::obituary(&mut transaction, player_id).await?;
+        transaction.commit().await?;
+        return Err(Error::Obituary(Box::new(notice)));
+    }
+    let row: Option<(f64, f64, f64, bool)> = sqlx::query_as(
+        "SELECT position_x, position_y, position_z, movement_airborne FROM players WHERE id = $1 AND position_x IS NOT NULL FOR UPDATE",
+    )
+    .bind(player_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let (x, y, z, airborne) =
+        row.ok_or_else(|| status(StatusCode::CONFLICT, "player position unavailable"))?;
+    if airborne {
+        return Err(status(StatusCode::CONFLICT, "cannot sit while airborne"));
+    }
+    let distance = ((x - object.position[0]).powi(2)
+        + (y - object.position[1]).powi(2)
+        + (z - object.position[2]).powi(2))
+    .sqrt();
+    if distance > config.reach_m + object.collision_radius_m {
+        return Err(status(StatusCode::FORBIDDEN, "object is out of reach"));
+    }
+    let depleted: bool = sqlx::query_scalar(
+        "SELECT coalesce(depleted_until > now(), false) FROM world_object_state WHERE world_id = $1 AND object_id = $2",
+    )
+    .bind(state.world_id)
+    .bind(&input.object_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .unwrap_or(false);
+    if depleted {
+        return Err(status(StatusCode::CONFLICT, "object is gone"));
+    }
+    sqlx::query("UPDATE players SET sitting_object_id = $2 WHERE id = $1")
+        .bind(player_id)
+        .bind(&input.object_id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(Json(SitReply {
+        sitting: true,
+        object_id: Some(input.object_id),
+        player: players::profile(&state, player_id).await?,
+    }))
+}
+
+/// Leave a sitting pose (also happens automatically on walk or jump).
+async fn stand(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<SitReply>, Error> {
+    let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
+    let mut transaction = state.pool.begin().await?;
+    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+        let notice = super::survival::obituary(&mut transaction, player_id).await?;
+        transaction.commit().await?;
+        return Err(Error::Obituary(Box::new(notice)));
+    }
+    sqlx::query("UPDATE players SET sitting_object_id = NULL WHERE id = $1")
+        .bind(player_id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(Json(SitReply {
+        sitting: false,
+        object_id: None,
+        player: players::profile(&state, player_id).await?,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Equip {
     item_id: String,
 }
@@ -453,7 +563,7 @@ async fn equip(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     let category: Option<String> = sqlx::query_scalar("SELECT category FROM item_types JOIN player_inventory ON player_inventory.item_id = item_types.id WHERE player_id = $1 AND item_types.id = $2")
         .bind(player_id).bind(&input.item_id).fetch_optional(&mut *transaction).await?;
@@ -543,7 +653,7 @@ async fn block(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     let shield: Option<String> = sqlx::query_scalar("SELECT offhand FROM player_equipment WHERE player_id = $1 AND EXISTS (SELECT 1 FROM player_inventory WHERE player_id = $1 AND item_id = offhand)")
         .bind(player_id).fetch_optional(&mut *transaction).await?.flatten();
@@ -600,7 +710,7 @@ async fn craft(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     if let Some(tool) = recipe.tool.as_deref() {
         let owns: bool = sqlx::query_scalar(

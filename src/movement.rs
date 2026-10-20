@@ -33,6 +33,8 @@ use parry3d_f64::query::{Ray, RayCast};
 pub(super) const RADIUS: f64 = 6_371_000.0;
 const WALK_SPEED: f64 = 4.0;
 const RUN_SPEED: f64 = 6.0;
+/// A character in water swims at this share of the walking speed and cannot run or jump.
+const SWIM_SPEED_FACTOR: f64 = 0.4;
 pub(super) const OBJECT_GRID: i32 = 600_000;
 /// Animals live on a coarser grid: about one cell per 170 metres.
 const FAUNA_GRID: i32 = 60_000;
@@ -315,9 +317,9 @@ fn patch_dry(direction: [f64; 3]) -> bool {
         return false;
     };
     stored.1.iter().any(|patch| {
-        patch.project(direction).is_some_and(|(x, z, weight)| {
-            weight > 0.0 && patch.surface(x, z).is_none()
-        })
+        patch
+            .project(direction)
+            .is_some_and(|(x, z, weight)| weight > 0.0 && patch.surface(x, z).is_none())
     })
 }
 
@@ -707,6 +709,10 @@ pub(super) struct Reply {
     position: Position,
     moving: bool,
     stats: players::Stats,
+    /// True while the character sits on a world rock.
+    sitting: bool,
+    /// True while the character is in water, swimming and losing health until a dry shore.
+    swimming: bool,
 }
 
 pub(super) struct WalkingTerrain {
@@ -898,6 +904,13 @@ fn fauna_catalog() -> Option<Vec<ObjectKind>> {
     })
 }
 
+/// Per-instance size from a catalog base and a unit sample in `[0, 1)`.
+/// Neighbours of the same model span roughly half to one and a half times the base height,
+/// so trees, rocks and plants are not identical.
+fn varied_scale(base_m: f64, unit: f64) -> f64 {
+    base_m * (0.55 + unit * 0.9)
+}
+
 pub(super) fn unit(point: [f64; 3]) -> [f64; 3] {
     let radius = length(point);
     point.map(|value| value / radius)
@@ -1043,8 +1056,9 @@ impl WalkingTerrain {
             + ((vertical * size as f64) as usize).min(size - 1) * size
             + ((horizontal * size as f64) as usize).min(size - 1);
         let mut biome = self.environment.biomes[index];
-        // A dry landscape patch over a drowned coarse cell is grassland for placement.
-        if patch_dry(direction) && biome < 3 {
+        // Dry ground inside a coarse sea/river cell (landscape patch or floodplain above the
+        // water surface) is grassland for placement and wildlife.
+        if biome < 3 {
             biome = 4;
         }
         Some((biome, height))
@@ -1341,6 +1355,11 @@ impl WalkingTerrain {
         point
     }
 
+    /// Whether a character standing at `direction` is in water: the sea, a lake, a river.
+    pub(super) fn in_water(&self, direction: [f64; 3]) -> bool {
+        self.surface(direction).is_none()
+    }
+
     fn surface(&self, direction: [f64; 3]) -> Option<f64> {
         // A river of a landscape patch is no ground to stand scenery on.
         if patch_water(direction).is_some() {
@@ -1358,12 +1377,22 @@ impl WalkingTerrain {
         let index = face * size * size
             + ((vertical * size as f64) as usize).min(size - 1) * size
             + ((horizontal * size as f64) as usize).min(size - 1);
-        if self.environment.biomes[index] < 3 || self.environment.water_m[index] != environment::DRY
-        {
+        let height = self.height(direction);
+        // The heightmap (and earth water mask) decide what is dry: a positive height is land
+        // even when the coarse 150 km cell is ocean or river (Uruk / hunter water-hole on the
+        // Early Dynastic strip). Coarse biomes alone would leave the character only able to jump.
+        if height <= 0.0 {
             return None;
         }
-        let height = self.height(direction);
-        (height > 0.0).then_some(height)
+        let water = self.environment.water_m[index];
+        let elevation = self.environment.elevation_m[index];
+        // Standing water only where fill rose above the coarse ground (lakes, carved channels).
+        // Flow-marked rivers on a flat plain set water_m == elevation; local relief of a few
+        // metres must not count as drowning (Mesopotamian floodplain at the hunter spawn).
+        if water != environment::DRY && water > elevation && f64::from(water) - height >= 0.5 {
+            return None;
+        }
+        Some(height)
     }
 
     fn height(&self, direction: [f64; 3]) -> f64 {
@@ -1462,7 +1491,7 @@ impl WalkingTerrain {
         })?;
         let deepest = kind.depth_m.min(depth - 1.5).max(1.0);
         let below = 0.8 + sample(6) * (deepest - 0.8).max(0.0);
-        let scale_m = kind.scale_m * (0.8 + sample(5) * 0.4);
+        let scale_m = varied_scale(kind.scale_m, sample(5));
         Some(WorldObject {
             id,
             model: kind.id.clone(),
@@ -1500,7 +1529,11 @@ impl WalkingTerrain {
         let index = face * size * size
             + ((vertical * size as f64) as usize).min(size - 1) * size
             + ((horizontal * size as f64) as usize).min(size - 1);
-        let biome = self.environment.biomes[index];
+        let mut biome = self.environment.biomes[index];
+        // Dry tell/patch over drowned coarse cells: place and announce as grassland.
+        if patch_dry(point) && biome < 3 {
+            biome = 4;
+        }
         if fauna && (biome < 3 || patch_water(point).is_some()) {
             return self.place_aquatic(id, point, index, biome, &sample);
         }
@@ -1547,16 +1580,20 @@ impl WalkingTerrain {
                 zone.flora.as_slice()
             }
         });
+        let from_overlay = overlay_weights.is_some_and(|w| !w.is_empty());
         let candidates: Vec<_> = if let Some(weights) = overlay_weights.filter(|w| !w.is_empty()) {
             weights
                 .iter()
                 .filter_map(|(model, weight)| {
-                    self.catalog.iter().find(|kind| {
-                        kind.id == *model
-                            && kind.fauna == fauna
-                            && !kind.aquatic
-                            && slope <= kind.max_slope
-                    }).map(|kind| (kind, *weight))
+                    self.catalog
+                        .iter()
+                        .find(|kind| {
+                            kind.id == *model
+                                && kind.fauna == fauna
+                                && !kind.aquatic
+                                && slope <= kind.max_slope
+                        })
+                        .map(|kind| (kind, *weight))
                 })
                 .collect()
         } else {
@@ -1580,7 +1617,12 @@ impl WalkingTerrain {
             choice -= weight;
             choice <= 0.0
         })?;
-        let scale_m = kind.scale_m * (0.8 + sample(5) * 0.4);
+        // Overlay flora/fauna may sit on a remapped grassland cell while the model is
+        // beach-only; announce a biome the client catalog accepts.
+        if from_overlay && !kind.biomes.is_empty() && !kind.biomes.contains(&biome) {
+            biome = kind.biomes[0];
+        }
+        let scale_m = varied_scale(kind.scale_m, sample(5));
         Some(WorldObject {
             id,
             model: kind.id.clone(),
@@ -1640,13 +1682,19 @@ impl WalkingTerrain {
         animals
     }
 
-    /// The biome of the map cell in this direction.
+    /// The biome of the map cell in this direction. Dry ground inside a coarse sea/river
+    /// cell (landscape patch or floodplain above the water) is grassland, matching
+    /// [`Self::land_site`].
     fn biome_at(&self, direction: [f64; 3]) -> u8 {
         let (face, horizontal, vertical) = coordinates(direction);
         let size = self.environment.face_size;
-        self.environment.biomes[face * size * size
+        let mut biome = self.environment.biomes[face * size * size
             + ((vertical * size as f64) as usize).min(size - 1) * size
-            + ((horizontal * size as f64) as usize).min(size - 1)]
+            + ((horizontal * size as f64) as usize).min(size - 1)];
+        if biome < 3 && self.surface(direction).is_some() {
+            biome = 4;
+        }
+        biome
     }
 
     /// The animals of the pastures beside the settlements near a point, as the seed puts them.
@@ -1732,7 +1780,7 @@ impl WalkingTerrain {
                 .map_or(FARM_SPECIES[0].0, |(model, _)| model)
         };
         let kind = self.catalog.iter().find(|kind| kind.id == model)?;
-        let scale_m = kind.scale_m * (0.8 + word(&hash, 3) * 0.4);
+        let scale_m = varied_scale(kind.scale_m, word(&hash, 3));
         Some(WorldObject {
             id,
             model: model.to_owned(),
@@ -2060,7 +2108,22 @@ impl WalkingTerrain {
             point[axis] + tangent[axis] * speed * seconds.clamp(0.0, 0.25)
         });
         let unit = intermediate.map(|value| value / length(intermediate));
-        let height = self.surface(unit)?;
+        let height = if self.in_water(up) {
+            // Swimming: no slope limit, the swimmer floats at the ground level (sea level at
+            // the least) and may leave the water wherever the shore is dry.
+            let swim_point: [f64; 3] = std::array::from_fn(|axis| {
+                point[axis] + (intermediate[axis] - point[axis]) * SWIM_SPEED_FACTOR
+            });
+            let swim_unit = swim_point.map(|value| value / length(swim_point));
+            let height = self
+                .surface(swim_unit)
+                .unwrap_or_else(|| self.height(swim_unit).max(0.0));
+            let destination = swim_unit.map(|value| value * (RADIUS + height));
+            return clear_path(point, destination, &self.walking_objects(point, 2))
+                .then_some(destination);
+        } else {
+            self.surface(unit)?
+        };
         let previous = self.surface(up)?;
         if (height - previous).abs() > distance * 0.7 {
             return None;
@@ -2136,6 +2199,7 @@ pub(super) async fn terrain(state: &AppState) -> Result<Arc<WalkingTerrain>, pla
 
 pub(super) async fn world_objects(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<RegionQuery>,
 ) -> Result<Json<ObjectRegion>, players::Error> {
     let point = [query.x, query.y, query.z];
@@ -2147,6 +2211,10 @@ pub(super) async fn world_objects(
             "invalid object region",
         ));
     }
+    let player_id = match players::token_hash(&headers) {
+        Ok(hash) => players::player_id(&state, &hash).await.ok(),
+        Err(_) => None,
+    };
     let terrain = terrain(&state).await?;
     let worker = terrain.clone();
     let now_ms = unix_now_ms();
@@ -2163,7 +2231,7 @@ pub(super) async fn world_objects(
     })?;
     Ok(Json(ObjectRegion {
         memorials: super::survival::memorials(&state, unit(point)).await?,
-        npcs: super::story::world::npcs_near(&state, point).await,
+        npcs: super::story::world::npcs_near(&state, point, player_id).await,
         areas: super::story::world::areas_near(&state, point).await,
         props: super::story::world::props_near(&state, point).await,
         terrains: super::story::world::terrains_near(&state, point).await,
@@ -2225,7 +2293,7 @@ pub(super) async fn walk(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(players::Error::Obituary(notice));
+        return Err(players::Error::Obituary(Box::new(notice)));
     }
     let mut position: Position = sqlx::query_as("SELECT position_x AS x, position_y AS y, position_z AS z, movement_sequence::text AS sequence, movement_airborne AS airborne, movement_support AS on_object FROM players WHERE id = $1 AND position_x IS NOT NULL FOR UPDATE")
         .bind(player_id).fetch_optional(&mut *transaction).await?
@@ -2237,8 +2305,19 @@ pub(super) async fn walk(
             .fetch_one(&mut *transaction)
             .await?;
         intent.run &= stamina > 0;
+        let swimming = terrain.in_water(unit([position.x, position.y, position.z]));
+        intent.run &= !swimming;
         // A jump costs stamina up front and is refused when too little is left.
-        intent.jump &= !position.airborne && f64::from(stamina) >= super::survival::JUMP_STAMINA;
+        intent.jump &=
+            !position.airborne && !swimming && f64::from(stamina) >= super::survival::JUMP_STAMINA;
+        let wants_motion = intent.jump || length(intent.direction) > 0.000001;
+        if wants_motion {
+            // Standing up from a rock before walking or jumping.
+            sqlx::query("UPDATE players SET sitting_object_id = NULL WHERE id = $1 AND sitting_object_id IS NOT NULL")
+                .bind(player_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
         let takes_off = intent.jump;
         let seconds: f64 = sqlx::query_scalar("SELECT greatest(0.0, least(0.25, extract(epoch FROM (clock_timestamp() - last_moved_at))))::float8 FROM players WHERE id = $1")
             .bind(player_id).fetch_one(&mut *transaction).await?;
@@ -2291,6 +2370,7 @@ pub(super) async fn walk(
         }
         if damage > 0
             && super::survival::hurt(
+                &state,
                 &mut transaction,
                 player_id,
                 damage,
@@ -2300,22 +2380,40 @@ pub(super) async fn walk(
         {
             let notice = super::survival::obituary(&mut transaction, player_id).await?;
             transaction.commit().await?;
-            return Err(players::Error::Obituary(notice));
+            return Err(players::Error::Obituary(Box::new(notice)));
+        }
+        // Whoever is in water, moving or not, is drowning until they reach a dry shore.
+        if !position.airborne
+            && terrain.in_water(unit([position.x, position.y, position.z]))
+            && super::survival::drown(&state, &mut transaction, player_id, seconds).await?
+        {
+            let notice = super::survival::obituary(&mut transaction, player_id).await?;
+            transaction.commit().await?;
+            return Err(players::Error::Obituary(Box::new(notice)));
         }
         if moving
             && !super::survival::activity(&mut transaction, player_id, seconds, intent.run).await?
         {
             let notice = super::survival::obituary(&mut transaction, player_id).await?;
             transaction.commit().await?;
-            return Err(players::Error::Obituary(notice));
+            return Err(players::Error::Obituary(Box::new(notice)));
         }
     }
     let stats = players::stats(&mut transaction, player_id).await?;
+    let sitting: bool =
+        sqlx::query_scalar("SELECT sitting_object_id IS NOT NULL FROM players WHERE id = $1")
+            .bind(player_id)
+            .fetch_one(&mut *transaction)
+            .await?;
     transaction.commit().await?;
+    let swimming =
+        !position.airborne && terrain.in_water(unit([position.x, position.y, position.z]));
     Ok(Json(Reply {
         position,
         moving,
         stats,
+        sitting,
+        swimming,
     }))
 }
 
@@ -3036,9 +3134,10 @@ mod tests {
         assert!(running_jump.1 > walking_jump.1 * 1.2);
         assert!(running_jump.2 > walking_jump.2 * 1.5);
         terrain.environment.biomes.fill(0);
+        // A sea is swum, not run: the swimmer still makes headway.
         assert!(terrain
-            .step_at_speed(start, running.direction, 0.25, RUN_SPEED)
-            .is_none());
+            .step_at_speed(start, running.direction, 0.25, WALK_SPEED)
+            .is_some());
         let object = WorldObject {
             id: "run-wall".into(),
             model: "nature.stone_largeD".into(),
@@ -3072,8 +3171,38 @@ mod tests {
         assert!((moved[2] - 1.0).abs() < 1e-6);
         assert!(terrain.step(point, [1.0, 0.0, 0.0], 0.25).is_none());
         assert!(terrain.step(point, [0.0; 3], 0.25).is_none());
-        terrain.environment.biomes.fill(0);
-        assert!(terrain.step(point, [0.0, 0.0, 1.0], 0.25).is_none());
+    }
+
+    #[test]
+    fn a_swimmer_is_slow_and_can_reach_a_dry_shore() {
+        let pixels = vec![144; 16 * 16 * 6];
+        let environment = environment::generate(16, &pixels, "42", "test").unwrap();
+        let mut terrain = WalkingTerrain {
+            size: 16,
+            pixels,
+            environment,
+            catalog: Vec::new(),
+            removed: Default::default(),
+        };
+        terrain.environment.water_m.fill(environment::DRY);
+        terrain.environment.biomes.fill(4);
+        let height = terrain.height([1.0, 0.0, 0.0]);
+        let point = [RADIUS + height, 0.0, 0.0];
+        assert!(!terrain.in_water(unit(point)));
+        let walked = terrain.step(point, [0.0, 0.0, 1.0], 0.25).unwrap();
+        // A lake: standing water 5 m above the ground everywhere.
+        let ground = terrain.environment.elevation_m.clone();
+        for (water, elevation) in terrain.environment.water_m.iter_mut().zip(&ground) {
+            *water = *elevation + 5;
+        }
+        assert!(terrain.in_water(unit(point)));
+        let swum = terrain.step(point, [0.0, 0.0, 1.0], 0.25).unwrap();
+        let walked_metres = length(std::array::from_fn(|axis| walked[axis] - point[axis]));
+        let swum_metres = length(std::array::from_fn(|axis| swum[axis] - point[axis]));
+        assert!(swum_metres > 0.0 && swum_metres < walked_metres * 0.6);
+        // The shore is dry again: a swimmer climbs out.
+        terrain.environment.water_m.fill(environment::DRY);
+        assert!(terrain.step(swum, [0.0, 0.0, 1.0], 0.25).is_some());
     }
 
     #[test]
@@ -3195,6 +3324,28 @@ mod tests {
                 .len(),
             seam.len()
         );
+        // Same catalog model appears at different sizes (about 0.55×–1.45× its base).
+        let by_model = |model: &str| -> Vec<f64> {
+            objects
+                .iter()
+                .filter(|object| object.model == model)
+                .map(|object| object.scale_m)
+                .collect()
+        };
+        let trees = by_model("nature.oak");
+        assert!(
+            trees.len() >= 2,
+            "need several oaks to compare sizes, got {}",
+            trees.len()
+        );
+        let min = trees.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = trees.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            max / min > 1.2,
+            "oaks should visibly differ in size: {min} .. {max}"
+        );
+        assert!((varied_scale(10.0, 0.0) - 5.5).abs() < 1e-12);
+        assert!((varied_scale(10.0, 1.0) - 14.5).abs() < 1e-12);
     }
 
     #[test]
@@ -3664,7 +3815,8 @@ mod tests {
 
     #[test]
     fn dry_landscape_patch_over_coarse_water_is_walkable_and_not_a_drink() {
-        let mut terrain = terrain_with(144, 0, Vec::new());
+        // Pixel 120 decodes below sea level so the bare heightmap is wet; only the patch dries it.
+        let mut terrain = terrain_with(120, 0, Vec::new());
         terrain.environment.biomes.fill(0);
         terrain.environment.water_m.fill(0);
         let anchor = [1.0, 0.0, 0.0];
@@ -3697,5 +3849,78 @@ mod tests {
         assert!(length(std::array::from_fn(|axis| step[axis] - here[axis])) > 0.1);
         set_patches(String::new(), Vec::new());
         assert!(terrain.surface(anchor).is_none());
+    }
+
+    #[test]
+    fn dry_floodplain_in_a_coarse_river_cell_is_walkable() {
+        // Early Dynastic Mesopotamia: the heightmap is +30 m dry land, the 150 km cell is
+        // marked river by drainage. Without this, spawn at the hunter water-hole only jumps.
+        set_patches(String::new(), Vec::new());
+        let mut terrain = terrain_with(144, 2, Vec::new());
+        let height = terrain.height([1.0, 0.0, 0.0]);
+        assert!(height > 0.0);
+        // Flow rivers set water_m to the fill level; on a flat plain that equals the ground.
+        let ground = height.floor() as i32;
+        terrain.environment.elevation_m.fill(ground);
+        terrain.environment.water_m.fill(ground);
+        let anchor = [1.0, 0.0, 0.0];
+        assert!(terrain.surface(anchor).is_some());
+        assert_eq!(terrain.land_site(anchor).unwrap().0, 4);
+        let here = anchor.map(|value| value * (RADIUS + height));
+        let step = terrain
+            .step_at_speed(here, [0.0, 0.0, 1.0], 0.1, 4.0)
+            .expect("walk on dry floodplain inside a coarse river cell");
+        assert!(length(std::array::from_fn(|axis| step[axis] - here[axis])) > 0.1);
+        // Real ponding above the coarse ground drowns the sample.
+        terrain.environment.water_m.fill(ground + 40);
+        assert!(terrain.surface(anchor).is_none());
+    }
+
+    #[test]
+    fn dry_heightmap_in_a_coarse_ocean_cell_is_walkable() {
+        // Gilgamesh earth strip: Uruk's pin is land (+30 m) inside a drowned coarse cell.
+        set_patches(String::new(), Vec::new());
+        let mut terrain = terrain_with(144, 0, Vec::new());
+        terrain.environment.biomes.fill(0);
+        terrain.environment.water_m.fill(0);
+        let anchor = [1.0, 0.0, 0.0];
+        assert!(terrain.height(anchor) > 0.0);
+        assert!(terrain.surface(anchor).is_some());
+        let here = anchor.map(|value| value * (RADIUS + terrain.height(anchor)));
+        let step = terrain
+            .step_at_speed(here, [0.0, 0.0, 1.0], 0.1, 4.0)
+            .expect("walk on dry heightmap inside a coarse ocean cell");
+        assert!(length(std::array::from_fn(|axis| step[axis] - here[axis])) > 0.1);
+    }
+
+    #[test]
+    fn live_gilgamesh_hunter_spawn_is_walkable() {
+        set_patches(String::new(), Vec::new());
+        let Ok(pixels) = std::fs::read("target/gilgamesh_pixels.bin") else {
+            return;
+        };
+        let seed = "2235404937";
+        let sha = "eb2707db9004b69ee7ff7279ec56191570d4dc66c99f77941f6657ba35419fed";
+        let environment = environment::generate(256, &pixels, seed, sha).unwrap();
+        let terrain = WalkingTerrain {
+            size: 256,
+            pixels,
+            environment,
+            catalog: Vec::new(),
+            removed: Default::default(),
+        };
+        let pos = [3800062.780581708, 3322231.004257387, 3887458.1523896814];
+        let anchor = unit(pos);
+        let height = terrain.height(anchor);
+        assert!(height > 0.0, "height {height}");
+        assert!(
+            terrain.surface(anchor).is_some(),
+            "surface none at hunter spawn"
+        );
+        let here = anchor.map(|value| value * (RADIUS + height));
+        let step = terrain
+            .step_at_speed(here, [0.0, 0.0, 1.0], 0.15, 4.0)
+            .expect("walk at hunter spawn");
+        assert!(length(std::array::from_fn(|axis| step[axis] - here[axis])) > 0.1);
     }
 }

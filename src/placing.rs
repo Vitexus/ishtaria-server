@@ -275,7 +275,7 @@ async fn put_down(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     let position: Option<(f64, f64, f64)> = sqlx::query_as("SELECT position_x, position_y, position_z FROM players WHERE id = $1 AND position_x IS NOT NULL FOR UPDATE")
         .bind(player_id).fetch_optional(&mut *transaction).await?;
@@ -339,7 +339,10 @@ async fn place(
         .things
         .get(&target.item_id)
         .ok_or_else(|| status(StatusCode::CONFLICT, "this cannot be placed"))?;
-    put_down(
+    if super::hunting::is_snare(&target.item_id) {
+        super::hunting::may_place(&state, player_id).await?;
+    }
+    let placed = put_down(
         &state,
         player_id,
         &target,
@@ -348,7 +351,22 @@ async fn place(
         thing.spacing_m,
         None,
     )
-    .await
+    .await?;
+    if super::hunting::is_snare(&target.item_id) {
+        // The snare is already on the ground; arming failure must not leave an orphan
+        // or keep the item spent.
+        if let Err(error) = super::hunting::arm(&state, player_id, placed.object.id).await {
+            let mut refund = state.pool.begin().await?;
+            let _ = sqlx::query("DELETE FROM placed_objects WHERE id = $1")
+                .bind(placed.object.id)
+                .execute(&mut *refund)
+                .await;
+            let _ = add_items(&mut refund, player_id, &[("snare".into(), 1)]).await;
+            let _ = refund.commit().await;
+            return Err(error);
+        }
+    }
+    Ok(placed)
 }
 
 async fn plant(
@@ -409,7 +427,7 @@ async fn own_nearby(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     let position: Option<(f64, f64, f64)> = sqlx::query_as("SELECT position_x, position_y, position_z FROM players WHERE id = $1 AND position_x IS NOT NULL")
         .bind(player_id).fetch_optional(&mut *transaction).await?;

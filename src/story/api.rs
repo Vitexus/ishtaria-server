@@ -1,12 +1,13 @@
 //! HTTP API of the story: dialogues, quest log, translations and media.
 
 use super::{
-    engine::{self, Choose, Op, PlayerState, Reject, Shown},
+    disk,
+    engine::{self, Choose, Op, PlayerState, Reject, Shown, VisibleChoice},
     placement::Placed,
     world::{self, StoryWorld, TALK_RANGE_M},
     Story,
 };
-use crate::{players, AppState};
+use crate::{npc_combat, players, AppState};
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -18,6 +19,9 @@ use players::Error;
 
 /// How far a walking character may have gone from a player it is talking to.
 const ONGOING_RANGE_M: f64 = 25.0;
+/// Synthetic dialogue choice: apologize and pay gold to clear lasting NPC hostility.
+const APOLOGY_CHOICE: usize = 65_000;
+const APOLOGY_TEXT_KEY: &str = "Apologize (50 gold)";
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Transaction};
@@ -86,6 +90,9 @@ struct Reply {
     about: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     music: Option<Music>,
+    /// Visual duel / flourish from a dialogue effect (not persisted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flourish: Option<Vec<disk::FlourishStep>>,
     player: players::Player,
 }
 
@@ -133,7 +140,12 @@ async fn load_state(tx: &mut Tx<'_>, player_id: i64) -> Result<PlayerState, Erro
 }
 
 /// Commits the operations the engine produced. Any failure aborts the transaction.
-async fn apply_ops(tx: &mut Tx<'_>, player_id: i64, ops: &[Op]) -> Result<(), Error> {
+async fn apply_ops(
+    story: &StoryWorld,
+    tx: &mut Tx<'_>,
+    player_id: i64,
+    ops: &[Op],
+) -> Result<(), Error> {
     for op in ops {
         match op {
             Op::Give(item, quantity) => {
@@ -170,6 +182,35 @@ async fn apply_ops(tx: &mut Tx<'_>, player_id: i64, ops: &[Op]) -> Result<(), Er
                     .execute(&mut **tx)
                     .await?;
             }
+            Op::Flourish(_) => {}
+            Op::Playable(playable) => {
+                if !crate::players::valid_character(&playable.character) {
+                    return Err(status(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "invalid character",
+                    ));
+                }
+                let (model, disk) = match (&playable.model, &playable.disk) {
+                    (Some(model), Some(disk)) => (Some(model.as_str()), Some(disk.as_str())),
+                    (None, _) => (None, None),
+                    (Some(_), None) => {
+                        return Err(status(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "invalid playable",
+                        ));
+                    }
+                };
+                sqlx::query(
+                    "UPDATE players SET character = $2, story_model = $3, story_model_disk = $4, story_role = $5 WHERE id = $1",
+                )
+                .bind(player_id)
+                .bind(&playable.character)
+                .bind(model)
+                .bind(disk)
+                .bind(playable.hide_npc.as_deref())
+                .execute(&mut **tx)
+                .await?;
+            }
             Op::Once(key) => {
                 sqlx::query("INSERT INTO player_story_once (player_id, once_key) VALUES ($1, $2)")
                     .bind(player_id)
@@ -177,6 +218,9 @@ async fn apply_ops(tx: &mut Tx<'_>, player_id: i64, ops: &[Op]) -> Result<(), Er
                     .execute(&mut **tx)
                     .await
                     .map_err(|_| status(StatusCode::CONFLICT, "reward already granted"))?;
+            }
+            Op::TeleportPlace(place) => {
+                super::checkpoint::teleport_to_place(tx, story, player_id, place).await?;
             }
         }
     }
@@ -263,12 +307,36 @@ fn request_language(lang: &Option<String>) -> Option<&str> {
         .filter(|l| l.len() == 2 && l.bytes().all(|b| b.is_ascii_lowercase()))
 }
 
+fn take_flourish(ops: &[Op]) -> Option<Vec<disk::FlourishStep>> {
+    ops.iter().find_map(|op| match op {
+        Op::Flourish(steps) => Some(steps.clone()),
+        _ => None,
+    })
+}
+
+/// Offers a paid apology whenever this viewer has made the NPC hostile.
+fn with_apology(mut shown: Shown, hostile: bool) -> Shown {
+    if hostile
+        && !shown
+            .choices
+            .iter()
+            .any(|choice| choice.index == APOLOGY_CHOICE)
+    {
+        shown.choices.push(VisibleChoice {
+            index: APOLOGY_CHOICE,
+            text_key: APOLOGY_TEXT_KEY.to_owned(),
+        });
+    }
+    shown
+}
+
 fn reply(
     story: &StoryWorld,
     npc: &world::NpcDescriptor,
     seq: i64,
     node: Option<Shown>,
     lang: Option<&str>,
+    flourish: Option<Vec<disk::FlourishStep>>,
     player: players::Player,
 ) -> Reply {
     let node = node.map(|mut shown| {
@@ -308,6 +376,7 @@ fn reply(
             .get(&npc.id)
             .is_some_and(|found| found.about.is_some()),
         music,
+        flourish,
         player,
     }
 }
@@ -334,7 +403,10 @@ async fn start(
                 "dialogue has nothing to show",
             )
         })?;
-    apply_ops(&mut tx, player_id, &ops).await?;
+    apply_ops(&story, &mut tx, player_id, &ops).await?;
+    let flourish = take_flourish(&ops);
+    let hostile = npc_combat::is_hostile(&state, player_id, &npc.id).await?;
+    let shown = with_apology(shown, hostile);
     let seq: i64 = sqlx::query_scalar("INSERT INTO dialogue_sessions (player_id, npc_id, node_id) VALUES ($1, $2, $3) ON CONFLICT (player_id) DO UPDATE SET npc_id = EXCLUDED.npc_id, node_id = EXCLUDED.node_id, seq = dialogue_sessions.seq + 1, updated_at = now() RETURNING seq")
         .bind(player_id)
         .bind(&npc.id)
@@ -350,6 +422,7 @@ async fn start(
         seq,
         Some(shown),
         request_language(&request.lang),
+        flourish,
         player,
     )))
 }
@@ -376,14 +449,56 @@ async fn choose(
         return Err(status(StatusCode::CONFLICT, "the conversation moved on"));
     }
     let dialogue = &story.story.dialogues[&story.story.npcs[&npc.id].dialogue];
+    if request.choice == APOLOGY_CHOICE {
+        if !npc_combat::is_hostile(&state, player_id, &npc.id).await? {
+            return Err(status(StatusCode::CONFLICT, "npc not hostile"));
+        }
+        let gold = npc_combat::apology_gold();
+        let taken = sqlx::query(
+            "UPDATE player_inventory SET quantity = quantity - $2
+             WHERE player_id = $1 AND item_id = 'gold' AND quantity >= $2",
+        )
+        .bind(player_id)
+        .bind(gold)
+        .execute(&mut *tx)
+        .await?;
+        if taken.rows_affected() != 1 {
+            return Err(status(StatusCode::CONFLICT, "not enough gold"));
+        }
+        sqlx::query(
+            "DELETE FROM player_inventory WHERE player_id = $1 AND item_id = 'gold' AND quantity = 0",
+        )
+        .bind(player_id)
+        .execute(&mut *tx)
+        .await?;
+        npc_combat::clear_hostility(&mut tx, player_id, &npc.id).await?;
+        sqlx::query("DELETE FROM dialogue_sessions WHERE player_id = $1")
+            .bind(player_id)
+            .execute(&mut *tx)
+            .await?;
+        walk_on(&state, &mut tx, npc).await?;
+        tx.commit().await?;
+        let player = players::profile(&state, player_id).await?;
+        return Ok(Json(reply(
+            &story,
+            npc,
+            seq + 1,
+            None,
+            request_language(&request.lang),
+            None,
+            player,
+        )));
+    }
     let mut player_state = load_state(&mut tx, player_id).await?;
     let mut ops = Vec::new();
     let outcome = engine::choose(dialogue, &node, request.choice, &mut player_state, &mut ops);
+    let flourish = take_flourish(&ops);
+    let hostile = npc_combat::is_hostile(&state, player_id, &npc.id).await?;
     let (shown, next_seq) = match outcome {
         Choose::Unavailable => return Err(status(StatusCode::CONFLICT, "choice unavailable")),
         Choose::Rejected(why) => return Err(reject(why)),
         Choose::End => {
-            apply_ops(&mut tx, player_id, &ops).await?;
+            apply_ops(&story, &mut tx, player_id, &ops).await?;
             sqlx::query("DELETE FROM dialogue_sessions WHERE player_id = $1")
                 .bind(player_id)
                 .execute(&mut *tx)
@@ -392,14 +507,14 @@ async fn choose(
             (None, seq + 1)
         }
         Choose::Next(shown) => {
-            apply_ops(&mut tx, player_id, &ops).await?;
+            apply_ops(&story, &mut tx, player_id, &ops).await?;
             sqlx::query("UPDATE dialogue_sessions SET node_id = $2, seq = seq + 1, updated_at = now() WHERE player_id = $1")
                 .bind(player_id)
                 .bind(&shown.node)
                 .execute(&mut *tx)
                 .await?;
             stand_still(&state, &mut tx, npc).await?;
-            (Some(shown), seq + 1)
+            (Some(with_apology(shown, hostile)), seq + 1)
         }
     };
     tx.commit().await?;
@@ -410,6 +525,7 @@ async fn choose(
         next_seq,
         shown,
         request_language(&request.lang),
+        flourish,
         player,
     )))
 }
@@ -442,6 +558,8 @@ struct QuestEntry {
     text_key: String,
     #[serde(rename = "final")]
     final_stage: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    excerpt: Option<disk::QuestExcerpt>,
 }
 
 /// Moves quests on whose current stage asks the player to reach a place, when they have.
@@ -556,6 +674,7 @@ async fn quests(
                     title_key: definition.title_key.clone(),
                     text_key: found.text_key.clone(),
                     final_stage: found.final_stage,
+                    excerpt: definition.excerpt.clone(),
                     quest,
                     stage,
                 })

@@ -74,6 +74,9 @@ pub(super) struct Player {
     character: String,
     /// Flag the player chose to show next to their name (two capital letters), if any.
     flag: Option<String>,
+    /// Datadisk model URL for the current playable body (`/story/media/…`), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    story_model: Option<String>,
     #[sqlx(flatten)]
     stats: Stats,
     #[sqlx(skip)]
@@ -84,6 +87,10 @@ pub(super) struct Player {
     position: Option<Position>,
     #[sqlx(skip)]
     equipment: Equipment,
+    /// True while the character sits on a world rock (`sitting_object_id` set).
+    #[sqlx(skip)]
+    #[serde(default)]
+    sitting: bool,
 }
 
 /// What the character holds in hand; `None` when nothing is held or the item is no longer owned.
@@ -116,7 +123,7 @@ struct DeathNotice {
 pub(super) enum Error {
     Database(sqlx::Error),
     Status(StatusCode, &'static str),
-    Obituary(super::survival::Obituary),
+    Obituary(Box<super::survival::Obituary>),
 }
 
 impl From<sqlx::Error> for Error {
@@ -130,9 +137,13 @@ impl IntoResponse for Error {
         match self {
             Self::Database(error) => ApiError(error).into_response(),
             Self::Status(status, message) => (status, message).into_response(),
-            Self::Obituary(obituary) => {
-                (StatusCode::GONE, Json(DeathNotice { obituary })).into_response()
-            }
+            Self::Obituary(obituary) => (
+                StatusCode::GONE,
+                Json(DeathNotice {
+                    obituary: *obituary,
+                }),
+            )
+                .into_response(),
         }
     }
 }
@@ -249,9 +260,9 @@ pub(super) async fn profile(state: &AppState, player_id: i64) -> Result<Player, 
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
-    let mut player: Player = sqlx::query_as(&format!("SELECT username, character, flag, coalesce((SELECT quantity FROM player_inventory WHERE player_id = players.id AND item_id = 'gold'), 0)::text AS gold, health, stamina, greatest(0, least(100, ceil(100 * (1 - extract(epoch FROM (now() - last_ate_at)) / 604800))))::integer AS food, water, floor({mana})::integer AS mana, {mana_max} AS mana_max, level, experience, (100::bigint * level + 10 * greatest(0, floor(extract(epoch FROM (coalesce(died_at, now()) - created_at)) / 86400))::bigint)::text AS score FROM players WHERE id = $1 AND world_id = $2 FOR SHARE", mana = super::magic::mana_now_sql(), mana_max = super::magic::mana_max()))
+    let mut player: Player = sqlx::query_as(&format!("SELECT username, character, flag, CASE WHEN story_model IS NOT NULL THEN '/story/media/' || story_model_disk || '/' || story_model END AS story_model, coalesce((SELECT quantity FROM player_inventory WHERE player_id = players.id AND item_id = 'gold'), 0)::text AS gold, health, stamina, greatest(0, least(100, ceil(100 * (1 - extract(epoch FROM (now() - last_ate_at)) / 604800))))::integer AS food, water, floor({mana})::integer AS mana, {mana_max} AS mana_max, level, experience, (100::bigint * level + 10 * greatest(0, floor(extract(epoch FROM (coalesce(died_at, now()) - created_at)) / 86400))::bigint)::text AS score FROM players WHERE id = $1 AND world_id = $2 FOR SHARE", mana = super::magic::mana_now_sql(), mana_max = super::magic::mana_max()))
         .bind(player_id).bind(state.world_id).fetch_one(&mut *transaction).await?;
     player.stats = player.stats.with_progress();
     player.life = Some(super::survival::life(&mut transaction, player_id).await?);
@@ -280,6 +291,11 @@ pub(super) async fn profile(state: &AppState, player_id: i64) -> Result<Player, 
         .bind(player_id)
         .fetch_one(&mut *transaction)
         .await?;
+    player.sitting =
+        sqlx::query_scalar("SELECT sitting_object_id IS NOT NULL FROM players WHERE id = $1")
+            .bind(player_id)
+            .fetch_one(&mut *transaction)
+            .await?;
     transaction.commit().await?;
     Ok(player)
 }
@@ -360,6 +376,9 @@ async fn register(
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
+    // Datadisk kit and opening quests: after the insert trigger's starter food/tools,
+    // so the character begins the story with snares (or whatever the disk names).
+    super::story::world::apply_new_player(&state, player_id).await?;
     Ok((
         StatusCode::CREATED,
         Json(Session {
@@ -397,7 +416,7 @@ async fn login(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let obituary = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(obituary));
+        return Err(Error::Obituary(Box::new(obituary)));
     }
     ensure_position(&state, &mut transaction, player_id).await?;
     sqlx::query("DELETE FROM player_sessions WHERE player_id = $1 AND expires_at <= now()")

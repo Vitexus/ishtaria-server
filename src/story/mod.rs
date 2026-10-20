@@ -4,8 +4,10 @@
 //! rewards are evaluated here, in one transaction, from structured data (no scripting).
 
 pub mod api;
+pub mod checkpoint;
 pub mod cli;
 pub mod disk;
+pub mod eggs;
 pub mod engine;
 pub mod placement;
 pub mod settlements;
@@ -79,10 +81,16 @@ pub struct Story {
     pub voices: BTreeMap<(String, String), String>,
     /// Language -> qualified text key -> text.
     pub strings: BTreeMap<String, BTreeMap<String, String>>,
+    /// Easter-egg unlocks from every disk (npc ids and flags already qualified).
+    pub easter_eggs: Vec<disk::EasterEgg>,
     /// Knowledge cards by qualified id; `image` is the media key (`<disk>/media/knowledge/…`).
     pub knowledge: BTreeMap<String, disk::KnowledgeCard>,
     /// The real planet one of the disks defines, when any.
     pub world: Option<WorldPlan>,
+    /// Items granted once at character creation (`item_id`, quantity), from every disk.
+    pub starting_items: Vec<(String, i64)>,
+    /// Quests begun at character creation: (qualified quest id, start stage).
+    pub auto_start_quests: Vec<(String, String)>,
 }
 
 /// The real planet of a story: which disk defines it and the two equirectangular
@@ -132,6 +140,35 @@ fn qualify_effects(effects: &mut [Effect], disk: &str) {
             once.key = format!("{disk}:{}", once.key);
             qualify_effects(&mut once.effects, disk);
         }
+        if let Some(playable) = &mut effect.set_playable {
+            if playable.model.is_some() {
+                playable.disk = Some(disk.to_owned());
+            }
+            if let Some(npc) = &mut playable.hide_npc {
+                *npc = qualify(disk, npc);
+            }
+        }
+        if let Some(place) = &mut effect.teleport_place {
+            *place = qualify(disk, place);
+        }
+    }
+}
+
+fn qualify_egg_condition(condition: &mut disk::EggCondition, disk: &str) {
+    for child in condition
+        .all
+        .iter_mut()
+        .chain(condition.any.iter_mut())
+        .flatten()
+        .chain(condition.not.as_deref_mut())
+    {
+        qualify_egg_condition(child, disk);
+    }
+    if let Some(flag) = &mut condition.flag {
+        *flag = qualify(disk, flag);
+    }
+    if let Some(stage) = &mut condition.quest_stage {
+        stage.quest = qualify(disk, &stage.quest);
     }
 }
 
@@ -295,6 +332,16 @@ impl Story {
                 .voices
                 .insert((language, qualify(&id, &key)), format!("{id}/{path}"));
         }
+        for item in &disk.manifest.starting_items {
+            ensure!(
+                (1..=1_000_000).contains(&item.quantity()),
+                "{id}: invalid starting item quantity for {}",
+                item.item
+            );
+            story
+                .starting_items
+                .push((item.item.clone(), item.quantity()));
+        }
         for mut quest in disk.quests {
             let qualified = qualify(&id, &quest.id);
             quest.id = qualified.clone();
@@ -302,6 +349,12 @@ impl Story {
             if let Some(place) = &quest.start_place {
                 foreign_ok(place)?;
                 quest.start_place = Some(qualify(&id, place));
+            }
+            if let Some(excerpt) = &mut quest.excerpt {
+                excerpt.paraphrase_key = qualify(&id, &excerpt.paraphrase_key);
+                if let Some(akkadian) = &mut excerpt.akkadian_key {
+                    *akkadian = qualify(&id, akkadian);
+                }
             }
             for stage in quest.stages.values_mut() {
                 stage.text_key = qualify(&id, &stage.text_key);
@@ -313,8 +366,23 @@ impl Story {
                     foreign_ok(&reach.place)?;
                     reach.place = qualify(&id, &reach.place);
                 }
+                if let Some(restart) = &mut stage.fail_restart {
+                    foreign_ok(&restart.place)?;
+                    restart.place = qualify(&id, &restart.place);
+                }
             }
             story.quests.insert(qualified, quest);
+        }
+        for quest_id in &disk.manifest.auto_start_quests {
+            let qualified = qualify(&id, quest_id);
+            let stage = story
+                .quests
+                .get(&qualified)
+                .map(|quest| quest.start_stage.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("{id}: auto_start_quests names unknown quest {quest_id}")
+                })?;
+            story.auto_start_quests.push((qualified, stage));
         }
         for (language, table) in disk.strings {
             let target = story.strings.entry(language).or_default();
@@ -329,6 +397,14 @@ impl Story {
             card.credit_key = qualify(&id, &card.credit_key);
             card.image = format!("{id}/{}", card.image);
             story.knowledge.insert(card.id.clone(), card);
+        }
+        for mut egg in disk.easter_eggs {
+            egg.id = format!("{id}:{}", egg.id);
+            egg.npc = qualify(&id, &egg.npc);
+            if let Some(condition) = &mut egg.condition {
+                qualify_egg_condition(condition, &id);
+            }
+            story.easter_eggs.push(egg);
         }
         Ok(())
     }
@@ -376,6 +452,14 @@ impl Story {
                     npc.id
                 );
             }
+        }
+        for egg in &self.easter_eggs {
+            ensure!(
+                self.npcs.contains_key(&egg.npc),
+                "{}: unknown easter-egg npc {}",
+                egg.id,
+                egg.npc
+            );
         }
         for quest in self.quests.values() {
             let guides = quest

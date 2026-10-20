@@ -235,6 +235,7 @@ pub(super) async fn spell_target(
 /// and already stands within the spell's range. The animal bites back only when the caster is
 /// within its melee reach. Killing it removes it from the world until it returns.
 pub(super) async fn spell_strike(
+    state: &AppState,
     world_id: i64,
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     terrain: &super::movement::WalkingTerrain,
@@ -255,7 +256,7 @@ pub(super) async fn spell_strike(
         settle_animal(transaction, world_id, player_id, object_id, kind, progress).await?;
     let melee = distance(caster, target.position) <= creatures().reach_m + WALK_TOLERANCE_M;
     let counter = if returns_at.is_none() && melee {
-        super::combat::counter_attack(transaction, player_id, &target.model).await?
+        super::combat::counter_attack(state, transaction, player_id, &target.model).await?
     } else {
         None
     };
@@ -303,7 +304,7 @@ async fn butcher(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     #[allow(clippy::type_complexity)]
     let row: Option<(f64, f64, f64, i32, Option<f64>)> = sqlx::query_as("SELECT position_x, position_y, position_z, stamina, extract(epoch FROM (clock_timestamp() - last_gathered_at))::float8 FROM players WHERE id = $1 AND position_x IS NOT NULL FOR UPDATE")
@@ -344,16 +345,18 @@ async fn butcher(
     .await?;
     // A dangerous animal that survived the blow may strike back; killing it ends the danger.
     let counter = if returns_at.is_none() {
-        super::combat::counter_attack(&mut transaction, player_id, &animal.model).await?
+        super::combat::counter_attack(&state, &mut transaction, player_id, &animal.model).await?
     } else {
         None
     };
     if counter.as_ref().is_some_and(|counter| counter.died) {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     transaction.commit().await?;
+    // Driving off or killing the animal protects an escorted companion.
+    let _ = super::escort::clear_threat(&state, player_id, &input.object_id).await;
     if let Some(until) = returns_at {
         terrain.mark_removed(&input.object_id, until, None);
     }
@@ -402,7 +405,7 @@ async fn milk(
     if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
-        return Err(Error::Obituary(notice));
+        return Err(Error::Obituary(Box::new(notice)));
     }
     let position: Option<(f64, f64, f64)> = sqlx::query_as("SELECT position_x, position_y, position_z FROM players WHERE id = $1 AND position_x IS NOT NULL")
         .bind(player_id).fetch_optional(&mut *transaction).await?;

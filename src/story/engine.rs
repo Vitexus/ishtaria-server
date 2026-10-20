@@ -1,7 +1,7 @@
 //! Pure evaluation of conditions, effects and dialogue trees against a snapshot of
 //! a player's story state. Persistence and atomicity live in `db.rs`.
 
-use super::disk::{Condition, Dialogue, Effect, Node};
+use super::disk::{Condition, Dialogue, Effect, FlourishStep, Node, SetPlayable};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -69,6 +69,12 @@ pub enum Op {
     Stage(String, String),
     /// Records that a `once` key was used (unique per player).
     Once(String),
+    /// Visual flourish for the dialogue reply; not persisted.
+    Flourish(Vec<FlourishStep>),
+    /// Change the player's pack look and optional datadisk model / hidden NPC role.
+    Playable(SetPlayable),
+    /// Move the player to a qualified place id.
+    TeleportPlace(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +131,15 @@ pub fn apply(effects: &[Effect], state: &mut PlayerState, ops: &mut Vec<Op>) -> 
                 ops.push(Op::Once(once.key.clone()));
                 apply(&once.effects, state, ops)?;
             }
+        }
+        if let Some(steps) = &effect.flourish {
+            ops.push(Op::Flourish(steps.clone()));
+        }
+        if let Some(playable) = &effect.set_playable {
+            ops.push(Op::Playable(playable.clone()));
+        }
+        if let Some(place) = &effect.teleport_place {
+            ops.push(Op::TeleportPlace(place.clone()));
         }
     }
     Ok(())

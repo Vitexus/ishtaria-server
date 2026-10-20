@@ -55,6 +55,11 @@ pub(super) fn armor(item: &str) -> Option<&'static Armor> {
     combat().armor.get(item)
 }
 
+/// Whether this animal model can strike first at an escort companion.
+pub(super) fn is_fierce(model: &str) -> bool {
+    combat().fierce.contains_key(model)
+}
+
 /// Items the configuration refers to, for checking them against the item catalog.
 #[cfg(test)]
 pub(super) fn configured_items() -> Vec<String> {
@@ -103,6 +108,7 @@ async fn worn(
 /// Returns `None` when the animal is not dangerous or this time it did not strike.
 /// The caller holds the character locked and alive in `transaction`.
 pub(super) async fn counter_attack(
+    state: &crate::AppState,
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     player_id: i64,
     model: &str,
@@ -142,7 +148,7 @@ pub(super) async fn counter_attack(
     if let Some(shield) = &shield {
         wear.extend(durability::wear(transaction, player_id, shield, config.shield_wear).await?);
     }
-    let died = survival::hurt(transaction, player_id, damage, DamageCause::Creature).await?;
+    let died = survival::hurt(state, transaction, player_id, damage, DamageCause::Creature).await?;
     Ok(Some(Counter {
         attempted: fierce.damage,
         damage,
