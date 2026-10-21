@@ -328,8 +328,10 @@ async fn ensure_position(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or_else(unavailable)?;
+    let painted = super::story::world::painted_biomes(state).await;
     let position = tokio::task::spawn_blocking(move || {
-        super::environment::spawn_position(size as usize, &pixels, &seed, &sha256)
+        let biomes = painted.as_ref().map(|(map, _)| map.as_ref());
+        super::environment::spawn_position_with(size as usize, &pixels, &seed, &sha256, biomes)
     })
     .await
     .map_err(|_| unavailable())?

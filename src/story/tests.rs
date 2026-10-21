@@ -777,13 +777,13 @@ fn a_place_pinned_to_its_historical_site_stands_exactly_there() {
     let sites = place_anchors(&story, &Flat, "7", &[]).unwrap();
     let site = |id: &str| sites.iter().find(|p| p.id == id).unwrap();
     let (uruk, gate) = (site("geopin:uruk"), site("geopin:gate"));
-    // The frame of the world rasters: latitude = asin(y), longitude = atan2(z, x).
+    // The frame of the world rasters: latitude = asin(y), longitude = atan2(-z, x).
     let latitude = 31.3228_f64.to_radians();
     let longitude = 45.6389_f64.to_radians();
     let expected = [
         latitude.cos() * longitude.cos(),
         latitude.sin(),
-        latitude.cos() * longitude.sin(),
+        -latitude.cos() * longitude.sin(),
     ];
     assert!(
         distance_m(uruk.direction, expected) < 1.0,
@@ -966,6 +966,31 @@ fn every_world_grows_towns_with_graveyards_and_harbours_with_shipwrights() {
     assert!(props.iter().any(|p| p.model == "town.fountain-round"));
     assert!(props.iter().any(|p| p.model == "quaternius.castle_gate"));
     assert!(props.iter().any(|p| p.model == "quaternius.temple"));
+    // The generator lays footpaths where no datadisk defines roads: stones of the road module, away from the plazas.
+    let stones: Vec<_> = props
+        .iter()
+        .filter(|p| p.id.starts_with("trail:"))
+        .collect();
+    assert!(
+        stones.len() > 20,
+        "towns are joined to their graveyards: {}",
+        stones.len()
+    );
+    assert!(stones
+        .iter()
+        .all(|p| p.model == "town.road" && p.scale_m == 2.5));
+    let mut again_story = Story::compose(vec![settlements::world_disk("42", 6)]).unwrap();
+    let mut again_sites = sites.clone();
+    let again = settlements::finish(&mut again_story, &mut again_sites, &Flat, "42").unwrap();
+    assert_eq!(
+        again
+            .props
+            .iter()
+            .filter(|p| p.id.starts_with("trail:"))
+            .count(),
+        stones.len(),
+        "a rebuild of the story gives the same trails"
+    );
     assert_eq!(
         story.strings["cs"]["world:fort_00.name"].split(' ').next(),
         Some("Pevnost")
@@ -1264,6 +1289,10 @@ fn a_structure_is_shipped_validated_and_excludes_generated_scenery() {
         .contains_key("zeta/media/models/architecture/hut.glb"));
     let structure = story.anchors[0].place.structure.as_ref().unwrap();
     assert_eq!(structure.model, "media/models/architecture/hut.glb");
+    assert!(!structure.at_sea);
+    with_structure(", at_sea: true");
+    let afloat = Story::load(std::slice::from_ref(&a), false).unwrap();
+    assert!(afloat.anchors[0].place.structure.as_ref().unwrap().at_sea);
     for bad in [
         ", scale_m: 0",
         ", scale_m: 500",
@@ -1316,6 +1345,38 @@ fn a_disk_may_define_the_worlds_planet() {
         story.media.contains_key("worlda/media/world/height.pgm"),
         "the rasters are part of the disk's media"
     );
+}
+
+#[test]
+fn a_disk_may_paint_land_biomes_over_its_planet() {
+    let manifest = "id: worlda\nversion: 1.0.0\nname: Test\nrequires_ruleset: \"1\"\nlicense: CC0-1.0\nattribution: Test\nlanguages: [en, cs]\nworld:\n  terrain: {heightmap: media/world/height.pgm, water: media/world/water.pgm}\n  biomes: {map: media/world/biomes.pgm}\n";
+    let pgm = |width: usize, height: usize, pixels: &[u8]| {
+        let mut bytes = format!("P5\n{width} {height}\n255\n").into_bytes();
+        bytes.extend_from_slice(pixels);
+        bytes
+    };
+    for (case, bytes, fine) in [
+        ("painted", pgm(16, 8, &[5; 128]), true),
+        (
+            "size differs from the heightmap",
+            pgm(8, 4, &[5; 32]),
+            false,
+        ),
+        ("a water biome", pgm(16, 8, &[1; 128]), false),
+        ("truncated", pgm(16, 8, &[5; 100]), false),
+    ] {
+        let a = scratch("world-biomes");
+        base(&a, "worlda", "1.0.0", "");
+        write(&a, "datadisk.yaml", manifest);
+        write_world_rasters(&a, (16, 8), (16, 8), true);
+        fs::write(a.join("media/world/biomes.pgm"), bytes).unwrap();
+        let story = Story::load(std::slice::from_ref(&a), false);
+        assert_eq!(story.is_ok(), fine, "{case}: {:?}", story.err());
+        if let Ok(story) = story {
+            let biomes = story.world.unwrap().biomes.expect("the map is loaded");
+            assert_eq!((biomes.width, biomes.height), (16, 8));
+        }
+    }
 }
 
 #[test]

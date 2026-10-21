@@ -650,6 +650,234 @@
       "collision_radius": 0.0,
       "aquatic": true,
       "depth_m": 4.0
+    },
+    {
+      "id": "zeroad.gazelle",
+      "biomes": [
+        4,
+        3
+      ],
+      "weight": 2.0,
+      "scale_m": 0.75,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.goat",
+      "biomes": [],
+      "weight": 2.0,
+      "scale_m": 0.75,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.sheep",
+      "biomes": [],
+      "weight": 2.0,
+      "scale_m": 0.75,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.cow",
+      "biomes": [],
+      "weight": 1.0,
+      "scale_m": 0.7,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.bull",
+      "biomes": [],
+      "weight": 1.0,
+      "scale_m": 0.7,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.donkey",
+      "biomes": [],
+      "weight": 1.0,
+      "scale_m": 0.7,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.pig",
+      "biomes": [],
+      "weight": 1.0,
+      "scale_m": 0.75,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.chicken",
+      "biomes": [],
+      "weight": 1.0,
+      "scale_m": 0.55,
+      "max_slope": 0.4,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.fox",
+      "biomes": [
+        5,
+        4
+      ],
+      "weight": 1.0,
+      "scale_m": 0.75,
+      "max_slope": 0.4,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.wolf",
+      "biomes": [
+        5,
+        6
+      ],
+      "weight": 1.0,
+      "scale_m": 0.75,
+      "max_slope": 0.4,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.lion",
+      "biomes": [
+        3,
+        4
+      ],
+      "weight": 0.5,
+      "scale_m": 0.65,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.lioness",
+      "biomes": [
+        3,
+        4
+      ],
+      "weight": 0.5,
+      "scale_m": 0.65,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.deer",
+      "biomes": [
+        5,
+        4
+      ],
+      "weight": 1.0,
+      "scale_m": 0.75,
+      "max_slope": 0.4,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.boar",
+      "biomes": [
+        5
+      ],
+      "weight": 1.0,
+      "scale_m": 0.75,
+      "max_slope": 0.4,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.crocodile",
+      "biomes": [],
+      "weight": 0.5,
+      "scale_m": 0.7,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.camel",
+      "biomes": [
+        3
+      ],
+      "weight": 1.0,
+      "scale_m": 0.7,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.horse_persian",
+      "biomes": [
+        4
+      ],
+      "weight": 0.5,
+      "scale_m": 0.7,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.zebu",
+      "biomes": [],
+      "weight": 1.0,
+      "scale_m": 0.7,
+      "max_slope": 0.35,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.mastiff",
+      "biomes": [],
+      "weight": 1.0,
+      "scale_m": 0.65,
+      "max_slope": 0.4,
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.hawk",
+      "biomes": [
+        4,
+        6
+      ],
+      "weight": 1.0,
+      "scale_m": 0.45,
+      "max_slope": 0.5,
+      "collision_radius": 0.0,
+      "flying": true,
+      "altitude_m": 22.0
+    },
+    {
+      "id": "zeroad.crow",
+      "biomes": [
+        3,
+        4,
+        5
+      ],
+      "weight": 1.0,
+      "scale_m": 0.4,
+      "max_slope": 0.5,
+      "collision_radius": 0.0,
+      "flying": true,
+      "altitude_m": 16.0
+    },
+    {
+      "id": "zeroad.seagull",
+      "biomes": [
+        3
+      ],
+      "weight": 1.0,
+      "scale_m": 0.4,
+      "max_slope": 0.5,
+      "collision_radius": 0.0,
+      "flying": true,
+      "altitude_m": 14.0
+    },
+    {
+      "id": "zeroad.fish_generic",
+      "biomes": [
+        1,
+        2
+      ],
+      "weight": 2.0,
+      "scale_m": 0.35,
+      "max_slope": 10.0,
+      "collision_radius": 0.0,
+      "aquatic": true,
+      "depth_m": 4.0
     }
   ]
 }

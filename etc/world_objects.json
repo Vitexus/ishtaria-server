@@ -2339,6 +2339,570 @@
       "max_slope": 0.45,
       "biomes": [],
       "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.palm_date_a",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.25
+    },
+    {
+      "id": "zeroad.palm_date_b",
+      "weight": 1.6,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.28
+    },
+    {
+      "id": "zeroad.palm_date_c",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.22
+    },
+    {
+      "id": "zeroad.palm_date_new_1",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.25
+    },
+    {
+      "id": "zeroad.palm_date_new_2",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.25
+    },
+    {
+      "id": "zeroad.reed_beach_a",
+      "weight": 1.6,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [],
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.reed_beach_b",
+      "weight": 1.6,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [],
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.reed_pond_lush",
+      "weight": 2.0,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [],
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.papyrus_1",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [],
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.papyrus_2",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [],
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.cattails",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [],
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.tamarix_a",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [
+        3,
+        4
+      ],
+      "collision_radius": 0.12
+    },
+    {
+      "id": "zeroad.cedar_atlas_1",
+      "weight": 2.0,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        6,
+        5
+      ],
+      "collision_radius": 0.45
+    },
+    {
+      "id": "zeroad.cedar_atlas_2",
+      "weight": 2.0,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        6,
+        5
+      ],
+      "collision_radius": 0.4
+    },
+    {
+      "id": "zeroad.cedar_atlas_3",
+      "weight": 1.6,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        6,
+        5
+      ],
+      "collision_radius": 0.38
+    },
+    {
+      "id": "zeroad.cypress_med",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [
+        4,
+        5
+      ],
+      "collision_radius": 0.15
+    },
+    {
+      "id": "zeroad.cypress_tall",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [
+        4,
+        5
+      ],
+      "collision_radius": 0.12
+    },
+    {
+      "id": "zeroad.acacia_01",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [
+        3,
+        4
+      ],
+      "collision_radius": 0.2
+    },
+    {
+      "id": "zeroad.poplar_lombardy",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        4,
+        5
+      ],
+      "collision_radius": 0.22
+    },
+    {
+      "id": "zeroad.bush_desert_a",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        3,
+        4
+      ],
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.willow_a",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        4,
+        5
+      ],
+      "collision_radius": 0.3
+    },
+    {
+      "id": "zeroad.olive_01",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [
+        3,
+        4
+      ],
+      "collision_radius": 0.2
+    },
+    {
+      "id": "zeroad.olive_02",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [
+        3,
+        4
+      ],
+      "collision_radius": 0.2
+    },
+    {
+      "id": "zeroad.olive_03",
+      "weight": 0.4,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [
+        3,
+        4
+      ],
+      "collision_radius": 0.2
+    },
+    {
+      "id": "zeroad.aleppo_pine_1",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        5,
+        4
+      ],
+      "collision_radius": 0.35
+    },
+    {
+      "id": "zeroad.aleppo_pine_2",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        5,
+        4
+      ],
+      "collision_radius": 0.35
+    },
+    {
+      "id": "zeroad.aleppo_pine_3",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        5,
+        4
+      ],
+      "collision_radius": 0.32
+    },
+    {
+      "id": "zeroad.palm_doum_1",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.25
+    },
+    {
+      "id": "zeroad.palm_doum_2",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.28
+    },
+    {
+      "id": "zeroad.fig_top_a",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3,
+        4
+      ],
+      "collision_radius": 0.15
+    },
+    {
+      "id": "zeroad.fig_top_b",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3,
+        4
+      ],
+      "collision_radius": 0.15
+    },
+    {
+      "id": "zeroad.reed_giant",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.45,
+      "biomes": [],
+      "collision_radius": 0.0
+    },
+    {
+      "id": "zeroad.cretan_date_01",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.25
+    },
+    {
+      "id": "zeroad.cretan_date_02",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.22
+    },
+    {
+      "id": "zeroad.cretan_date_03",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.24
+    },
+    {
+      "id": "zeroad.cretan_date_04",
+      "weight": 0.4,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.2
+    },
+    {
+      "id": "zeroad.aleppo_pine_4",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        5,
+        4
+      ],
+      "collision_radius": 0.32
+    },
+    {
+      "id": "zeroad.aleppo_pine_5",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        5,
+        4
+      ],
+      "collision_radius": 0.32
+    },
+    {
+      "id": "zeroad.aleppo_pine_6",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        5,
+        4
+      ],
+      "collision_radius": 0.3
+    },
+    {
+      "id": "zeroad.aleppo_pine_7",
+      "weight": 0.4,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        5,
+        4
+      ],
+      "collision_radius": 0.28
+    },
+    {
+      "id": "zeroad.aleppo_pine_8",
+      "weight": 0.4,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        5,
+        4
+      ],
+      "collision_radius": 0.28
+    },
+    {
+      "id": "zeroad.fig_a",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3,
+        4
+      ],
+      "collision_radius": 0.25
+    },
+    {
+      "id": "zeroad.fig_b",
+      "weight": 1.2,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3,
+        4
+      ],
+      "collision_radius": 0.25
+    },
+    {
+      "id": "zeroad.palm_dead_1",
+      "weight": 0.4,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.15
+    },
+    {
+      "id": "zeroad.palm_dead_2",
+      "weight": 0.4,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.12
+    },
+    {
+      "id": "zeroad.palm_dead_3",
+      "weight": 0.4,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.12
+    },
+    {
+      "id": "zeroad.palm_date_fruit_1",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.25
+    },
+    {
+      "id": "zeroad.palm_date_fruit_2",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.25
+    },
+    {
+      "id": "zeroad.cedar_atlas_dead_1",
+      "weight": 0.6,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        6,
+        5
+      ],
+      "collision_radius": 0.4
+    },
+    {
+      "id": "zeroad.cedar_atlas_dead_2",
+      "weight": 0.6,
+      "scale_m": 1.0,
+      "max_slope": 0.5,
+      "biomes": [
+        6,
+        5
+      ],
+      "collision_radius": 0.38
+    },
+    {
+      "id": "zeroad.poplar_lombardy_dead",
+      "weight": 0.4,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        4,
+        5
+      ],
+      "collision_radius": 0.2
+    },
+    {
+      "id": "zeroad.palm_date_d",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.22
+    },
+    {
+      "id": "zeroad.palm_date_e",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.18
+    },
+    {
+      "id": "zeroad.palm_date_new_3",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.25
+    },
+    {
+      "id": "zeroad.palm_date_new_4",
+      "weight": 0.8,
+      "scale_m": 1.0,
+      "max_slope": 0.4,
+      "biomes": [
+        3
+      ],
+      "collision_radius": 0.25
     }
   ]
 }

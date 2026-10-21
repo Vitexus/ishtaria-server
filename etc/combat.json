@@ -15,6 +15,15 @@
     "animal.husky": {"damage": 5, "chance": 0.5},
     "animal.fox": {"damage": 3, "chance": 0.5},
     "animal.stag": {"damage": 5, "chance": 0.4},
-    "animal.bull": {"damage": 10, "chance": 0.6}
+    "animal.bull": {"damage": 10, "chance": 0.6},
+    "zeroad.wolf": {"damage": 8, "chance": 0.7},
+    "zeroad.fox": {"damage": 3, "chance": 0.5},
+    "zeroad.bull": {"damage": 10, "chance": 0.6},
+    "zeroad.mastiff": {"damage": 5, "chance": 0.5},
+    "zeroad.boar": {"damage": 6, "chance": 0.6},
+    "zeroad.lion": {"damage": 12, "chance": 0.7},
+    "zeroad.lioness": {"damage": 10, "chance": 0.65},
+    "zeroad.crocodile": {"damage": 12, "chance": 0.6},
+    "zeroad.camel": {"damage": 4, "chance": 0.3}
   }
 }

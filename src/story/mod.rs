@@ -11,6 +11,7 @@ pub mod eggs;
 pub mod engine;
 pub mod placement;
 pub mod settlements;
+pub mod trails;
 pub mod walking;
 pub mod world;
 
@@ -100,6 +101,8 @@ pub struct Story {
 pub struct WorldPlan {
     pub disk: String,
     pub terrain: disk::WorldTerrain,
+    /// The land biomes the disk paints, when it does.
+    pub biomes: Option<std::sync::Arc<crate::environment::BiomeMap>>,
 }
 
 fn qualify(disk: &str, reference: &str) -> String {
@@ -201,6 +204,7 @@ impl Story {
                 story.world = Some(WorldPlan {
                     disk: id.clone(),
                     terrain: world.terrain.clone(),
+                    biomes: disk.world_biome_map()?.map(std::sync::Arc::new),
                 });
             }
             _ => {}

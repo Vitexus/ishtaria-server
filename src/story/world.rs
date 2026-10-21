@@ -131,6 +131,55 @@ pub struct StoryWorld {
     pub terrains: Vec<TerrainDescriptor>,
 }
 
+type Painted = Option<(String, Option<Arc<crate::environment::BiomeMap>>)>;
+static PAINTED: Mutex<Painted> = Mutex::const_new(None);
+
+/// The land biomes the world's datadisk paints, with a key naming the disks they come from (part of cache
+/// keys, so a changed disk is not served from an old environment). `None` while no disk paints biomes.
+///
+/// It reads the applied disks itself instead of using [`world`]: placing the places needs the terrain,
+/// the terrain needs these biomes, and the story is not built yet at that point.
+pub async fn painted_biomes(
+    state: &AppState,
+) -> Option<(Arc<crate::environment::BiomeMap>, String)> {
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT disk_id, version, sha256 FROM world_datadisks WHERE world_id = $1 ORDER BY position",
+    )
+    .bind(state.world_id)
+    .fetch_all(&state.pool)
+    .await
+    .ok()?;
+    if rows.is_empty() {
+        return None;
+    }
+    let key = format!(
+        "{}:{}",
+        state.world_id,
+        rows.iter()
+            .map(|(id, version, sha)| format!("{id}@{version}:{}", sha.as_deref().unwrap_or("")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let mut cache = PAINTED.lock().await;
+    if let Some((stored, map)) = cache.as_ref() {
+        if stored == &key {
+            return map.clone().map(|map| (map, key));
+        }
+    }
+    let dir = disk_dir();
+    let ids: Vec<String> = rows.into_iter().map(|(id, _, _)| id).collect();
+    let map = tokio::task::spawn_blocking(move || {
+        ids.iter().find_map(|id| {
+            let disk = super::disk::Disk::load(&dir.join(id), false).ok()?;
+            disk.world_biome_map().ok().flatten().map(Arc::new)
+        })
+    })
+    .await
+    .ok()?;
+    *cache = Some((key.clone(), map.clone()));
+    map.map(|map| (map, key))
+}
+
 /// Path clients use to fetch a media file of a disk.
 pub fn media_url(media: &str) -> String {
     format!("/story/media/{media}")
@@ -335,6 +384,7 @@ async fn build(
     let built = super::settlements::finish(&mut story, &mut sites, terrain.as_ref(), &seed)?;
     let props = built.props;
     let colliders = built.colliders;
+    let built_bridges = built.bridges;
     let farms = built.farms;
     let npcs = npc_descriptors(&story, &sites, terrain.as_ref());
     let spawn = find_spawn(&story, &sites, &colliders, &npcs, terrain.as_ref(), &seed);
@@ -344,6 +394,7 @@ async fn build(
         wildlife_zones(&story, &sites),
     );
     movement::set_statics(format!("{seed}:{heightmap}"), colliders);
+    movement::set_bridges(built_bridges);
     movement::set_farms(format!("{seed}:{heightmap}"), farms);
     Ok(StoryWorld {
         spawn,
@@ -423,12 +474,12 @@ pub fn wildlife_zones(
                 flora: wildlife
                     .flora
                     .iter()
-                    .map(|entry| (entry.id.clone(), entry.weight))
+                    .map(|entry| (entry.id.clone(), entry.weight, entry.waterside))
                     .collect(),
                 fauna: wildlife
                     .fauna
                     .iter()
-                    .map(|entry| (entry.id.clone(), entry.weight))
+                    .map(|entry| (entry.id.clone(), entry.weight, entry.waterside))
                     .collect(),
             })
         })

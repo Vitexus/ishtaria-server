@@ -86,6 +86,17 @@ pub struct Manifest {
 #[serde(deny_unknown_fields)]
 pub struct World {
     pub terrain: WorldTerrain,
+    /// Land biomes the disk paints over the planet; everything it leaves out the generator decides.
+    #[serde(default)]
+    pub biomes: Option<WorldBiomes>,
+}
+
+/// An 8-bit P5 PGM of the size of the terrain rasters (`environment::BiomeMap`): `0` leaves the biome to the
+/// generator, `3..7` paints a land biome (3 lowland, 4 grassland, 5 temperate_forest, 6 mountain, 7 polar).
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorldBiomes {
+    pub map: String,
 }
 
 /// Two P5 PGMs of the same size (`width == 2 * height`, row 0 at +90 degrees):
@@ -208,6 +219,9 @@ pub struct Wildlife {
 pub struct WildlifeEntry {
     pub id: String,
     pub weight: f64,
+    /// Only spawn near patch water, a river or the sea (about 60 m).
+    #[serde(default)]
+    pub waterside: bool,
 }
 
 /// A place put where history says: `distance_m` from `from` in the direction `bearing_deg` of the map of `from`
@@ -235,7 +249,7 @@ impl Locate {
 
 /// A place standing at its historical site on the real planet the disk defines (`world.terrain`):
 /// `latitude_deg` and `longitude_deg` in the frame of the rasters (`latitude = asin(y)`,
-/// `longitude = atan2(z, x)`). The place stands exactly there: history has already decided,
+/// `longitude = atan2(-z, x)`). The place stands exactly there: history has already decided,
 /// so `requires` is advice for the author (its violations are logged at placement), not a
 /// constraint to search around. Places around it locate themselves from it as usual.
 #[derive(Clone, Debug, Deserialize)]
@@ -253,7 +267,7 @@ impl Geo {
         [
             latitude.cos() * longitude.cos(),
             latitude.sin(),
-            latitude.cos() * longitude.sin(),
+            -latitude.cos() * longitude.sin(),
         ]
     }
 }
@@ -287,6 +301,9 @@ pub struct Structure {
     pub ground_m: Option<[f64; 2]>,
     /// Distance up to which the server announces the structure (default 600).
     pub visible_m: Option<f64>,
+    /// Stand at mean sea level (ships, floating docks) instead of on the terrain.
+    #[serde(default)]
+    pub at_sea: bool,
 }
 
 /// A landscape patch of a datadisk place (ADR 0013): real-world relief around the site, with the
@@ -987,7 +1004,14 @@ impl Disk {
         let world_files: Vec<&str> = manifest
             .world
             .iter()
-            .flat_map(|w| [w.terrain.heightmap.as_str(), w.terrain.water.as_str()])
+            .flat_map(|w| {
+                [
+                    Some(w.terrain.heightmap.as_str()),
+                    Some(w.terrain.water.as_str()),
+                    w.biomes.as_ref().map(|biomes| biomes.map.as_str()),
+                ]
+            })
+            .flatten()
             .collect();
         wanted.extend(world_files.iter().copied());
         // Spoken lines: a file `media/voice/<language>/<text key>.ogg` for a key a dialogue node shows.
@@ -1073,6 +1097,28 @@ impl Disk {
         Ok(disk)
     }
 
+    /// The biomes this disk paints over its planet, read and checked, when it defines any.
+    pub fn world_biome_map(&self) -> Result<Option<crate::environment::BiomeMap>> {
+        let Some(biomes) = self
+            .manifest
+            .world
+            .as_ref()
+            .and_then(|world| world.biomes.as_ref())
+        else {
+            return Ok(None);
+        };
+        let id = &self.manifest.id;
+        let path = self
+            .media
+            .get(&biomes.map)
+            .map(|(path, _)| path.as_path())
+            .with_context(|| format!("{id}: the biome map is missing from the media list"))?;
+        let bytes = fs::read(path).with_context(|| format!("{id}: cannot read the biome map"))?;
+        crate::environment::BiomeMap::from_pgm(&bytes)
+            .map(Some)
+            .map_err(|message| anyhow!("{id}: invalid biome map: {message}"))
+    }
+
     fn check(&self, allow_draft: bool) -> Result<()> {
         let id = &self.manifest.id;
         if let Some(world) = &self.manifest.world {
@@ -1098,6 +1144,14 @@ impl Disk {
                 heightmap.0,
                 heightmap.1
             );
+            if let Some(map) = self.world_biome_map()? {
+                ensure!(
+                    (map.width, map.height) == heightmap,
+                    "{id}: the biome map must match the heightmap size {}x{}",
+                    heightmap.0,
+                    heightmap.1
+                );
+            }
         }
         let places: HashSet<&str> = unique(self.places.iter().map(|p| p.id.as_str()), "place")?;
         unique(self.npcs.iter().map(|n| n.id.as_str()), "npc")?;

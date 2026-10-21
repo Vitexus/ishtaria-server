@@ -79,16 +79,178 @@ fn neighbor(index: usize, horizontal: isize, vertical: isize, size: usize) -> us
     target * size * size + row * size + column
 }
 
-fn moisture(seed: u64, point: [f64; 3]) -> f64 {
+/// Hash of a lattice corner in `[0, 1)`.
+fn lattice(seed: u64, corner: [i64; 3]) -> f64 {
     let mut mixed = seed;
-    for coordinate in point {
-        mixed ^= ((coordinate * 5.0).floor() as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    for coordinate in corner {
+        mixed ^= (coordinate as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     }
     (mixed >> 11) as f64 / (1u64 << 53) as f64
 }
 
+/// Smooth fractal value noise in `[0, 1]`, the way Luanti's mapgens draw their heat and humidity fields:
+/// slowly varying maps whose neighbourhoods agree, instead of independent patches.
+fn climate_noise(seed: u64, point: [f64; 3], frequency: f64, octaves: u32) -> f64 {
+    let (mut sum, mut amplitude, mut norm, mut scale) = (0.0, 1.0, 0.0, frequency);
+    for octave in 0..octaves {
+        let scaled = point.map(|axis| axis * scale);
+        let base = scaled.map(f64::floor);
+        let fraction = [0, 1, 2].map(|axis| {
+            let t = scaled[axis] - base[axis];
+            t * t * (3.0 - 2.0 * t)
+        });
+        let corner = |dx: i64, dy: i64, dz: i64| {
+            lattice(
+                seed.wrapping_add(u64::from(octave) * 0x1F3D_5B79),
+                [
+                    base[0] as i64 + dx,
+                    base[1] as i64 + dy,
+                    base[2] as i64 + dz,
+                ],
+            )
+        };
+        let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
+        let x00 = lerp(corner(0, 0, 0), corner(1, 0, 0), fraction[0]);
+        let x10 = lerp(corner(0, 1, 0), corner(1, 1, 0), fraction[0]);
+        let x01 = lerp(corner(0, 0, 1), corner(1, 0, 1), fraction[0]);
+        let x11 = lerp(corner(0, 1, 1), corner(1, 1, 1), fraction[0]);
+        sum += amplitude
+            * lerp(
+                lerp(x00, x10, fraction[1]),
+                lerp(x01, x11, fraction[1]),
+                fraction[2],
+            );
+        norm += amplitude;
+        amplitude *= 0.5;
+        scale *= 2.0;
+    }
+    sum / norm
+}
+
+/// The land biome of a cell from a heat and a humidity field (as in Luanti's biome selection) with ragged
+/// borders: heat falls with latitude and height, humidity is a smooth noise raised near water, and the
+/// polar, tree and lowland limits are shifted by noise so that bands of biomes are not straight lines.
+fn land_biome(seed: u64, point: [f64; 3], latitude: f64, elevation: i32, near_water: bool) -> u8 {
+    let ragged = |salt: u64| climate_noise(seed.wrapping_add(salt), point, 6.0, 2) - 0.5;
+    let height = f64::from(elevation);
+    let heat = 1.0 - latitude.abs() - height / 6000.0 + ragged(11) * 0.12;
+    if heat < 0.28 {
+        return 7;
+    }
+    if height > 1600.0 + ragged(23) * 500.0 {
+        return 6;
+    }
+    if height < 150.0 + ragged(37) * 100.0 {
+        return 3;
+    }
+    let humidity = climate_noise(seed, point, 1.6, 3) + if near_water { 0.12 } else { 0.0 }
+        - (heat - 0.7).max(0.0) * 0.3;
+    if humidity > 0.42 + (heat - 0.6) * 0.2 {
+        5
+    } else {
+        4
+    }
+}
+
+/// Land biomes a datadisk paints over the planet (`world.biomes`): an equirectangular 8-bit raster in the frame
+/// of the world rasters (row 0 at +90 degrees, column 0 at -180 degrees). A pixel is `0` where the generator
+/// decides, otherwise the number of a land biome (3 lowland ... 7 polar, see `story::disk::BIOMES`). Water is
+/// never painted: the sea, lakes and rivers follow the relief.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BiomeMap {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u8>,
+}
+
+impl BiomeMap {
+    /// Parses a binary P5 PGM (maxval 255, `width == 2 * height`) whose pixels are 0 or land biomes.
+    pub fn from_pgm(bytes: &[u8]) -> Result<Self, String> {
+        let mut cursor = 0usize;
+        let mut tokens = Vec::with_capacity(4);
+        while tokens.len() < 4 {
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if bytes.get(cursor) == Some(&b'#') {
+                while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                    cursor += 1;
+                }
+                continue;
+            }
+            let start = cursor;
+            while cursor < bytes.len() && !bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if start == cursor {
+                return Err("truncated PGM header".into());
+            }
+            tokens.push(String::from_utf8_lossy(&bytes[start..cursor]).into_owned());
+        }
+        if tokens[0] != "P5" {
+            return Err("expected a binary P5 PGM".into());
+        }
+        let number = |index: usize| {
+            tokens[index]
+                .parse::<usize>()
+                .map_err(|_| "invalid PGM header")
+        };
+        let (width, height, maxval) = (number(1)?, number(2)?, number(3)?);
+        if width == 0 || height == 0 || width != 2 * height || maxval != 255 {
+            return Err("a biome map must be 8-bit with width = 2 x height".into());
+        }
+        // Exactly one whitespace byte separates the header from the pixels.
+        let pixels = bytes
+            .get(cursor + 1..)
+            .filter(|rest| rest.len() == width * height)
+            .ok_or("the biome map does not hold exactly width x height pixels")?;
+        if let Some(bad) = pixels
+            .iter()
+            .find(|&&value| value != 0 && !(3..=7).contains(&value))
+        {
+            return Err(format!(
+                "pixel value {bad} is not 0 (generator decides) or a land biome 3..7"
+            ));
+        }
+        Ok(Self {
+            width,
+            height,
+            pixels: pixels.to_vec(),
+        })
+    }
+
+    /// The painted land biome at a direction from the planet's centre, or `None` where the generator decides.
+    pub fn at(&self, direction: [f64; 3]) -> Option<u8> {
+        let length = direction.iter().map(|axis| axis * axis).sum::<f64>().sqrt();
+        if length == 0.0 {
+            return None;
+        }
+        let latitude = (direction[1] / length).clamp(-1.0, 1.0).asin().to_degrees();
+        let longitude = (-direction[2]).atan2(direction[0]).to_degrees();
+        let column =
+            (((longitude + 180.0) / 360.0 * self.width as f64) as usize).min(self.width - 1);
+        let row = (((90.0 - latitude) / 180.0 * self.height as f64) as usize).min(self.height - 1);
+        match self.pixels[row * self.width + column] {
+            0 => None,
+            biome => Some(biome),
+        }
+    }
+}
+
+#[cfg(test)]
 pub fn generate(size: usize, pixels: &[u8], seed: &str, sha256: &str) -> Option<Environment> {
+    generate_with(size, pixels, seed, sha256, None)
+}
+
+/// Like [`generate`], with the land biomes a datadisk paints taking the place of the derived ones.
+pub fn generate_with(
+    size: usize,
+    pixels: &[u8],
+    seed: &str,
+    sha256: &str,
+    painted: Option<&BiomeMap>,
+) -> Option<Environment> {
     if size == 0 || size > 1024 || pixels.len() != size * size * 6 {
         return None;
     }
@@ -144,6 +306,11 @@ pub fn generate(size: usize, pixels: &[u8], seed: &str, sha256: &str) -> Option<
     let mut water_m = vec![DRY; count];
     let mut biomes = vec![0; count];
     let numeric_seed = seed.parse::<u64>().ok()?;
+    let is_water = |index: usize| {
+        elevation_m[index] <= 0
+            || filled[index] > elevation_m[index] + 32
+            || (flow[index] >= 18 && downstream[index] >= 0)
+    };
     for index in 0..count {
         let face = index / (resolution * resolution);
         let horizontal =
@@ -157,7 +324,7 @@ pub fn generate(size: usize, pixels: &[u8], seed: &str, sha256: &str) -> Option<
                 + point[0].powi(2) * point[2].powi(2) / 3.0)
                 .sqrt();
         let elevation = elevation_m[index];
-        biomes[index] = if elevation <= 0 {
+        let derived = if elevation <= 0 {
             water_m[index] = 0;
             0
         } else if filled[index] > elevation + 32 {
@@ -166,16 +333,19 @@ pub fn generate(size: usize, pixels: &[u8], seed: &str, sha256: &str) -> Option<
         } else if flow[index] >= 18 && downstream[index] >= 0 {
             water_m[index] = filled[index];
             2
-        } else if latitude.abs() + f64::from(elevation) / 6000.0 > 0.72 {
-            7
-        } else if elevation > 1600 {
-            6
-        } else if elevation < 150 {
-            3
-        } else if moisture(numeric_seed, point) > 0.35 {
-            5
         } else {
-            4
+            let near_water =
+                [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                    .into_iter()
+                    .any(|(horizontal, vertical)| {
+                        is_water(neighbor(index, horizontal, vertical, resolution))
+                    });
+            land_biome(numeric_seed, point, latitude, elevation, near_water)
+        };
+        // A datadisk paints land only; water and the rivers stay what the relief makes them.
+        biomes[index] = match painted.and_then(|map| map.at(point)) {
+            Some(biome) if (3..=7).contains(&derived) => biome,
+            _ => derived,
         };
     }
     Some(Environment {
@@ -191,8 +361,19 @@ pub fn generate(size: usize, pixels: &[u8], seed: &str, sha256: &str) -> Option<
     })
 }
 
+#[cfg(test)]
 pub fn spawn_position(size: usize, pixels: &[u8], seed: &str, sha256: &str) -> Option<[f64; 3]> {
-    let environment = generate(size, pixels, seed, sha256)?;
+    spawn_position_with(size, pixels, seed, sha256, None)
+}
+
+pub fn spawn_position_with(
+    size: usize,
+    pixels: &[u8],
+    seed: &str,
+    sha256: &str,
+    painted: Option<&BiomeMap>,
+) -> Option<[f64; 3]> {
+    let environment = generate_with(size, pixels, seed, sha256, painted)?;
     let resolution = environment.face_size;
     let radius = 6_371_000.0;
     (0..environment.biomes.len())
@@ -280,6 +461,81 @@ pub fn spawn_position(size: usize, pixels: &[u8], seed: &str, sha256: &str) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn land_biomes_form_coherent_regions_with_both_vegetation_kinds() {
+        let size = 32;
+        let pixels = vec![150; size * size * 6];
+        let environment = generate(size, &pixels, "42", "test").unwrap();
+        let biomes = &environment.biomes;
+        assert!(biomes.contains(&4) && biomes.contains(&5), "{biomes:?}");
+        let resolution = environment.face_size;
+        let mut pairs = 0;
+        let mut differing = 0;
+        for index in 0..biomes.len() {
+            if index % resolution + 1 < resolution {
+                pairs += 1;
+                differing += usize::from(biomes[index] != biomes[index + 1]);
+            }
+        }
+        assert!(
+            differing * 6 < pairs,
+            "neighbouring cells should mostly agree: {differing} of {pairs}"
+        );
+        let again = generate(size, &pixels, "42", "test").unwrap();
+        assert_eq!(again.biomes, biomes.clone());
+        let other = generate(size, &pixels, "43", "test").unwrap();
+        assert_ne!(other.biomes, *biomes);
+    }
+
+    fn pgm(width: usize, height: usize, pixels: &[u8]) -> Vec<u8> {
+        let mut bytes = format!("P5\n# painted\n{width} {height}\n255\n").into_bytes();
+        bytes.extend_from_slice(pixels);
+        bytes
+    }
+
+    #[test]
+    fn a_biome_map_reads_pgm_and_rejects_bad_values() {
+        let map = BiomeMap::from_pgm(&pgm(4, 2, &[0, 0, 5, 0, 0, 0, 5, 0])).unwrap();
+        assert_eq!((map.width, map.height), (4, 2));
+        assert!(BiomeMap::from_pgm(&pgm(4, 2, &[0, 1, 0, 0, 0, 0, 0, 0])).is_err());
+        assert!(BiomeMap::from_pgm(&pgm(4, 2, &[0, 8, 0, 0, 0, 0, 0, 0])).is_err());
+        assert!(BiomeMap::from_pgm(&pgm(4, 3, &[0; 12])).is_err());
+        assert!(BiomeMap::from_pgm(&pgm(4, 2, &[0; 7])).is_err());
+        assert!(BiomeMap::from_pgm(b"P6\n4 2\n255\n").is_err());
+    }
+
+    #[test]
+    fn a_biome_map_is_read_in_the_frame_of_the_world_rasters() {
+        // Only the column of 0..90 E is painted. East of Greenwich is towards -Z.
+        let map = BiomeMap::from_pgm(&pgm(4, 2, &[0, 0, 5, 0, 0, 0, 5, 0])).unwrap();
+        assert_eq!(map.at([1.0, 0.0, -1.0]), Some(5));
+        assert_eq!(map.at([1.0, 0.0, 1.0]), None);
+        assert_eq!(map.at([0.0, 0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn painted_biomes_replace_land_biomes_but_never_water() {
+        let size = 16;
+        let mut pixels = vec![144; size * size * 6];
+        // The first cells of the first face are sea.
+        for value in pixels.iter_mut().take(size * 4) {
+            *value = 0;
+        }
+        let plain = generate(size, &pixels, "42", "test").unwrap();
+        let polar = BiomeMap::from_pgm(&pgm(4, 2, &[7; 8])).unwrap();
+        let painted = generate_with(size, &pixels, "42", "test", Some(&polar)).unwrap();
+        assert_eq!(plain.biomes.len(), painted.biomes.len());
+        assert!(plain.biomes.contains(&0));
+        for (before, after) in plain.biomes.iter().zip(&painted.biomes) {
+            if (3..=7).contains(before) {
+                assert_eq!(*after, 7);
+            } else {
+                assert_eq!(after, before, "water is not painted");
+            }
+        }
+        assert_eq!(plain.water_m, painted.water_m);
+    }
 
     #[test]
     fn relief_is_bounded_continuous_seeded_and_coast_safe() {

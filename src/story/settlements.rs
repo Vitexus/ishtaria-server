@@ -445,6 +445,8 @@ pub struct Built {
     pub colliders: Vec<WorldObject>,
     /// Settlements with a pasture where farm animals graze.
     pub farms: Vec<crate::movement::FarmSite>,
+    /// Decks of the bridges the trails cross rivers on, walkable like ground.
+    pub bridges: Vec<crate::movement::BridgeDeck>,
 }
 
 fn to_props(
@@ -548,14 +550,21 @@ fn build_structure(
     let [east, north] = structure.offset_m.unwrap_or([0.0, 0.0]);
     let yaw = structure.yaw_deg.unwrap_or(0.0).to_radians();
     // The model stands at the height of the ground at its `ground_m` point (the foot of its stairs, say), so that
-    // the way up starts on the terrain and not in the air.
+    // the way up starts on the terrain and not in the air. Ships and floating docks use mean sea level.
     let [ground_x, ground_z] = structure.ground_m.unwrap_or([0.0, 0.0]);
     let (sin, cos) = yaw.sin_cos();
+    let height = |direction: [f64; 3]| {
+        if structure.at_sea {
+            0.0
+        } else {
+            ground.height(direction).max(0.0)
+        }
+    };
     let (_, ground_point) = scenery::world_from_local(
         site.direction,
         east + (ground_x * cos + ground_z * sin) * scale,
         north + (-ground_x * sin + ground_z * cos) * scale,
-        |direction| ground.height(direction).max(0.0),
+        height,
         crate::movement::RADIUS,
     );
     let (direction, _) = scenery::world_from_local(
@@ -575,15 +584,18 @@ fn build_structure(
         scale_m: scale,
         visible_m: Some(structure.visible_m.unwrap_or(600.0)),
     });
-    built.colliders.push(WorldObject {
-        id: format!("{id}#structure"),
-        model,
-        position,
-        scale_m: scale,
-        yaw,
-        collision_radius_m: reach.max(1.0),
-        biome: 4,
-    });
+    // Harbour ships skip mesh colliders (same as generated at-sea props); docks on land keep them.
+    if !structure.at_sea {
+        built.colliders.push(WorldObject {
+            id: format!("{id}#structure"),
+            model,
+            position,
+            scale_m: scale,
+            yaw,
+            collision_radius_m: reach.max(1.0),
+            biome: 4,
+        });
+    }
     Some((direction, reach))
 }
 
@@ -674,6 +686,223 @@ fn herd_phase_ms(seed: &str, site_id: &str) -> i64 {
     (share * crate::herd::cycle_ms() as f64) as i64
 }
 
+/// Footpaths the generator lays where no datadisk defines roads: from every town to its graveyard, harbour and
+/// pasture, and to the nearest other town when one lies within reach. Each trail is stepping stones of the
+/// road module, so it also shows on the clients' minimap; none is laid where water or cliffs leave no way.
+/// A stretch of a trail in local metres.
+type Segment = ((f64, f64), (f64, f64));
+
+/// The rope bridge of 0 A.D. as `tools/zeroad-bridges.py` converts it: 70.3 units long, its deck 6.7 units
+/// above the model's lowest point at the ends and 2.2 units lower in the middle, 9.2 wide with its posts.
+const BRIDGE_MODEL: &str = "zeroad.broken_rope_bridge_long";
+const BRIDGE_LENGTH: f64 = 70.3;
+const BRIDGE_END_DECK: f64 = 6.7;
+const BRIDGE_SAG: f64 = 2.2;
+const BRIDGE_DECK_WIDTH: f64 = 4.0;
+/// A bridge reaches this far over each bank, in metres.
+const BRIDGE_ABUTMENT_M: f64 = 3.0;
+/// The most the banks of a bridge may differ in height.
+const BRIDGE_MAX_STEP_M: f64 = 1.0;
+
+/// Bridges for the spans of a trail: the prop, scaled to the river, and the deck that characters walk on.
+/// Returns the spans bridged, as local segments, so that the trail leaves them without stones; `None` when a
+/// span cannot be bridged (its banks differ too much in height), and the trail is not laid at all.
+fn lay_bridges(
+    name: &str,
+    origin: [f64; 3],
+    spans: &[super::trails::Span],
+    ground: &dyn Ground,
+    built: &mut Built,
+) -> Option<Vec<Segment>> {
+    let bank = |(x, z): (f64, f64)| {
+        let (direction, _) =
+            scenery::world_from_local(origin, x, z, |_| 0.0, crate::movement::RADIUS);
+        (direction, ground.height(direction).max(0.0))
+    };
+    if spans
+        .iter()
+        .any(|span| (bank(span.from).1 - bank(span.to).1).abs() > BRIDGE_MAX_STEP_M)
+    {
+        return None;
+    }
+    let mut bridged = Vec::new();
+    for (number, span) in spans.iter().enumerate() {
+        let ((from, from_height), (to, to_height)) = (bank(span.from), bank(span.to));
+        let scale = (span.length() + 2.0 * BRIDGE_ABUTMENT_M) / BRIDGE_LENGTH;
+        let middle = (
+            (span.from.0 + span.to.0) / 2.0,
+            (span.from.1 + span.to.1) / 2.0,
+        );
+        let deck = (from_height + to_height) / 2.0;
+        let (_, position) = scenery::world_from_local(
+            origin,
+            middle.0,
+            middle.1,
+            |_| deck - BRIDGE_END_DECK * scale,
+            crate::movement::RADIUS,
+        );
+        built.props.push(WorldProp {
+            id: format!("trail:{name}#bridge{number}"),
+            model: BRIDGE_MODEL.to_owned(),
+            position,
+            // The model runs along its +Z.
+            yaw: (span.to.0 - span.from.0).atan2(span.to.1 - span.from.1),
+            scale_m: scale,
+            visible_m: Some(120.0),
+        });
+        built.bridges.push(crate::movement::BridgeDeck {
+            from,
+            to,
+            half_width_m: BRIDGE_DECK_WIDTH * scale.max(0.35) / 2.0,
+            from_height_m: from_height,
+            to_height_m: to_height,
+            sag_m: BRIDGE_SAG * scale,
+        });
+        bridged.push((span.from, span.to));
+    }
+    Some(bridged)
+}
+
+/// The trails of the last world built, by what they depend on: the story is rebuilt every few seconds and
+/// laying them is the dearest part.
+type LaidTrails = Option<(String, Vec<WorldProp>, Vec<crate::movement::BridgeDeck>)>;
+static TRAILS: std::sync::Mutex<LaidTrails> = std::sync::Mutex::new(None);
+
+fn lay_trails(
+    world_key: &str,
+    towns: &[(usize, String, Placed, f64)],
+    harbours: &[(usize, Placed)],
+    folds: &[(usize, Placed, super::disk::Movement)],
+    sites: &HashMap<String, Placed>,
+    ground: &dyn Ground,
+    built: &mut Built,
+) {
+    // (trail id, index of the town it leaves, goal, clearance around the goal in metres)
+    let mut edges: Vec<(String, usize, [f64; 3], f64)> = Vec::new();
+    let mut linked = std::collections::BTreeSet::new();
+    for (position, (index, id, site, _)) in towns.iter().enumerate() {
+        if let Some(graveyard) = sites.get(&format!("{id}_graveyard")) {
+            edges.push((
+                format!("{id}:graveyard"),
+                position,
+                graveyard.direction,
+                12.0,
+            ));
+        }
+        if let Some((_, harbour)) = harbours.iter().find(|(other, _)| other == index) {
+            edges.push((format!("{id}:harbour"), position, harbour.direction, 8.0));
+        }
+        if let Some((_, fold, _)) = folds.iter().find(|(other, _, _)| other == index) {
+            edges.push((format!("{id}:fold"), position, fold.direction, 8.0));
+        }
+        let nearest = towns
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != position)
+            .map(|(other, (_, _, site_other, _))| {
+                (
+                    placement::distance_m(site.direction, site_other.direction),
+                    other,
+                )
+            })
+            .filter(|(distance, _)| *distance <= super::trails::MAX_TRAIL_M)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, other)) = nearest {
+            let pair = (position.min(other), position.max(other));
+            if linked.insert(pair) {
+                let (_, other_id, other_site, other_radius) = &towns[other];
+                edges.push((
+                    format!("{id}:{other_id}"),
+                    position,
+                    other_site.direction,
+                    *other_radius,
+                ));
+            }
+        }
+    }
+    let key = format!(
+        "{world_key}:{:x}",
+        Sha256::digest(
+            edges
+                .iter()
+                .map(|(name, position, goal, _)| {
+                    format!("{name}@{:?}>{goal:?}", towns[*position].2.direction)
+                })
+                .collect::<Vec<_>>()
+                .join(";")
+                .as_bytes()
+        )
+    );
+    if let Ok(cache) = TRAILS.lock() {
+        if let Some((stored, props, decks)) = cache.as_ref() {
+            if *stored == key {
+                built.props.extend(props.iter().cloned());
+                built.bridges.extend(decks.iter().cloned());
+                return;
+            }
+        }
+    }
+    let (first, first_bridge) = (built.props.len(), built.bridges.len());
+    for (name, position, goal, goal_clearance) in edges {
+        let (_, _, site, radius) = &towns[position];
+        let to = super::trails::local_of(site.direction, goal);
+        let Some(route) = super::trails::route(ground, site.direction, (0.0, 0.0), to) else {
+            continue;
+        };
+        let Some(bridged) = lay_bridges(&name, site.direction, &route.spans, ground, built) else {
+            continue;
+        };
+        let stones = super::trails::stones(
+            &route.line,
+            super::trails::STONE_SPACING_M,
+            radius + 6.0,
+            goal_clearance + 6.0,
+        );
+        let mut previous: Option<[f64; 3]> = None;
+        for (number, ((x, z), yaw)) in stones.into_iter().enumerate() {
+            // No stones on a bridge, or on the planks laid out for one.
+            if bridged.iter().any(|(from, to)| {
+                super::trails::near_segment((x, z), *from, *to, super::trails::STONE_SPACING_M)
+            }) {
+                continue;
+            }
+            let (direction, position) = scenery::world_from_local(
+                site.direction,
+                x,
+                z,
+                // Sunk a little, so that a stone on a slope does not hover.
+                |direction| match ground.wade_level(direction) {
+                    // A ford is crossed on stepping stones just above the water.
+                    Some(level) => level + 0.03,
+                    None => ground.height(direction).max(0.0) - 0.05,
+                },
+                crate::movement::RADIUS,
+            );
+            // A tree, rock or wall in the way leaves a gap in the trail: it goes round, the stones do not.
+            let blocked = previous.is_some_and(|before| ground.blocked(before, direction));
+            previous = Some(direction);
+            if blocked {
+                continue;
+            }
+            built.props.push(WorldProp {
+                id: format!("trail:{name}#{number}"),
+                model: "town.road".to_owned(),
+                position,
+                yaw,
+                scale_m: scenery::MODULE_M,
+                visible_m: None,
+            });
+        }
+    }
+    if let Ok(mut cache) = TRAILS.lock() {
+        *cache = Some((
+            key,
+            built.props[first..].to_vec(),
+            built.bridges[first_bridge..].to_vec(),
+        ));
+    }
+}
+
 pub fn finish(
     story: &mut Story,
     sites: &mut HashMap<String, Placed>,
@@ -685,6 +914,8 @@ pub fn finish(
     let mut markets: Vec<(usize, Placed)> = Vec::new();
     // The folds of the towns with a pasture to drive the flock to, with the shepherd's walk to it.
     let mut folds: Vec<(usize, Placed, super::disk::Movement)> = Vec::new();
+    // The settlements, for the trails between them and the places around them: (index, anchor id, site, radius).
+    let mut towns: Vec<(usize, String, Placed, f64)> = Vec::new();
     let anchors = story.anchors.clone();
     // Buildings of the datadisks first, so that the towns leave room for them.
     let mut structures: Vec<([f64; 3], f64)> = Vec::new();
@@ -717,6 +948,7 @@ pub fn finish(
                         height_m: ground.height(stall).max(0.0),
                     },
                 ));
+                towns.push((index, anchor.id.clone(), site.clone(), size.radius_m()));
                 let sea = placement::sea_toward(ground, site.direction, placement::COAST_M);
                 let (pasture, shepherd) =
                     flock_pasture(ground, seed, &anchor.id, site.direction, size.radius_m());
@@ -791,6 +1023,16 @@ pub fn finish(
             _ => {}
         }
     }
+    let disks: Vec<&str> = story.disks.iter().map(|(_, _, sha)| sha.as_str()).collect();
+    lay_trails(
+        &format!("{seed}:{}", disks.join(",")),
+        &towns,
+        &harbours,
+        &folds,
+        sites,
+        ground,
+        &mut built,
+    );
     if !markets.is_empty() {
         let file: DialogueFile = serde_yaml::from_str(TRADER)?;
         let mut disk = empty_disk(manifest("markets", "Markets"));

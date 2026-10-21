@@ -43,7 +43,7 @@ impl Solar {
             direction: [
                 declination.cos() * local_longitude.cos(),
                 declination.sin(),
-                declination.cos() * local_longitude.sin(),
+                -declination.cos() * local_longitude.sin(),
             ],
             sidereal_day_seconds: 86164.0905,
             angular_radius_degrees: 0.2666 / distance_au,
@@ -132,6 +132,21 @@ mod solar_tests {
             let winter = Solar::at(december.unix_seconds + hours as f64 * 3600.0);
             assert!(summer.direction[1] > 0.0 && winter.direction[1] < 0.0);
         }
+    }
+
+    #[test]
+    fn the_sun_rises_in_the_east() {
+        // At Greenwich on the equator up is +X, north +Y and east -Z (right-handed frame, see
+        // `ishtaria-worldgen --earth`): the sun must stand on the east side when it rises and on the
+        // west side when it sets.
+        let equator = [1.0, 0.0, 0.0];
+        let noon = 946728000.0;
+        let sunrise = next_horizon_crossing(equator, noon, true);
+        let sunset = next_horizon_crossing(equator, noon, false);
+        let at_rise = Solar::at(sunrise).direction;
+        let at_set = Solar::at(sunset).direction;
+        assert!(-at_rise[2] > 0.5, "sunrise direction {at_rise:?}");
+        assert!(-at_set[2] < -0.5, "sunset direction {at_set:?}");
     }
 
     #[test]

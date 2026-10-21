@@ -1,3 +1,10 @@
+ishtaria-server (0.2.1.19~trixie) unstable; urgency=medium
+
+  * Flying birds; wildlife waterside; structure.at_sea; zeroad fauna
+    wander.
+
+ -- vitex <info@vitexsoftware.cz>  Wed, 21 Oct 2026 19:40:54 +0200
+
 ishtaria-server (0.2.1.18~trixie) unstable; urgency=medium
 
   * Story teleport_place, quest fail_restart checkpoints, eternal_life flag.

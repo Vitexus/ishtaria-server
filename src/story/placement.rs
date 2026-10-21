@@ -35,6 +35,11 @@ pub trait Ground {
     fn blocked(&self, _from: [f64; 3], _to: [f64; 3]) -> bool {
         false
     }
+    /// The water surface (metres) where fresh water is shallow enough to wade, a ford for a trail;
+    /// `None` on dry land, in the sea and in deep water.
+    fn wade_level(&self, _direction: [f64; 3]) -> Option<f64> {
+        None
+    }
 }
 
 impl Ground for WalkingTerrain {
@@ -46,6 +51,9 @@ impl Ground for WalkingTerrain {
     }
     fn is_sea(&self, direction: [f64; 3]) -> bool {
         WalkingTerrain::is_sea(self, direction)
+    }
+    fn wade_level(&self, direction: [f64; 3]) -> Option<f64> {
+        WalkingTerrain::wade_level(self, direction)
     }
     fn blocked(&self, from: [f64; 3], to: [f64; 3]) -> bool {
         self.walk_blocked(from, to)

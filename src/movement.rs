@@ -45,6 +45,10 @@ pub(super) const OBJECT_GRID: i32 = 600_000;
 /// Animals live on a coarser grid: about one cell per 170 metres.
 const FAUNA_GRID: i32 = 60_000;
 const FAUNA_PRESENCE: f64 = 0.35;
+/// How far from a patch's water (metres) a wildlife overlay still gathers game and lush growth.
+const WATERSIDE_REACH_M: f64 = 60.0;
+/// Steepest bank (m/m, rise over run) that still grows lush plants; steeper is stony and bare.
+const LUSH_BANK_SLOPE: f64 = 0.18;
 /// Fish are only placed where the water is at least this deep.
 const MIN_WATER_DEPTH_M: f64 = 3.0;
 /// Animals are sent to clients only within this distance of the requested point.
@@ -58,6 +62,8 @@ const WANDER_PARTS: i64 = 3;
 const WANDER_SLOTS: i64 = 3;
 /// How far a free animal strays from where the seed put it, and a farm animal from its pasture.
 const WILD_WANDER_M: f64 = 40.0;
+/// Birds circle farther than herds; they stay above the same seed cell.
+const FLY_WANDER_M: f64 = 70.0;
 const FARM_WANDER_M: f64 = 14.0;
 /// Animals sent around each settlement and the room reserved for them in a reply.
 const FARM_ANIMALS_MAX: usize = 64;
@@ -69,8 +75,14 @@ const FLOCK_SPREAD_M: f64 = 9.0;
 /// Waypoints of a flock animal's route: one every step, covering two minutes.
 const FLOCK_STEP_MS: i64 = 10_000;
 const FLOCK_POINTS: i64 = 13;
+/// Whether a catalogued model is an animal that walks, grazes or flies over land: the Quaternius animals and the
+/// ones of 0 A.D. (whose fish swims and is looked up as a fish).
+pub(super) fn is_land_animal(model: &str) -> bool {
+    model.starts_with("animal.") || (model.starts_with("zeroad.") && model != "zeroad.fish_generic")
+}
+
 /// Models of the animals of a pasture, with their relative frequency.
-const FARM_SPECIES: [(&str, f64); 10] = [
+const FARM_SPECIES: [(&str, f64); 19] = [
     ("animal.chicken", 4.0),
     ("animal.sheep", 4.0),
     ("animal.pig", 3.0),
@@ -81,6 +93,16 @@ const FARM_SPECIES: [(&str, f64); 10] = [
     ("animal.donkey", 2.0),
     ("animal.alpaca", 1.0),
     ("animal.shiba_inu", 1.0),
+    // The domestic animals of 0 A.D. (CC BY-SA 3.0), for variety beside the Quaternius ones.
+    ("zeroad.chicken", 3.0),
+    ("zeroad.pig", 2.0),
+    ("zeroad.cow", 3.0),
+    ("zeroad.bull", 1.0),
+    ("zeroad.zebu", 1.0),
+    ("zeroad.donkey", 1.0),
+    ("zeroad.horse_persian", 1.0),
+    ("zeroad.camel", 1.0),
+    ("zeroad.mastiff", 1.0),
 ];
 const PLAYER_RADIUS: f64 = 0.35;
 const JUMP_SPEED: f64 = 6.5;
@@ -211,13 +233,14 @@ static PATCHES: std::sync::RwLock<(String, Vec<TerrainPatch>)> =
     std::sync::RwLock::new((String::new(), Vec::new()));
 
 /// A place's historical flora/fauna overlay: weighted catalog ids inside a radius.
+/// Each entry is `(catalog id, weight, waterside)` — waterside entries only spawn near water.
 #[derive(Clone, Debug)]
 pub struct WildlifeZone {
     pub direction: [f64; 3],
     pub radius_m: f64,
     pub density: f64,
-    pub flora: Vec<(String, f64)>,
-    pub fauna: Vec<(String, f64)>,
+    pub flora: Vec<(String, f64, bool)>,
+    pub fauna: Vec<(String, f64, bool)>,
 }
 
 static WILDLIFE: std::sync::RwLock<(String, Vec<WildlifeZone>)> =
@@ -316,6 +339,60 @@ fn patch_water(direction: [f64; 3]) -> Option<f64> {
     })
 }
 
+/// Distance in metres (to within a few metres) from a dry point to the nearest water of a patch,
+/// searched up to `reach_m`; `None` when the point is wet, outside every patch or far from water.
+fn patch_water_distance(direction: [f64; 3], reach_m: f64) -> Option<f64> {
+    let stored = PATCHES.read().ok()?;
+    stored.1.iter().find_map(|patch| {
+        patch.water.as_ref()?;
+        let (x, z, _) = patch.project(direction)?;
+        if patch.surface(x, z).is_some() {
+            return None;
+        }
+        let mut radius = 4.0;
+        while radius <= reach_m {
+            for step in 0..12 {
+                let angle = f64::from(step) * std::f64::consts::TAU / 12.0;
+                if patch
+                    .surface(x + radius * angle.cos(), z + radius * angle.sin())
+                    .is_some()
+                {
+                    return Some(radius);
+                }
+            }
+            radius += 4.0;
+        }
+        None
+    })
+}
+
+/// Whether a dry cell is close enough to patch water, the sea or standing water for a
+/// `waterside: true` overlay entry.
+fn near_waterside(terrain: &WalkingTerrain, direction: [f64; 3]) -> bool {
+    if patch_water_distance(direction, WATERSIDE_REACH_M).is_some() {
+        return true;
+    }
+    for step in 0..8 {
+        let angle = f64::from(step) * std::f64::consts::TAU / 8.0;
+        for &meters in &[WATERSIDE_REACH_M * 0.5, WATERSIDE_REACH_M] {
+            let (probe, _) = crate::scenery::world_from_local(
+                direction,
+                angle.cos() * meters,
+                angle.sin() * meters,
+                |_| 0.0,
+                RADIUS,
+            );
+            if terrain.is_sea(probe)
+                || patch_water(probe).is_some()
+                || terrain.water_depth(probe) > 0.5
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Whether a landscape patch covers this direction with dry ground (not its river mask).
 /// Early Dynastic Uruk sits on a coarse Earth cell that is sea or river; the patch is the real tell.
 fn patch_dry(direction: [f64; 3]) -> bool {
@@ -368,6 +445,54 @@ pub(super) fn set_farms(key: String, sites: Vec<FarmSite>) {
     if let Ok(mut farms) = FARMS.write() {
         *farms = (key, sites);
     }
+}
+
+/// A bridge over deep water: its deck is ground to walk on. Directions are unit vectors of the two banks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BridgeDeck {
+    pub from: [f64; 3],
+    pub to: [f64; 3],
+    pub half_width_m: f64,
+    /// Deck height at the banks, in metres.
+    pub from_height_m: f64,
+    pub to_height_m: f64,
+    /// How far the middle of the deck hangs below the line between the banks (a rope bridge sags).
+    pub sag_m: f64,
+}
+
+static BRIDGES: std::sync::RwLock<Vec<BridgeDeck>> = std::sync::RwLock::new(Vec::new());
+
+pub(super) fn set_bridges(decks: Vec<BridgeDeck>) {
+    if let Ok(mut stored) = BRIDGES.write() {
+        *stored = decks;
+    }
+}
+
+/// The height of the deck of a bridge under a direction, when it stands on one.
+fn bridge_height(direction: [f64; 3]) -> Option<f64> {
+    let stored = BRIDGES.read().ok()?;
+    stored.iter().find_map(|deck| {
+        let point = direction.map(|axis| axis * RADIUS);
+        let (from, to) = (
+            deck.from.map(|axis| axis * RADIUS),
+            deck.to.map(|axis| axis * RADIUS),
+        );
+        let along: [f64; 3] = std::array::from_fn(|axis| to[axis] - from[axis]);
+        let length_squared = dot(along, along);
+        if length_squared < 1e-6 {
+            return None;
+        }
+        let offset: [f64; 3] = std::array::from_fn(|axis| point[axis] - from[axis]);
+        let t = dot(offset, along) / length_squared;
+        if !(0.0..=1.0).contains(&t) {
+            return None;
+        }
+        let aside: [f64; 3] = std::array::from_fn(|axis| offset[axis] - along[axis] * t);
+        (length(aside) <= deck.half_width_m).then_some(
+            deck.from_height_m + (deck.to_height_m - deck.from_height_m) * t
+                - deck.sag_m * 4.0 * t * (1.0 - t),
+        )
+    })
 }
 
 pub(super) fn set_statics(key: String, obstacles: Vec<WorldObject>) {
@@ -845,10 +970,20 @@ struct ObjectKind {
     /// Deepest the animal swims below the surface, in metres.
     #[serde(default = "default_depth")]
     depth_m: f64,
+    /// Flies above the ground (Idle = glide, Walk = flight on the client).
+    #[serde(default)]
+    flying: bool,
+    /// Typical height above the terrain when `flying`, in metres.
+    #[serde(default = "default_altitude")]
+    altitude_m: f64,
 }
 
 fn default_depth() -> f64 {
     8.0
+}
+
+fn default_altitude() -> f64 {
+    15.0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1147,6 +1282,16 @@ impl WalkingTerrain {
             + ((vertical * size as f64) as usize).min(size - 1) * size
             + ((horizontal * size as f64) as usize).min(size - 1);
         self.environment.biomes[index] == 0
+    }
+
+    /// The surface of fresh water that is shallow enough to cross on foot, and not just wade: under three
+    /// quarters of a man's chest. `None` on dry land, in the sea and where it is deeper.
+    pub(super) fn wade_level(&self, direction: [f64; 3]) -> Option<f64> {
+        if self.is_sea(direction) {
+            return None;
+        }
+        let depth = self.water_depth(direction);
+        (depth > 0.0 && depth <= WADE_DEPTH_M * 0.75).then(|| self.height(direction) + depth)
     }
 
     pub(super) fn heightmap_sha256(&self) -> &str {
@@ -1477,7 +1622,7 @@ impl WalkingTerrain {
         );
         let base = interpolate(upper, lower, vertical.fract()) * 16000.0 / 255.0 - 8000.0;
         let base = base + environment::relief_offset(direction, base, &self.environment.seed);
-        patch_height(direction, base).unwrap_or(base)
+        bridge_height(direction).unwrap_or_else(|| patch_height(direction, base).unwrap_or(base))
     }
 
     fn object_cell(&self, face: usize, column: i32, row: i32) -> Option<WorldObject> {
@@ -1489,8 +1634,7 @@ impl WalkingTerrain {
         let id = format!("{}:fauna:{face}:{column}:{row}", self.environment.seed);
         let animal = self.place(id, face, column, row, FAUNA_GRID, true)?;
         // Wild land animals keep away from settlements, including where they stray to.
-        (!animal.model.starts_with("animal.") || !self.near_settlement(animal.position))
-            .then_some(animal)
+        (!is_land_animal(&animal.model) || !self.near_settlement(animal.position)).then_some(animal)
     }
 
     /// Whether a wild animal put here could wander into a settlement's built-up area.
@@ -1604,19 +1748,6 @@ impl WalkingTerrain {
         }
         let height = self.surface(point)?;
         let overlay = wildlife_at(point);
-        let density = overlay.as_ref().map(|zone| zone.density).unwrap_or(1.0);
-        let presence = if fauna {
-            FAUNA_PRESENCE
-        } else if biome == 5 {
-            0.7
-        } else {
-            0.18
-        };
-        // Higher density lowers the random threshold so more cells spawn.
-        let threshold = (presence * density).clamp(0.01, 0.95);
-        if sample(2) > threshold {
-            return None;
-        }
         let reference = if point[1].abs() < 0.9 {
             [0.0, 1.0, 0.0]
         } else {
@@ -1634,7 +1765,33 @@ impl WalkingTerrain {
                     / (RADIUS * 0.00001)
             })
             .fold(0.0, f64::max);
-        let overlay_weights: Option<&[(String, f64)]> = overlay.as_ref().map(|zone| {
+        let mut density = overlay.as_ref().map(|zone| zone.density).unwrap_or(1.0);
+        // A water-hole draws game and lush growth: around the water of a patch under a wildlife overlay
+        // animals gather (up to three times as many), and gently sloping banks grow thicker than the
+        // steppe. A steep, stony bank stays bare.
+        if overlay.is_some() {
+            if let Some(distance) = patch_water_distance(point, WATERSIDE_REACH_M) {
+                let nearness = 1.0 - distance / WATERSIDE_REACH_M;
+                if fauna {
+                    density *= 1.0 + 2.0 * nearness;
+                } else if slope <= LUSH_BANK_SLOPE {
+                    density *= 1.0 + 2.5 * nearness;
+                }
+            }
+        }
+        let presence = if fauna {
+            FAUNA_PRESENCE
+        } else if biome == 5 {
+            0.7
+        } else {
+            0.18
+        };
+        // Higher density lowers the random threshold so more cells spawn.
+        let threshold = (presence * density).clamp(0.01, 0.95);
+        if sample(2) > threshold {
+            return None;
+        }
+        let overlay_weights: Option<&[(String, f64, bool)]> = overlay.as_ref().map(|zone| {
             if fauna {
                 zone.fauna.as_slice()
             } else {
@@ -1642,10 +1799,14 @@ impl WalkingTerrain {
             }
         });
         let from_overlay = overlay_weights.is_some_and(|w| !w.is_empty());
+        let waterside_here = from_overlay && near_waterside(self, point);
         let candidates: Vec<_> = if let Some(weights) = overlay_weights.filter(|w| !w.is_empty()) {
             weights
                 .iter()
-                .filter_map(|(model, weight)| {
+                .filter_map(|(model, weight, waterside)| {
+                    if *waterside && !waterside_here {
+                        return None;
+                    }
                     self.catalog
                         .iter()
                         .find(|kind| {
@@ -1684,10 +1845,15 @@ impl WalkingTerrain {
             biome = kind.biomes[0];
         }
         let scale_m = varied_scale(kind.scale_m, sample(5));
+        let clearance = if kind.flying {
+            kind.altitude_m * (0.85 + sample(6) * 0.3)
+        } else {
+            0.0
+        };
         Some(WorldObject {
             id,
             model: kind.id.clone(),
-            position: point.map(|value| value * (RADIUS + height)),
+            position: point.map(|value| value * (RADIUS + height + clearance)),
             scale_m,
             yaw: sample(4) * std::f64::consts::TAU,
             collision_radius_m: kind.collision_radius * scale_m,
@@ -1936,20 +2102,47 @@ impl WalkingTerrain {
         }
     }
 
-    /// Waypoints of a land animal from the start of the current slot onwards.
+    fn fauna_kind(&self, model: &str) -> Option<&ObjectKind> {
+        self.catalog.iter().find(|kind| kind.id == model)
+    }
+
+    /// Clearance above the terrain for a flying animal at one route slot (metres).
+    fn flight_clearance(&self, animal: &WorldObject, slot: i64) -> f64 {
+        let altitude = self
+            .fauna_kind(&animal.model)
+            .map(|kind| kind.altitude_m)
+            .unwrap_or(default_altitude());
+        let hash = Sha256::digest(format!("{}:fly:{slot}", animal.id).as_bytes());
+        let sample =
+            f64::from(u32::from_le_bytes(hash[0..4].try_into().unwrap())) / 4_294_967_296.0;
+        altitude * (0.85 + sample * 0.3)
+    }
+
+    /// Waypoints of a land animal (or bird) from the start of the current slot onwards.
     pub(super) fn animal_route(&self, animal: &WorldObject, now_ms: i64) -> Vec<[f64; 4]> {
         if let Some(route) = self.flock_route(animal, now_ms) {
             return route;
         }
+        let flying = self
+            .fauna_kind(&animal.model)
+            .is_some_and(|kind| kind.flying);
         let radius = if animal.id.contains(":farm:") {
             FARM_WANDER_M
+        } else if flying {
+            FLY_WANDER_M
         } else {
             WILD_WANDER_M
         };
         let anchor = unit(animal.position);
         let first = now_ms.div_euclid(WANDER_SLOT_MS);
-        let entry = |time: i64, direction: [f64; 3]| {
-            let metres = RADIUS + self.height(direction).max(0.0);
+        let entry = |time: i64, direction: [f64; 3], slot: i64| {
+            let ground = self.height(direction).max(0.0);
+            let clearance = if flying {
+                self.flight_clearance(animal, slot)
+            } else {
+                0.0
+            };
+            let metres = RADIUS + ground + clearance;
             let round = |value: f64| (value * 100.0).round() / 100.0;
             let position = direction.map(|value| round(value * metres));
             [time as f64, position[0], position[1], position[2]]
@@ -1966,6 +2159,7 @@ impl WalkingTerrain {
                 route.push(entry(
                     slot * WANDER_SLOT_MS + (WANDER_MOVE_MS as f64 * fraction) as i64,
                     direction,
+                    slot,
                 ));
             }
         }
@@ -1973,11 +2167,12 @@ impl WalkingTerrain {
         route.push(entry(
             end * WANDER_SLOT_MS,
             self.wander_waypoint(&animal.id, anchor, end, radius),
+            end,
         ));
         route
     }
 
-    /// Land animals near a point with where they are at `now_ms` and where they walk next;
+    /// Land animals and birds near a point with where they are at `now_ms` and where they go next;
     /// fish are only drawn and keep their place.
     pub(super) fn moving_animals(
         &self,
@@ -1991,7 +2186,10 @@ impl WalkingTerrain {
         wild.into_iter()
             .chain(farm)
             .map(|mut animal| {
-                if !animal.model.starts_with("animal.") {
+                if self
+                    .fauna_kind(&animal.model)
+                    .is_some_and(|kind| kind.aquatic)
+                {
                     return (animal, None);
                 }
                 let route = self.animal_route(&animal, now_ms);
@@ -2035,7 +2233,7 @@ impl WalkingTerrain {
         } else {
             return None;
         };
-        if animal.id != id || !animal.model.starts_with("animal.") {
+        if animal.id != id || !is_land_animal(&animal.model) {
             return None;
         }
         let route = self.animal_route(&animal, now_ms);
@@ -2242,7 +2440,12 @@ pub(super) async fn terrain(state: &AppState) -> Result<Arc<WalkingTerrain>, pla
             .fetch_optional(&state.pool)
             .await?
             .ok_or_else(unavailable)?;
-    let key = format!("{}:{sha256}:{seed}:{size}", state.world_id);
+    let painted = super::story::world::painted_biomes(state).await;
+    let key = format!(
+        "{}:{sha256}:{seed}:{size}:{}",
+        state.world_id,
+        painted.as_ref().map_or("", |(_, disks)| disks.as_str())
+    );
     let mut cache = TERRAIN.lock().await;
     if let Some((stored, terrain)) = cache.as_ref() {
         if stored == &key {
@@ -2258,15 +2461,18 @@ pub(super) async fn terrain(state: &AppState) -> Result<Arc<WalkingTerrain>, pla
     let terrain = tokio::task::spawn_blocking(move || {
         let mut catalog = object_catalog()?;
         catalog.extend(fauna_catalog()?);
-        environment::generate(size as usize, &pixels, &seed, &sha256).map(|environment| {
-            Arc::new(WalkingTerrain {
-                size: size as usize,
-                pixels,
-                environment,
-                catalog,
-                removed: Removed::default(),
-            })
-        })
+        let biomes = painted.as_ref().map(|(map, _)| map.as_ref());
+        environment::generate_with(size as usize, &pixels, &seed, &sha256, biomes).map(
+            |environment| {
+                Arc::new(WalkingTerrain {
+                    size: size as usize,
+                    pixels,
+                    environment,
+                    catalog,
+                    removed: Removed::default(),
+                })
+            },
+        )
     })
     .await
     .map_err(|_| unavailable())?
@@ -3263,6 +3469,78 @@ mod tests {
     }
 
     #[test]
+    fn a_bridge_deck_is_ground_over_deep_water() {
+        let pixels = vec![60; 16 * 16 * 6];
+        let environment = environment::generate(16, &pixels, "42", "test").unwrap();
+        let terrain = WalkingTerrain {
+            size: 16,
+            pixels,
+            environment,
+            catalog: Vec::new(),
+            removed: Default::default(),
+        };
+        let site = [0.6, 0.0, 0.8];
+        let at = |x: f64, z: f64| crate::scenery::world_from_local(site, x, z, |_| 0.0, RADIUS).0;
+        let (from, to) = (at(-15.0, 0.0), at(15.0, 0.0));
+        let sea_floor = terrain.height(at(0.0, 0.0));
+        assert!(sea_floor < -100.0, "{sea_floor}");
+        set_bridges(vec![BridgeDeck {
+            from,
+            to,
+            half_width_m: 1.5,
+            from_height_m: 2.0,
+            to_height_m: 2.0,
+            sag_m: 1.0,
+        }]);
+        let middle = terrain.height(at(0.0, 0.0));
+        let near_end = terrain.height(at(-14.0, 0.5));
+        let beside = terrain.height(at(0.0, 3.0));
+        let beyond = terrain.height(at(20.0, 0.0));
+        let depth = terrain.water_depth(at(0.0, 0.0));
+        set_bridges(Vec::new());
+        assert_eq!(
+            depth, 0.0,
+            "a character on the deck neither swims nor drowns"
+        );
+        assert!((middle - 1.0).abs() < 0.05, "the deck sags to {middle}");
+        assert!((near_end - 1.9).abs() < 0.2, "{near_end}");
+        assert!(beside < -100.0 && beyond < -100.0, "off the deck is water");
+    }
+
+    #[test]
+    fn every_zeroad_model_of_the_catalog_is_used_by_the_generator_or_a_datadisk() {
+        // Overlay-only: water plants and the crocodile need a datadisk's water-hole, and the two flock animals
+        // are driven by the shepherd of the Quaternius ones; the Gilgamesh and tutorial overlays place them.
+        const OVERLAY_ONLY: [&str; 10] = [
+            "zeroad.reed_beach_a",
+            "zeroad.reed_beach_b",
+            "zeroad.reed_pond_lush",
+            "zeroad.reed_giant",
+            "zeroad.papyrus_1",
+            "zeroad.papyrus_2",
+            "zeroad.cattails",
+            "zeroad.crocodile",
+            "zeroad.sheep",
+            "zeroad.goat",
+        ];
+        let mut spawned = 0;
+        for kind in catalog_with_fauna()
+            .iter()
+            .filter(|kind| kind.id.starts_with("zeroad."))
+        {
+            let on_farms = FARM_SPECIES.iter().any(|(model, _)| *model == kind.id);
+            let overlay_only = OVERLAY_ONLY.contains(&kind.id.as_str());
+            assert!(
+                !kind.biomes.is_empty() || on_farms || overlay_only,
+                "{} is neither spawned by the generator nor on a farm nor in an overlay",
+                kind.id
+            );
+            spawned += usize::from(!kind.biomes.is_empty());
+        }
+        assert!(spawned >= 50, "{spawned} 0 A.D. models in the biome tables");
+    }
+
+    #[test]
     fn walking_is_bounded_and_cannot_fly_or_swim() {
         let pixels = vec![144; 16 * 16 * 6];
         let environment = environment::generate(16, &pixels, "42", "test").unwrap();
@@ -3660,7 +3938,7 @@ mod tests {
         assert!(
             around(&terrain)
                 .iter()
-                .all(|animal| !animal.model.starts_with("animal.")),
+                .all(|animal| !is_land_animal(&animal.model)),
             "no game without an overlay"
         );
         set_wildlife(
@@ -3670,7 +3948,7 @@ mod tests {
                 radius_m: 3000.0,
                 density: 8.0,
                 flora: Vec::new(),
-                fauna: vec![("animal.deer".into(), 1.0)],
+                fauna: vec![("animal.deer".into(), 1.0, false)],
             }],
         );
         let game = around(&terrain);
@@ -3697,7 +3975,7 @@ mod tests {
         assert!(!found.is_empty(), "grassland has animals near {point:?}");
         for animal in &found {
             assert!(animal.id.contains(":fauna:"), "{}", animal.id);
-            assert!(animal.model.starts_with("animal."), "{}", animal.model);
+            assert!(is_land_animal(&animal.model), "{}", animal.model);
             assert_eq!(animal.collision_radius_m, 0.0, "animals are passable");
             assert!(
                 terrain.object_by_id(&animal.id).is_none(),
@@ -3716,7 +3994,16 @@ mod tests {
                 "animal.deer",
                 "animal.fox",
                 "animal.shiba_inu",
-                "animal.alpaca"
+                "animal.alpaca",
+                // The 0 A.D. animals of the grassland biome.
+                "zeroad.deer",
+                "zeroad.fox",
+                "zeroad.gazelle",
+                "zeroad.lion",
+                "zeroad.lioness",
+                "zeroad.horse_persian",
+                "zeroad.hawk",
+                "zeroad.crow"
             ]
             .contains(&model.as_str())),
             "{kinds:?}"
@@ -3752,6 +4039,14 @@ mod tests {
                 assert!(distance(first, second) < 0.05, "{} at {time}", animal.id);
             }
             // It never jumps and strays only a little from where the seed put it.
+            let flying = terrain
+                .fauna_kind(&animal.model)
+                .is_some_and(|kind| kind.flying);
+            let stray = if flying {
+                FLY_WANDER_M + 20.0
+            } else {
+                WILD_WANDER_M + 12.0
+            };
             let mut previous = route_position(&route, now);
             for time in (now..now + WANDER_SLOTS * WANDER_SLOT_MS).step_by(500) {
                 let position = route_position(&route, time);
@@ -3761,7 +4056,7 @@ mod tests {
                     animal.id
                 );
                 assert!(
-                    distance(position, animal.position) < WILD_WANDER_M + 12.0,
+                    distance(position, animal.position) < stray,
                     "{} strays",
                     animal.id
                 );
@@ -3778,6 +4073,96 @@ mod tests {
         assert!(moving, "some animal walks");
     }
 
+    #[test]
+    fn waterside_overlay_fauna_only_stand_near_water() {
+        set_patches(String::new(), Vec::new());
+        let mut terrain = terrain_with(144, 4, catalog_with_fauna());
+        let ground = terrain.height([0.0, -1.0, 0.0]).floor() as i32;
+        terrain.environment.elevation_m.fill(ground);
+        terrain.environment.water_m.fill(ground); // dry coarse map
+        let place = [0.0, -1.0, 0.0];
+        let origin = place.map(|value| value * (RADIUS + terrain.height(place)));
+        set_wildlife(
+            "test".into(),
+            vec![WildlifeZone {
+                direction: unit(origin),
+                radius_m: 3000.0,
+                density: 8.0,
+                flora: Vec::new(),
+                fauna: vec![
+                    ("animal.deer".into(), 1.0, false),
+                    ("zeroad.crocodile".into(), 50.0, true),
+                ],
+            }],
+        );
+        let mut far = Vec::new();
+        for step in 0..80 {
+            let angle = f64::from(step) * 0.00002;
+            let near = unit([angle.sin(), -angle.cos(), 0.0]);
+            far.extend(terrain.fauna(near.map(|value| value * (RADIUS + terrain.height(near)))));
+        }
+        set_wildlife(String::new(), Vec::new());
+        assert!(
+            far.iter().any(|animal| animal.model == "animal.deer"),
+            "land game still spawns away from water"
+        );
+        assert!(
+            far.iter().all(|animal| animal.model != "zeroad.crocodile"),
+            "waterside crocodile must not stand on dry steppe: {far:?}"
+        );
+    }
+
+    #[test]
+    fn birds_fly_above_the_ground_along_routes() {
+        let terrain = terrain_with(144, 4, catalog_with_fauna());
+        let direction = [1.0, 0.0, 0.0];
+        let height = terrain.height(direction);
+        let hawk = WorldObject {
+            id: "test:fauna:bird".into(),
+            model: "zeroad.hawk".into(),
+            position: direction.map(|value| value * (RADIUS + height + 22.0)),
+            scale_m: 0.45,
+            yaw: 0.0,
+            collision_radius_m: 0.0,
+            biome: 4,
+        };
+        assert!(
+            terrain
+                .fauna_kind(&hawk.model)
+                .is_some_and(|kind| kind.flying),
+            "hawk is marked flying in the catalog"
+        );
+        let now = 1_700_000_000_000;
+        let route = terrain.animal_route(&hawk, now);
+        assert!(route.len() > 4, "bird has a route");
+        for point in &route {
+            let position = [point[1], point[2], point[3]];
+            let ground = terrain.height(unit(position)).max(0.0);
+            let clearance = length(position) - RADIUS - ground;
+            assert!(
+                clearance > 15.0,
+                "hawk flies only {clearance:.1} m up at {:?}",
+                point[0]
+            );
+        }
+        let first = route_position(&route, now);
+        let later = route_position(&route, now + 15_000);
+        assert!(distance(first, later) > 0.5, "hawk moves while flying");
+        // Fish stay put; a flying model must not be treated as aquatic.
+        let fish = WorldObject {
+            id: "test:fauna:fish".into(),
+            model: "zeroad.fish_generic".into(),
+            position: hawk.position,
+            scale_m: 0.35,
+            yaw: 0.0,
+            collision_radius_m: 0.0,
+            biome: 2,
+        };
+        assert!(terrain
+            .fauna_kind(&fish.model)
+            .is_some_and(|kind| kind.aquatic && !kind.flying));
+    }
+
     fn distance(first: [f64; 3], second: [f64; 3]) -> f64 {
         length(std::array::from_fn(|axis| first[axis] - second[axis]))
     }
@@ -3788,7 +4173,7 @@ mod tests {
         let animals = some_animals(&terrain);
         let animal = animals
             .iter()
-            .find(|animal| animal.model.starts_with("animal."))
+            .find(|animal| is_land_animal(&animal.model))
             .unwrap();
         let now = 1_700_000_000_000;
         let found = terrain.animal_by_id(&animal.id, now).unwrap();
@@ -3949,7 +4334,7 @@ mod tests {
         assert!(land
             .fauna([RADIUS + 1000.0, 0.0, 0.0])
             .iter()
-            .all(|animal| animal.model.starts_with("animal.")));
+            .all(|animal| is_land_animal(&animal.model)));
         // Fresh water only holds freshwater fish.
         let lake = terrain_with(80, 1, catalog_with_fauna());
         let mut lake_fish = Vec::new();
@@ -3967,7 +4352,8 @@ mod tests {
                 "fish.goldfish",
                 "fish.koi",
                 "fish.piranha",
-                "fish.tetra"
+                "fish.tetra",
+                "zeroad.fish_generic"
             ]
             .contains(&animal.model.as_str())),
             "{:?}",

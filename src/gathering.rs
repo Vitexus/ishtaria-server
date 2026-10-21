@@ -838,7 +838,12 @@ mod unit_tests {
                 || name == "oak"
                 || name.contains("pine")
                 || name.starts_with("birch")
-                || name.starts_with("palm");
+                || name.starts_with("palm")
+                || [
+                    "cedar", "cypress", "olive", "fig_", "poplar", "willow", "acacia", "cretan",
+                ]
+                .iter()
+                .any(|tree| name.starts_with(tree));
             let is_rock = name.starts_with("rock") || name.starts_with("stone");
             let is_logs = name.starts_with("log");
             match resource_of(model) {

@@ -386,8 +386,10 @@ async fn world_environment(State(state): State<AppState>) -> Result<Response, Ap
     let Some((size, pixels, seed, sha256)) = map else {
         return Ok((StatusCode::NOT_FOUND, "no heightmap imported").into_response());
     };
+    let painted = story::world::painted_biomes(&state).await;
     match tokio::task::spawn_blocking(move || {
-        environment::generate(size as usize, &pixels, &seed, &sha256)
+        let biomes = painted.as_ref().map(|(map, _)| map.as_ref());
+        environment::generate_with(size as usize, &pixels, &seed, &sha256, biomes)
     })
     .await
     {

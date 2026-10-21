@@ -20,7 +20,10 @@
         "platformer.pine",
         "platformer.snow-pine",
         "nature.tree_cone*",
-        "quaternius.pine_*"
+        "quaternius.pine_*",
+        "zeroad.aleppo_pine_*",
+        "zeroad.cedar_atlas_*",
+        "zeroad.cypress_*"
       ],
       "drops": [
         {
@@ -53,7 +56,9 @@
       "regrow_minutes": 90,
       "models": [
         "nature.tree_palm*",
-        "quaternius.palm_*"
+        "quaternius.palm_*",
+        "zeroad.palm_*",
+        "zeroad.cretan_date_*"
       ],
       "drops": [
         {
@@ -90,7 +95,12 @@
         "nature.tree_fat*",
         "nature.tree_blocks*",
         "nature.tree_plateau*",
-        "quaternius.tree_*"
+        "quaternius.tree_*",
+        "zeroad.olive_*",
+        "zeroad.fig_*",
+        "zeroad.poplar_*",
+        "zeroad.willow_*",
+        "zeroad.acacia_*"
       ],
       "drops": [
         {
