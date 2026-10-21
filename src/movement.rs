@@ -35,6 +35,12 @@ const WALK_SPEED: f64 = 4.0;
 const RUN_SPEED: f64 = 6.0;
 /// A character in water swims at this share of the walking speed and cannot run or jump.
 const SWIM_SPEED_FACTOR: f64 = 0.4;
+/// Water this deep (metres) reaches a character's chest: up to it they wade on the bed, beyond it they swim and drown.
+pub(super) const WADE_DEPTH_M: f64 = 1.2;
+/// Wading is slowed by the resistance of the water; swimming is slower still.
+const WADE_SPEED_FACTOR: f64 = 0.6;
+/// Nobody runs in water deeper than this (metres).
+pub(super) const RUN_DEPTH_M: f64 = 0.3;
 pub(super) const OBJECT_GRID: i32 = 600_000;
 /// Animals live on a coarser grid: about one cell per 170 metres.
 const FAUNA_GRID: i32 = 60_000;
@@ -702,6 +708,20 @@ pub(super) struct Intent {
     jump: bool,
     #[serde(default)]
     run: bool,
+    /// How tall the character is next to a man (set by the server from the datadisk's player body, never by a client):
+    /// water reaches the chest of a giant at a greater depth. 0 stands for 1.
+    #[serde(skip)]
+    body_scale: f64,
+}
+
+impl Intent {
+    fn scale(&self) -> f64 {
+        if self.body_scale > 0.0 {
+            self.body_scale
+        } else {
+            1.0
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1226,7 +1246,7 @@ impl WalkingTerrain {
         let speed = if intent.run { RUN_SPEED } else { WALK_SPEED };
         if !flight.airborne && !intent.jump && !on_object && !self.near_structure(point) {
             return (
-                self.step_at_speed(point, intent.direction, seconds, speed)
+                self.step_scaled(point, intent.direction, seconds, speed, intent.scale())
                     .unwrap_or(point),
                 false,
             );
@@ -1355,9 +1375,45 @@ impl WalkingTerrain {
         point
     }
 
-    /// Whether a character standing at `direction` is in water: the sea, a lake, a river.
+    #[cfg(test)]
+    /// Whether a character standing at `direction` is out of their depth in water (the sea, a lake, a river, a pond):
+    /// swimming, slowly, and drowning until they reach a shore where the water is shallow again.
     pub(super) fn in_water(&self, direction: [f64; 3]) -> bool {
-        self.surface(direction).is_none()
+        self.in_water_for(direction, 1.0)
+    }
+
+    /// [`Self::in_water`] for a character `scale` times the height of a man: water reaches their chest that much deeper.
+    pub(super) fn in_water_for(&self, direction: [f64; 3], scale: f64) -> bool {
+        self.water_depth(direction) > WADE_DEPTH_M * scale
+    }
+
+    /// Metres of water above the ground in a direction, 0 on dry land. The same rules as [`Self::surface`] decide
+    /// what is water; this says how much.
+    pub(super) fn water_depth(&self, direction: [f64; 3]) -> f64 {
+        let height = self.height(direction);
+        if let Some(level) = patch_water(direction) {
+            return (level - height).max(0.0);
+        }
+        // A dry patch is dry even over a coarse sea or river cell, down to sea level.
+        if height <= 0.0 || patch_dry(direction) {
+            return (-height).max(0.0);
+        }
+        let (face, horizontal, vertical) = coordinates(direction);
+        let size = self.environment.face_size;
+        let index = face * size * size
+            + ((vertical * size as f64) as usize).min(size - 1) * size
+            + ((horizontal * size as f64) as usize).min(size - 1);
+        let water = self.environment.water_m[index];
+        let elevation = self.environment.elevation_m[index];
+        if water != environment::DRY && water > elevation && f64::from(water) - height >= 0.5 {
+            return f64::from(water) - height;
+        }
+        0.0
+    }
+
+    /// The ground height where a character can stand or wade: dry land and water up to their chest.
+    fn walkable(&self, direction: [f64; 3], scale: f64) -> Option<f64> {
+        (self.water_depth(direction) <= WADE_DEPTH_M * scale).then(|| self.height(direction))
     }
 
     fn surface(&self, direction: [f64; 3]) -> Option<f64> {
@@ -1532,6 +1588,11 @@ impl WalkingTerrain {
         let mut biome = self.environment.biomes[index];
         // Dry tell/patch over drowned coarse cells: place and announce as grassland.
         if patch_dry(point) && biome < 3 {
+            biome = 4;
+        }
+        // A datadisk's wildlife overlay lives on land: where it covers dry ground that the coarse map calls
+        // river or sea (a floodplain, the ground above the water), game and plants stand there, not fish.
+        if biome < 3 && wildlife_at(point).is_some() && self.surface(point).is_some() {
             biome = 4;
         }
         if fauna && (biome < 3 || patch_water(point).is_some()) {
@@ -2082,6 +2143,7 @@ impl WalkingTerrain {
         false
     }
 
+    #[cfg(test)]
     fn step_at_speed(
         &self,
         point: [f64; 3],
@@ -2089,11 +2151,31 @@ impl WalkingTerrain {
         seconds: f64,
         speed: f64,
     ) -> Option<[f64; 3]> {
+        self.step_scaled(point, intent, seconds, speed, 1.0)
+    }
+
+    /// A step of a character `scale` times the height of a man (see [`Self::in_water_for`]).
+    fn step_scaled(
+        &self,
+        point: [f64; 3],
+        intent: [f64; 3],
+        seconds: f64,
+        speed: f64,
+        scale: f64,
+    ) -> Option<[f64; 3]> {
         let radius = length(point);
         if !(RADIUS - 8000.0..=RADIUS + 8012.0).contains(&radius) {
             return None;
         }
         let up = point.map(|value| value / radius);
+        // Wading through water that is not yet deep enough to swim in is slower than walking.
+        let depth = self.water_depth(up);
+        let wade_depth = WADE_DEPTH_M * scale;
+        let speed = if depth > 0.0 && depth <= wade_depth {
+            speed * WADE_SPEED_FACTOR
+        } else {
+            speed
+        };
         let radial = intent
             .iter()
             .zip(up)
@@ -2108,11 +2190,17 @@ impl WalkingTerrain {
             point[axis] + tangent[axis] * speed * seconds.clamp(0.0, 0.25)
         });
         let unit = intermediate.map(|value| value / length(intermediate));
-        let height = if self.in_water(up) {
-            // Swimming: no slope limit, the swimmer floats at the ground level (sea level at
-            // the least) and may leave the water wherever the shore is dry.
+        let height = if self.in_water_for(up, scale) || self.in_water_for(unit, scale) {
+            // Swimming (or about to): no slope limit, the swimmer floats at the ground level (sea level at
+            // the least) and may leave the water wherever it is shallow enough to wade.
+            // The step was already slowed to a wade when the swimmer is only about to leave the shallows.
+            let swim_factor = if depth > 0.0 && depth <= wade_depth {
+                SWIM_SPEED_FACTOR / WADE_SPEED_FACTOR
+            } else {
+                SWIM_SPEED_FACTOR
+            };
             let swim_point: [f64; 3] = std::array::from_fn(|axis| {
-                point[axis] + (intermediate[axis] - point[axis]) * SWIM_SPEED_FACTOR
+                point[axis] + (intermediate[axis] - point[axis]) * swim_factor
             });
             let swim_unit = swim_point.map(|value| value / length(swim_point));
             let height = self
@@ -2122,9 +2210,9 @@ impl WalkingTerrain {
             return clear_path(point, destination, &self.walking_objects(point, 2))
                 .then_some(destination);
         } else {
-            self.surface(unit)?
+            self.walkable(unit, scale)?
         };
-        let previous = self.surface(up)?;
+        let previous = self.walkable(up, scale)?;
         if (height - previous).abs() > distance * 0.7 {
             return None;
         }
@@ -2305,8 +2393,10 @@ pub(super) async fn walk(
             .fetch_one(&mut *transaction)
             .await?;
         intent.run &= stamina > 0;
-        let swimming = terrain.in_water(unit([position.x, position.y, position.z]));
-        intent.run &= !swimming;
+        let here = unit([position.x, position.y, position.z]);
+        intent.body_scale = body_scale(&state, &mut transaction, player_id).await?;
+        let swimming = terrain.in_water_for(here, intent.scale());
+        intent.run &= terrain.water_depth(here) <= RUN_DEPTH_M * intent.scale();
         // A jump costs stamina up front and is refused when too little is left.
         intent.jump &=
             !position.airborne && !swimming && f64::from(stamina) >= super::survival::JUMP_STAMINA;
@@ -2384,7 +2474,7 @@ pub(super) async fn walk(
         }
         // Whoever is in water, moving or not, is drowning until they reach a dry shore.
         if !position.airborne
-            && terrain.in_water(unit([position.x, position.y, position.z]))
+            && terrain.in_water_for(unit([position.x, position.y, position.z]), intent.scale())
             && super::survival::drown(&state, &mut transaction, player_id, seconds).await?
         {
             let notice = super::survival::obituary(&mut transaction, player_id).await?;
@@ -2406,8 +2496,8 @@ pub(super) async fn walk(
             .fetch_one(&mut *transaction)
             .await?;
     transaction.commit().await?;
-    let swimming =
-        !position.airborne && terrain.in_water(unit([position.x, position.y, position.z]));
+    let swimming = !position.airborne
+        && terrain.in_water_for(unit([position.x, position.y, position.z]), intent.scale());
     Ok(Json(Reply {
         position,
         moving,
@@ -2415,6 +2505,27 @@ pub(super) async fn walk(
         sitting,
         swimming,
     }))
+}
+
+/// How tall the player is next to a man: a datadisk's demigod stands taller than the people of the creator, and the
+/// water must be deeper before it reaches their chest. 1 for everybody else.
+async fn body_scale(
+    state: &AppState,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    player_id: i64,
+) -> Result<f64, players::Error> {
+    let Some((character, body)) = super::story::world::player_body(state).await else {
+        return Ok(1.0);
+    };
+    let looks: String = sqlx::query_scalar("SELECT character FROM players WHERE id = $1")
+        .bind(player_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+    Ok(if looks == character {
+        (body.height_m / super::story::disk::MAN_HEIGHT_M).clamp(0.5, 6.0)
+    } else {
+        1.0
+    })
 }
 
 #[cfg(test)]
@@ -2677,6 +2788,7 @@ mod tests {
             sequence: "1".into(),
             jump: false,
             run: false,
+            body_scale: 1.0,
         };
         for step in 0..120 {
             (point, on_object) = terrain.advance(point, &intent, 0.1, &mut flight, on_object);
@@ -3206,6 +3318,72 @@ mod tests {
     }
 
     #[test]
+    fn shallow_water_is_waded_slowly_and_only_deep_water_is_swum() {
+        let pixels = vec![145; 16 * 16 * 6];
+        let environment = environment::generate(16, &pixels, "42", "test").unwrap();
+        let mut terrain = WalkingTerrain {
+            size: 16,
+            pixels,
+            environment,
+            catalog: Vec::new(),
+            removed: Default::default(),
+        };
+        terrain.environment.biomes.fill(4);
+        terrain.environment.water_m.fill(environment::DRY);
+        let height = terrain.height([1.0, 0.0, 0.0]);
+        let point = [RADIUS + height, 0.0, 0.0];
+        let metres = |from: [f64; 3], to: [f64; 3]| {
+            length(std::array::from_fn(|axis| to[axis] - from[axis]))
+        };
+        let dry = terrain.step(point, [0.0, 0.0, 1.0], 0.25).unwrap();
+        // The coarse ground lies below the heightmap here: standing water counts only above the heightmap's ground.
+        terrain.environment.elevation_m.fill(height as i32 - 100);
+        let fill = |terrain: &mut WalkingTerrain, depth_m: f64| {
+            terrain
+                .environment
+                .water_m
+                .fill((height + depth_m).round() as i32);
+        };
+        // Standing water about 60 cm deep: a wade, slower than a walk, not a swim, and no drowning.
+        fill(&mut terrain, 0.6);
+        let depth = terrain.water_depth(unit(point));
+        assert!((0.3..WADE_DEPTH_M).contains(&depth), "depth {depth}");
+        assert!(!terrain.in_water(unit(point)));
+        let waded = terrain
+            .step(point, [0.0, 0.0, 1.0], 0.25)
+            .expect("a wader walks on");
+        let waded_metres = metres(point, waded);
+        assert!(
+            waded_metres < metres(point, dry) * 0.7,
+            "waded {waded_metres}"
+        );
+        assert!(
+            waded_metres > metres(point, dry) * 0.5,
+            "a wade is not a swim: {waded_metres}"
+        );
+        // Deeper than the chest is swimming, and slower still.
+        fill(&mut terrain, 3.0);
+        assert!(terrain.in_water(unit(point)));
+        let swum = terrain.step(point, [0.0, 0.0, 1.0], 0.25).unwrap();
+        assert!(metres(point, swum) < waded_metres);
+        // A giant of a datadisk is waist-deep where a man swims: twice as tall, twice as deep before it swims.
+        fill(&mut terrain, 2.0);
+        assert!(terrain.in_water_for(unit(point), 1.0));
+        assert!(!terrain.in_water_for(unit(point), 2.0));
+        let giant = terrain
+            .step_scaled(point, [0.0, 0.0, 1.0], 0.25, WALK_SPEED, 2.0)
+            .expect("a giant wades on");
+        assert!(
+            metres(point, giant) > waded_metres * 0.9,
+            "a wade, not a swim: {}",
+            metres(point, giant)
+        );
+        // A swimmer who reaches shallow water wades on.
+        fill(&mut terrain, 0.6);
+        assert!(terrain.step(swum, [0.0, 0.0, 1.0], 0.25).is_some());
+    }
+
+    #[test]
     fn swept_obstacles_block_tunnelling_but_allow_escape() {
         let point = [RADIUS, 0.0, 0.0];
         let mut object = WorldObject {
@@ -3454,6 +3632,53 @@ mod tests {
         let point = [RADIUS + flora.height([1.0, 0.0, 0.0]), 0.0, 0.0];
         assert!(!flora.objects(point, 16).is_empty());
         assert_eq!(flora.objects(point, 16), both.objects(point, 16));
+    }
+
+    #[test]
+    fn a_wildlife_overlay_puts_game_on_a_dry_floodplain_in_a_coarse_river_cell() {
+        // The hunter's water-hole: dry steppe the 150 km map marks "river". Without the overlay its cells only
+        // hold fish; with it the herds of the epic stand there.
+        set_patches(String::new(), Vec::new());
+        let mut terrain = terrain_with(144, 2, catalog_with_fauna());
+        let ground = terrain.height([0.0, -1.0, 0.0]).floor() as i32;
+        terrain.environment.elevation_m.fill(ground);
+        terrain.environment.water_m.fill(ground);
+        let place = [0.0, -1.0, 0.0];
+        let origin = place.map(|value| value * (RADIUS + terrain.height(place)));
+        let around = |terrain: &WalkingTerrain| {
+            let mut found = Vec::new();
+            for step in 0..60 {
+                let angle = f64::from(step) * 0.00002;
+                let near = unit([angle.sin(), -angle.cos(), 0.0]);
+                found.extend(
+                    terrain.fauna(near.map(|value| value * (RADIUS + terrain.height(near)))),
+                );
+            }
+            found
+        };
+        set_wildlife(String::new(), Vec::new());
+        assert!(
+            around(&terrain)
+                .iter()
+                .all(|animal| !animal.model.starts_with("animal.")),
+            "no game without an overlay"
+        );
+        set_wildlife(
+            "test".into(),
+            vec![WildlifeZone {
+                direction: unit(origin),
+                radius_m: 3000.0,
+                density: 8.0,
+                flora: Vec::new(),
+                fauna: vec![("animal.deer".into(), 1.0)],
+            }],
+        );
+        let game = around(&terrain);
+        set_wildlife(String::new(), Vec::new());
+        assert!(
+            game.iter().any(|animal| animal.model == "animal.deer"),
+            "the overlay's deer stand on the floodplain: {game:?}"
+        );
     }
 
     #[test]
