@@ -269,7 +269,7 @@ Migration `0015_gold_in_inventory.sql` moves gold from a balance column into the
 
 Migrations 0005-0008 add a permanent character UUID, inventories, starvation,
 graves and immutable obituary statistics. Each new character receives four
-food stacks and 100 inventory slots; gold coins are an inventory item (`gold`, 10,000 per slot, several slots allowed) and 100 coins are granted with the other starter items. Capacity grows
+food stacks, basic tools, one Scroll of Day and 100 inventory slots; gold coins are an inventory item (`gold`, 10,000 per slot, several slots allowed) and 100 coins are granted with the other starter items (migration `0049_starter_scroll_day.sql`). Capacity grows
 by 10 per level after level one, plus 20 per bag and 50 per suitcase.
 Apple, bread, cheese and carrot provide 95, 265, 113 and 25 kcal respectively.
 `POST /players/me/eat` accepts only an owned `item_id`, consumes one item and

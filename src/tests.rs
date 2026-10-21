@@ -38,9 +38,17 @@ async fn inventory_is_granted_once_and_uuid_is_unique(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(
-        count, 8,
-        "four food stacks, the starting coins and three tools"
+        count, 9,
+        "four food stacks, the starting coins, three tools and a Scroll of Day"
     );
+    let scroll_day: i64 = sqlx::query_scalar(
+        "SELECT quantity FROM player_inventory WHERE player_id = $1 AND item_id = 'scroll_day'",
+    )
+    .bind(player_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(scroll_day, 1);
     sqlx::query("DELETE FROM player_inventory WHERE player_id = $1")
         .bind(player_id)
         .execute(&pool)

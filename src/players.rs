@@ -376,7 +376,7 @@ async fn register(
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
-    // Datadisk kit and opening quests: after the insert trigger's starter food/tools,
+    // Datadisk kit and opening quests: after the insert trigger's starter food/tools/scroll,
     // so the character begins the story with snares (or whatever the disk names).
     super::story::world::apply_new_player(&state, player_id).await?;
     Ok((
