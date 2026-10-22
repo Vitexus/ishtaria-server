@@ -19,6 +19,7 @@ mod hall;
 mod herd;
 mod hunting;
 mod land;
+mod loot;
 mod love;
 mod magic;
 mod movement;
@@ -258,6 +259,7 @@ fn app(state: AppState) -> Router {
         .merge(social::routes())
         .merge(chat::routes())
         .merge(shops::routes())
+        .merge(loot::routes())
         .merge(trade::routes())
         .merge(placing::routes())
         .merge(fishing::routes())

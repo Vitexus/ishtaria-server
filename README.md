@@ -369,9 +369,11 @@ sudo systemctl enable --now ishtaria-server
 ```
 
 The package creates the PostgreSQL role and database `ishtaria` if PostgreSQL is
-running during installation. Day-to-day administration (maps, bans, portals,
-scheduled shutdown) is done with `ishtaria-admin`; migration `0013_admin.sql`
-holds its tables. `GET /world` carries `messages[]`; entries with `kind: "system"`
+running during installation. It also installs `/etc/sudoers.d/ishtaria-server` so
+the `ishtaria` user can start, stop and restart the systemd unit without a password
+(`sudo -u ishtaria ishtaria-admin` → *Start service*). Day-to-day administration
+(maps, bans, portals, scheduled shutdown) is done with `ishtaria-admin`; migration
+`0013_admin.sql` holds its tables. `GET /world` carries `messages[]`; entries with `kind: "system"`
 (for example `code: "shutdown"` with `seconds_left`) must be shown by clients and
 cannot be dismissed. Banned players get `403 account banned` on login and lose
 their session.
@@ -478,6 +480,11 @@ may bite back after a hit it survives; the blow is cut by worn armour (`body`: `
 ore is smelted to ingots (`smelt_iron_*`, pickaxe as an interim tool until crafting stations exist) and weapons, armour and
 shields are crafted from ingots and hides (`etc/recipes.json`). Animals still do not chase; players cannot hurt players.
 
+**Durability and quality (migrations `0025_durability.sql`, `0050_item_quality.sql`, `src/durability.rs`).**
+Tools, weapons, armour and shields wear with use. Each kind has its own `max_durability`; better tiers of the same
+kind (sold dearer in `etc/shops.json`) last longer and hit harder. At zero durability the piece is destroyed and
+removed from the inventory.
+
 **Trading (migration `0037_trade_and_shops.sql`, `src/shops.rs`, `src/trade.rs`, `etc/shops.json`).**
 An NPC tagged `shop:<id>` is a merchant; every generated town has a trader at its plaza (`etc/trader.yaml`, tag `shop:general`) and
 a datadisk can tag any NPC. `GET /shops/{npc_id}` lists what the shop sells and buys (character must stand within 6 m),
@@ -488,6 +495,14 @@ world creates. Between players there is one open exchange at a time: `POST /trad
 `POST /trades/current/accept`. Changing an offer withdraws both acceptances; when both have accepted, the server re-checks ownership,
 distance and capacity and swaps everything or nothing. Used pieces (with remaining durability) cannot be traded, so trading cannot
 make a worn tool new. Exchanges are deleted when they end and expire after five minutes; the partner is told by a `trade` event.
+
+**Ground loot and wayfarers (migrations `0051_ground_loot.sql`, `0052_travelers.sql`, `src/loot.rs`).**
+`POST /players/me/drop` throws unequipped inventory at the character's feet (`ground_items`); equipped pieces must be
+unequipped first. `POST /ground/{id}/pickup` takes a pile in reach. Nearby NPCs scoop piles into `npc_inventory`; dialogue
+then offers Trade (`can_trade`, `GET|POST /npcs/{id}/found[/buy]`) at the finder's price. Wayfarers on inter-town trails
+(`MovementKind::Travel`, `etc/traveler.yaml`, generated in `story/settlements.rs`) see farther, divert along the road
+toward the nearest general merchant (`npc_errands`), and sell finds into `merchant_stock`. While that stock lasts the
+shop lists it at twice the finder's price; afterwards the ordinary catalogue returns.
 
 **Building, farming, cooking, fishing (migration `0038_building_farming_fishing.sql`, `src/placing.rs`, `src/fishing.rs`,
 `etc/placeables.json`).** `POST /players/me/place` (`{"item_id", "x", "y", "z", "yaw"}`, metres from the planet's centre, within 4 m of the

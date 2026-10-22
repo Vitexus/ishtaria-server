@@ -12,6 +12,7 @@ mod guard;
 mod halls;
 mod harvest;
 mod leases;
+mod loot;
 mod magic;
 mod pacts;
 mod social;
@@ -649,7 +650,7 @@ async fn survival_login_settles_starvation(pool: PgPool) {
     let born_at: String = sqlx::query_scalar("SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM players").fetch_one(&pool).await.unwrap();
     assert_eq!(
         notice,
-        serde_json::json!({"obituary": {"name": "offline-player", "born_at": born_at, "lived_days": "1234", "lifetime_gold": "9223372036854775807", "friends_count": "0"}})
+        serde_json::json!({"obituary": {"name": "offline-player", "born_at": born_at, "lived_days": "1234", "lifetime_gold": "9223372036854775807", "friends_count": "0", "death_cause": "starvation"}})
     );
     for old_token in [token.as_str(), second["token"].as_str().unwrap()] {
         assert_eq!(
@@ -931,7 +932,7 @@ async fn survival_eating_starvation_and_graves(pool: PgPool) {
     let profile =
         response_json(player_request(&router, "GET", "/players/me", "", &token).await).await;
     assert_eq!(profile["inventory"]["capacity"], 100);
-    assert_eq!(profile["inventory"]["used"], 8);
+    assert_eq!(profile["inventory"]["used"], 9);
     assert_eq!(profile["life"]["alive"], true);
     assert_eq!(profile["inventory"]["items"][0]["quantity"], "3");
     sqlx::query("UPDATE players SET health = 80, last_ate_at = now() - interval '6 days 23 hours'")
@@ -1110,7 +1111,7 @@ async fn survival_eating_starvation_and_graves(pool: PgPool) {
     let born_at: String = sqlx::query_scalar("SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM players WHERE username = 'hungry-player'").fetch_one(&pool).await.unwrap();
     assert_eq!(
         obituary,
-        serde_json::json!({"obituary": {"name": "hungry-player", "born_at": born_at, "lived_days": "12", "lifetime_gold": "1000000", "friends_count": "0"}})
+        serde_json::json!({"obituary": {"name": "hungry-player", "born_at": born_at, "lived_days": "12", "lifetime_gold": "1000000", "friends_count": "0", "death_cause": "starvation"}})
     );
     assert_eq!(
         player_request(
@@ -1245,8 +1246,8 @@ async fn survival_damage_and_concurrent_loot(pool: PgPool) {
         response_json(player_request(&router, "GET", "/players/me", "", &token).await).await;
     assert_eq!(profile["stats"]["gold"], "1000101");
     assert_eq!(
-        profile["inventory"]["used"], 108,
-        "4 food stacks, 3 tools and 101 coin slots"
+        profile["inventory"]["used"], 109,
+        "4 food stacks, 3 tools, the starter scroll and 101 coin slots"
     );
     sqlx::query("DELETE FROM player_friendships")
         .execute(&pool)
@@ -1266,7 +1267,7 @@ async fn survival_damage_and_concurrent_loot(pool: PgPool) {
     let born_at: String = sqlx::query_scalar("SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM players WHERE username = 'wealthy-player'").fetch_one(&pool).await.unwrap();
     assert_eq!(
         obituary,
-        serde_json::json!({"obituary": {"name": "wealthy-player", "born_at": born_at, "lived_days": "5", "lifetime_gold": "1000001", "friends_count": "2"}})
+        serde_json::json!({"obituary": {"name": "wealthy-player", "born_at": born_at, "lived_days": "5", "lifetime_gold": "1000001", "friends_count": "2", "death_cause": "falling_tree"}})
     );
     let emptied =
         response_json(player_request(&router, "GET", &inspect_path, "", &token).await).await;
@@ -1398,7 +1399,7 @@ async fn survival_capacity_and_stacking(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO item_types (id, name, stack_limit) SELECT 'filler-' || value, 'Filler', 1 FROM generate_series(1,92) AS value").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO item_types (id, name, stack_limit) SELECT 'filler-' || value, 'Filler', 1 FROM generate_series(1,91) AS value").execute(&pool).await.unwrap();
     sqlx::query(
         "INSERT INTO player_inventory SELECT $1, id, 1 FROM item_types WHERE id LIKE 'filler-%'",
     )
@@ -1742,12 +1743,10 @@ async fn persistence_and_conflicting_imports(pool: PgPool) {
             .fetch_all(&pool)
             .await
             .unwrap();
+    let embedded: Vec<i64> = sqlx::migrate!().iter().map(|m| m.version).collect();
     assert_eq!(
-        versions,
-        [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-            25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41
-        ]
+        versions, embedded,
+        "every embedded migration applied, in order"
     );
 }
 

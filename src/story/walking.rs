@@ -15,6 +15,8 @@
 //! * `patrol`: the character walks the loop of `waypoints` (metres east and south of its place, as for
 //!   buildings), standing `pause_s` at each; the start of the loop depends on the id so that several
 //!   characters on one beat do not walk in step.
+//! * `travel`: like a patrol, but the waypoints follow a long footpath between towns (generated
+//!   wayfarers only).
 
 use super::disk::{Movement, MovementKind};
 use super::placement::{offset, Ground};
@@ -241,7 +243,7 @@ pub fn route(
     match movement.kind {
         MovementKind::Wander => wander(ground, id, home, movement, now_ms),
         MovementKind::Herd => herd(ground, site, movement, now_ms),
-        MovementKind::Patrol => {
+        MovementKind::Patrol | MovementKind::Travel => {
             let points = patrol_points(ground, site, movement);
             if points.len() < 2 {
                 Vec::new()

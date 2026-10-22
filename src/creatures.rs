@@ -234,6 +234,7 @@ pub(super) async fn spell_target(
 /// Hits the animal with `points` of magic in a transaction where the caster is locked and alive
 /// and already stands within the spell's range. The animal bites back only when the caster is
 /// within its melee reach. Killing it removes it from the world until it returns.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn spell_strike(
     state: &AppState,
     world_id: i64,

@@ -1,0 +1,22 @@
+# A wayfarer on the footpath between two towns. Pockets dropped goods and sells them to the
+# nearest trader; until then a player can buy cheaper from the finder in dialogue.
+dialogue:
+  id: traveler
+  status: reviewed
+  start: greet
+  nodes:
+    greet:
+      text_key: traveler.greet
+      choices:
+        - {text_key: traveler.leave}
+strings:
+  en:
+    traveler.greet: "The road is long. I keep an eye out for anything left by the wayside."
+    traveler.leave: Safe travels.
+    traveler.name: Wayfarer
+    traveler.bio: Walks the trails between towns; sells found goods to the market trader.
+  cs:
+    traveler.greet: "Cesta je dlouhá. Dávám pozor na vše, co leží u cesty."
+    traveler.leave: Šťastnou cestu.
+    traveler.name: Pocestný
+    traveler.bio: Chodí po stezkách mezi městy; nalezené věci prodá trhovci.

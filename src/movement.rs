@@ -976,6 +976,11 @@ struct ObjectKind {
     /// Typical height above the terrain when `flying`, in metres.
     #[serde(default = "default_altitude")]
     altitude_m: f64,
+    /// Vertical placement offset in metres (negative sinks the model into the
+    /// ground). 0 A.D. trees have roots at Y=0 but their trunks start higher,
+    /// so they appear to float without this.
+    #[serde(default)]
+    ground_offset_m: f64,
 }
 
 fn default_depth() -> f64 {
@@ -995,6 +1000,8 @@ pub(super) struct WorldObject {
     pub yaw: f64,
     pub collision_radius_m: f64,
     pub biome: u8,
+    #[serde(default)]
+    pub ground_offset_m: f64,
 }
 
 #[derive(Deserialize)]
@@ -1036,6 +1043,9 @@ pub(super) struct ObjectRegion {
     /// Landscape patches of datadisk places nearby.
     terrains: Vec<super::story::world::TerrainDescriptor>,
     memorials: Vec<super::survival::Memorial>,
+    /// Items dropped on the ground nearby.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    loot: Vec<super::loot::GroundItem>,
 }
 
 fn object_catalog() -> Option<Vec<ObjectKind>> {
@@ -1700,6 +1710,7 @@ impl WalkingTerrain {
             yaw: sample(4) * std::f64::consts::TAU,
             collision_radius_m: 0.0,
             biome,
+            ground_offset_m: kind.ground_offset_m,
         })
     }
 
@@ -1858,6 +1869,7 @@ impl WalkingTerrain {
             yaw: sample(4) * std::f64::consts::TAU,
             collision_radius_m: kind.collision_radius * scale_m,
             biome,
+            ground_offset_m: kind.ground_offset_m,
         })
     }
 
@@ -2016,6 +2028,7 @@ impl WalkingTerrain {
             yaw: word(&hash, 4) * std::f64::consts::TAU,
             collision_radius_m: 0.0,
             biome: self.biome_at(direction),
+            ground_offset_m: kind.ground_offset_m,
         })
     }
 
@@ -2529,6 +2542,7 @@ pub(super) async fn world_objects(
         areas: super::story::world::areas_near(&state, point).await,
         props: super::story::world::props_near(&state, point).await,
         terrains: super::story::world::terrains_near(&state, point).await,
+        loot: super::loot::near(&state, point).await.unwrap_or_default(),
         version: 1,
         heightmap_sha256: terrain.environment.heightmap_sha256.clone(),
         seed: terrain.environment.seed.clone(),
@@ -2794,6 +2808,7 @@ mod tests {
             yaw: 0.0,
             collision_radius_m: 1.0,
             biome: 4,
+            ground_offset_m: 0.0,
         };
         let floor = object_floor([RADIUS + height + 10.0, 0.0, 0.0], &object).unwrap();
         assert!(floor > RADIUS + height + 0.1);
@@ -2883,6 +2898,7 @@ mod tests {
             yaw: 0.0,
             collision_radius_m: 8.0,
             biome: 4,
+            ground_offset_m: 0.0,
         };
         (terrain, object, RADIUS + height)
     }
@@ -3184,6 +3200,7 @@ mod tests {
             yaw: 0.0,
             collision_radius_m: 0.4,
             biome: 4,
+            ground_offset_m: 0.0,
         };
         let launch = |direction: [f64; 3]| {
             let mut flight = Flight {
@@ -3233,6 +3250,7 @@ mod tests {
             yaw: 0.0,
             collision_radius_m: 2.0,
             biome: 4,
+            ground_offset_m: 0.0,
         };
         let mut point = [RADIUS + height, 0.0, 0.0];
         assert!(!clear_jump_path(
@@ -3301,6 +3319,7 @@ mod tests {
             yaw: 5.782347146974182,
             collision_radius_m: 1.8062294371677563,
             biome: 4,
+            ground_offset_m: 0.0,
         };
         let offset: [f64; 3] =
             std::array::from_fn(|axis| original_point[axis] - original_center[axis]);
@@ -3464,6 +3483,7 @@ mod tests {
             yaw: 0.0,
             collision_radius_m: 1.0,
             biome: 4,
+            ground_offset_m: 0.0,
         };
         assert!(!clear_path(start, [start[0], 0.0, 1.5], &[object]));
     }
@@ -3672,6 +3692,7 @@ mod tests {
             yaw: 0.0,
             collision_radius_m: 0.1,
             biome: 4,
+            ground_offset_m: 0.0,
         };
         assert!(!clear_path(point, [RADIUS, 0.0, 1.0], &[object.clone()]));
         assert!(clear_path(point, [RADIUS, 1.0, 0.0], &[object.clone()]));
@@ -3712,6 +3733,7 @@ mod tests {
             yaw: 0.0,
             collision_radius_m: 1.25,
             biome: 4,
+            ground_offset_m: 0.0,
         };
         // Without the obstacle (or for another terrain) the step is free.
         set_statics("other:key".into(), vec![wall.clone()]);
@@ -4125,6 +4147,7 @@ mod tests {
             yaw: 0.0,
             collision_radius_m: 0.0,
             biome: 4,
+            ground_offset_m: 0.0,
         };
         assert!(
             terrain
@@ -4157,6 +4180,7 @@ mod tests {
             yaw: 0.0,
             collision_radius_m: 0.0,
             biome: 2,
+            ground_offset_m: 0.0,
         };
         assert!(terrain
             .fauna_kind(&fish.model)

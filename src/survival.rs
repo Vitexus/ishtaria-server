@@ -688,7 +688,7 @@ async fn grave(
         .ok_or(Error::Status(StatusCode::NOT_FOUND, "grave not found"))?;
     grave.items = sqlx::query_as("SELECT item_id, name, quantity::text, calories, water, capacity_bonus, asset, coalesce(durability, max_durability) AS durability, max_durability, category FROM grave_inventory JOIN item_types ON item_types.id = item_id WHERE grave_id = $1 AND item_id <> 'gold' ORDER BY item_id")
         .bind(id).fetch_all(&mut *transaction).await?;
-    grave.obituary = Some(sqlx::query_as("SELECT player_name AS name, to_char(born_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS born_at, lived_days::text, lifetime_gold::text, friends_count::text FROM graves WHERE id = $1")
+    grave.obituary = Some(sqlx::query_as("SELECT player_name AS name, to_char(born_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS born_at, lived_days::text, lifetime_gold::text, friends_count::text, cause AS death_cause FROM graves WHERE id = $1")
         .bind(id).fetch_one(&mut *transaction).await?);
     transaction.commit().await?;
     Ok(Json(grave))

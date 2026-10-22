@@ -512,7 +512,7 @@ async fn fishing_needs_a_rod_and_water(pool: PgPool) {
         } else {
             assert!(reply["items"].as_array().unwrap().is_empty());
         }
-        assert!(reply["wear"]["durability"].as_i64().unwrap() < 120);
+        assert!(reply["wear"]["durability"].as_i64().unwrap() < 80);
     }
     assert_eq!(stock(&pool, "angler", "fish").await, caught);
     assert!(

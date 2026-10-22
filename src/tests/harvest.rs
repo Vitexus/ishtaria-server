@@ -302,7 +302,7 @@ async fn crafting_consumes_ingredients_atomically(pool: PgPool) {
         response_json(player_request(&router, "GET", "/players/me", "", &token).await).await;
     assert_eq!(
         profile["inventory"]["used"],
-        8 + 30,
+        9 + 30,
         "four foods, the coins and three tools, plus three logs of ten slots"
     );
     for (recipe, count, status) in [
@@ -333,7 +333,7 @@ async fn crafting_consumes_ingredients_atomically(pool: PgPool) {
     );
     assert_eq!(
         profile["inventory"]["used"],
-        8 + 10 + 1,
+        9 + 10 + 1,
         "one log left and the wood shares one slot"
     );
     let (logs, wood): (i64, i64) = sqlx::query_as("SELECT (SELECT quantity FROM player_inventory WHERE item_id = 'oak_log'), (SELECT quantity FROM player_inventory WHERE item_id = 'oak_wood')")
@@ -343,7 +343,7 @@ async fn crafting_consumes_ingredients_atomically(pool: PgPool) {
     let (wood, planks): (i64, i64) = sqlx::query_as("SELECT (SELECT quantity FROM player_inventory WHERE item_id = 'oak_wood'), (SELECT quantity FROM player_inventory WHERE item_id = 'oak_plank')")
         .fetch_one(&pool).await.unwrap();
     assert_eq!((wood, planks), (20, 8));
-    assert_eq!(profile["inventory"]["used"], 8 + 10 + 2);
+    assert_eq!(profile["inventory"]["used"], 9 + 10 + 2);
     // The last ingredients are used up completely.
     assert_eq!(craft("oak_plank", "4").await.status(), StatusCode::OK);
     let wood: Option<i64> =
@@ -422,6 +422,20 @@ async fn item_catalog_has_categories_and_rpg_items(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!((limit, multi), (1, true));
+    // Better pieces of the same kind outlast common ones.
+    let durability: Vec<(String, i32)> = sqlx::query_as(
+        "SELECT id, max_durability FROM item_types WHERE id IN ('sword', 'sword_2', 'claymore', 'armor_leather', 'armor_metal', 'shield_round', 'shield_celtic_golden') ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let durability: std::collections::HashMap<_, _> = durability.into_iter().collect();
+    assert!(
+        durability["sword"] < durability["sword_2"]
+            && durability["sword_2"] < durability["claymore"]
+    );
+    assert!(durability["armor_leather"] < durability["armor_metal"]);
+    assert!(durability["shield_round"] < durability["shield_celtic_golden"]);
 }
 
 async fn equip_request(router: &Router, token: &str, item: &str) -> Response {

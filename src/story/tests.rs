@@ -1014,6 +1014,16 @@ fn every_world_grows_towns_with_graveyards_and_harbours_with_shipwrights() {
         .all(|npc| npc.tags.contains(&"shop:general".to_owned())));
     assert!(story.dialogues.contains_key("markets:trader"));
     assert_eq!(story.strings["cs"]["markets:trader.name"], "Obchodník");
+    let smiths: Vec<_> = story
+        .npcs
+        .values()
+        .filter(|npc| npc.id.contains("blacksmith"))
+        .collect();
+    assert!(!smiths.is_empty(), "villages and towns have a blacksmith");
+    assert!(smiths
+        .iter()
+        .all(|npc| npc.tags.contains(&"shop:smith".to_owned())));
+    assert_eq!(story.strings["cs"]["forges:blacksmith.name"], "Kovář");
     // Every town on land has a shepherd who drives its flock of sheep and goats to a pasture and home.
     let shepherds: Vec<_> = story
         .npcs

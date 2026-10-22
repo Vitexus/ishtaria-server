@@ -374,6 +374,10 @@ pub enum MovementKind {
     /// settlements generated for a world have shepherds; a datadisk cannot ask for this.
     #[serde(skip_deserializing)]
     Herd,
+    /// Walks a long trail between towns (`waypoints` along the road). Generated travelers only; a
+    /// datadisk cannot ask for this. When they pocket a find they divert toward a merchant.
+    #[serde(skip_deserializing)]
+    Travel,
 }
 
 /// How a character of a datadisk walks (see `story::walking`).
@@ -1584,6 +1588,15 @@ impl Disk {
                     MovementKind::Herd => ensure!(
                         movement.waypoints.len() == 1,
                         "{id}: npc {} drives a herd to exactly one pasture",
+                        npc.id
+                    ),
+                    MovementKind::Travel => ensure!(
+                        (2..=24).contains(&movement.waypoints.len())
+                            && movement.waypoints.iter().all(|spot| {
+                                spot[0].abs() <= super::trails::MAX_TRAIL_M
+                                    && spot[1].abs() <= super::trails::MAX_TRAIL_M
+                            }),
+                        "{id}: npc {} travel needs 2 to 24 waypoints along a trail",
                         npc.id
                     ),
                 }

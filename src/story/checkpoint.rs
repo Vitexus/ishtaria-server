@@ -40,56 +40,6 @@ pub fn resolve(story: &Story, quest_id: &str, stage_id: &str) -> Option<Restart>
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::story::disk::{FailRestart, Quest, Stage};
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn fail_restart_overrides_quest_start() {
-        let mut stages = BTreeMap::new();
-        stages.insert(
-            "start".to_owned(),
-            Stage {
-                text_key: "t.start".to_owned(),
-                final_stage: false,
-                reach: None,
-                guide: None,
-                fail_restart: None,
-            },
-        );
-        stages.insert(
-            "road".to_owned(),
-            Stage {
-                text_key: "t.road".to_owned(),
-                final_stage: false,
-                reach: None,
-                guide: None,
-                fail_restart: Some(FailRestart {
-                    stage: "start".to_owned(),
-                    place: "d:temple".to_owned(),
-                }),
-            },
-        );
-        let mut story = Story::default();
-        story.quests.insert(
-            "d:q".to_owned(),
-            Quest {
-                id: "d:q".to_owned(),
-                title_key: "t".to_owned(),
-                start_stage: "start".to_owned(),
-                start_place: Some("d:town".to_owned()),
-                excerpt: None,
-                stages,
-            },
-        );
-        let restart = resolve(&story, "d:q", "road").unwrap();
-        assert_eq!(restart.stage, "start");
-        assert_eq!(restart.place.as_deref(), Some("d:temple"));
-    }
-}
-
 /// Active non-final quest for the player (most recently updated), if any.
 async fn active_quest(
     tx: &mut Transaction<'_, Postgres>,
@@ -189,4 +139,54 @@ pub async fn restart_active_quest(
     .execute(&mut **tx)
     .await?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::story::disk::{FailRestart, Quest, Stage};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn fail_restart_overrides_quest_start() {
+        let mut stages = BTreeMap::new();
+        stages.insert(
+            "start".to_owned(),
+            Stage {
+                text_key: "t.start".to_owned(),
+                final_stage: false,
+                reach: None,
+                guide: None,
+                fail_restart: None,
+            },
+        );
+        stages.insert(
+            "road".to_owned(),
+            Stage {
+                text_key: "t.road".to_owned(),
+                final_stage: false,
+                reach: None,
+                guide: None,
+                fail_restart: Some(FailRestart {
+                    stage: "start".to_owned(),
+                    place: "d:temple".to_owned(),
+                }),
+            },
+        );
+        let mut story = Story::default();
+        story.quests.insert(
+            "d:q".to_owned(),
+            Quest {
+                id: "d:q".to_owned(),
+                title_key: "t".to_owned(),
+                start_stage: "start".to_owned(),
+                start_place: Some("d:town".to_owned()),
+                excerpt: None,
+                stages,
+            },
+        );
+        let restart = resolve(&story, "d:q", "road").unwrap();
+        assert_eq!(restart.stage, "start");
+        assert_eq!(restart.place.as_deref(), Some("d:temple"));
+    }
 }

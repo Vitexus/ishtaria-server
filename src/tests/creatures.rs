@@ -29,13 +29,31 @@ pub(super) fn animal_near(
     terrain: &movement::WalkingTerrain,
     wanted: Option<&str>,
 ) -> movement::WorldObject {
+    animal_where(terrain, |animal| {
+        wanted.is_none_or(|model| animal.model == model)
+    })
+}
+
+/// An animal that a sword (3 points) does not fell in a single swing.
+fn sturdy_animal_near(terrain: &movement::WalkingTerrain) -> movement::WorldObject {
+    animal_where(terrain, |animal| {
+        !["fox", "chicken"]
+            .iter()
+            .any(|weak| animal.model.ends_with(weak))
+    })
+}
+
+fn animal_where(
+    terrain: &movement::WalkingTerrain,
+    accept: impl Fn(&movement::WorldObject) -> bool,
+) -> movement::WorldObject {
     for step in 0..400 {
         let angle = f64::from(step) * 0.0003;
         let place = movement::unit([angle.cos(), angle.sin(), 0.1]);
         let origin = place.map(|value| value * (movement::RADIUS + terrain.ground_height(place)));
         let now = movement::unix_now_ms();
         for (animal, route) in terrain.moving_animals(origin, now) {
-            if route.is_some() && wanted.is_none_or(|model| animal.model == model) {
+            if route.is_some() && accept(&animal) {
                 return animal;
             }
         }
@@ -70,7 +88,7 @@ async fn animals_are_butchered_for_meat_and_return_later(pool: PgPool) {
         .await
         .unwrap();
     let terrain = movement::terrain(&state).await.unwrap();
-    let animal = animal_near(&terrain, None);
+    let animal = sturdy_animal_near(&terrain);
     let path = "/players/me/butcher";
 
     // The weapon in hand decides; with nothing in hand there is nothing to hit with.

@@ -88,6 +88,8 @@ struct Reply {
     portrait: Option<String>,
     /// Whether the character has a knowledge card to tell (`GET /story/npcs/{id}/about`).
     about: bool,
+    /// Whether the character holds found goods the player can buy (`GET /npcs/{id}/found`).
+    can_trade: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     music: Option<Music>,
     /// Visual duel / flourish from a dialogue effect (not persisted).
@@ -375,6 +377,7 @@ fn reply(
             .npcs
             .get(&npc.id)
             .is_some_and(|found| found.about.is_some()),
+        can_trade: false,
         music,
         flourish,
         player,
@@ -416,7 +419,7 @@ async fn start(
     stand_still(&state, &mut tx, npc).await?;
     tx.commit().await?;
     let player = players::profile(&state, player_id).await?;
-    Ok(Json(reply(
+    let mut answer = reply(
         &story,
         npc,
         seq,
@@ -424,7 +427,9 @@ async fn start(
         request_language(&request.lang),
         flourish,
         player,
-    )))
+    );
+    answer.can_trade = crate::loot::npc_has_goods(&state, &npc.id).await?;
+    Ok(Json(answer))
 }
 
 async fn choose(
@@ -519,7 +524,7 @@ async fn choose(
     };
     tx.commit().await?;
     let player = players::profile(&state, player_id).await?;
-    Ok(Json(reply(
+    let mut answer = reply(
         &story,
         npc,
         next_seq,
@@ -527,7 +532,11 @@ async fn choose(
         request_language(&request.lang),
         flourish,
         player,
-    )))
+    );
+    if answer.open {
+        answer.can_trade = crate::loot::npc_has_goods(&state, &npc.id).await?;
+    }
+    Ok(Json(answer))
 }
 
 /// Closes the conversation without choosing (the player walked away or pressed escape).

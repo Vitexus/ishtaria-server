@@ -24,9 +24,13 @@ const DEFAULT_COUNT: usize = 36;
 const SPACING_M: f64 = 120_000.0;
 const SHIPWRIGHT: &str = include_str!("../../etc/shipwright.yaml");
 const TRADER: &str = include_str!("../../etc/trader.yaml");
+const BLACKSMITH: &str = include_str!("../../etc/blacksmith.yaml");
 const SHEPHERD: &str = include_str!("../../etc/shepherd.yaml");
+const TRAVELER: &str = include_str!("../../etc/traveler.yaml");
 const KNOWLEDGE: &str = include_str!("../../etc/knowledge.yaml");
 const GATE_GUARD: &str = include_str!("../../etc/gate_guard.yaml");
+/// How many waypoints a wayfarer samples along an inter-town trail (within the Travel limit).
+const TRAVELER_WAYPOINTS: usize = 12;
 /// Directory with the files the server itself ships (override with `ISHTARIA_ASSETS_DIR`).
 const DEFAULT_ASSETS_DIR: &str = "/usr/share/ishtaria-server";
 /// Default music of every generated graveyard, below the assets directory.
@@ -475,6 +479,7 @@ fn to_props(
                     yaw: 0.0,
                     collision_radius_m: circle.radius,
                     biome: 4,
+                    ground_offset_m: 0.0,
                 });
             }
         }
@@ -594,6 +599,7 @@ fn build_structure(
             yaw,
             collision_radius_m: reach.max(1.0),
             biome: 4,
+            ground_offset_m: 0.0,
         });
     }
     Some((direction, reach))
@@ -768,6 +774,16 @@ fn lay_bridges(
 type LaidTrails = Option<(String, Vec<WorldProp>, Vec<crate::movement::BridgeDeck>)>;
 static TRAILS: std::sync::Mutex<LaidTrails> = std::sync::Mutex::new(None);
 
+/// An inter-town footpath used to spawn a wayfarer that walks it.
+struct TravelCorridor {
+    /// Town index at the start of the polyline (local origin).
+    from_index: usize,
+    /// Town index at the goal.
+    to_index: usize,
+    /// Local metres of the trail relative to the start town.
+    line: Vec<(f64, f64)>,
+}
+
 fn lay_trails(
     world_key: &str,
     towns: &[(usize, String, Placed, f64)],
@@ -776,7 +792,7 @@ fn lay_trails(
     sites: &HashMap<String, Placed>,
     ground: &dyn Ground,
     built: &mut Built,
-) {
+) -> Vec<TravelCorridor> {
     // (trail id, index of the town it leaves, goal, clearance around the goal in metres)
     let mut edges: Vec<(String, usize, [f64; 3], f64)> = Vec::new();
     let mut linked = std::collections::BTreeSet::new();
@@ -838,17 +854,44 @@ fn lay_trails(
             if *stored == key {
                 built.props.extend(props.iter().cloned());
                 built.bridges.extend(decks.iter().cloned());
-                return;
+                // Corridors are cheap to rebuild from the same edges when the stone cache hits.
             }
         }
     }
+    let cache_hit = TRAILS
+        .lock()
+        .ok()
+        .and_then(|cache| cache.as_ref().map(|(stored, _, _)| stored == &key))
+        .unwrap_or(false);
     let (first, first_bridge) = (built.props.len(), built.bridges.len());
+    let mut corridors = Vec::new();
     for (name, position, goal, goal_clearance) in edges {
         let (_, _, site, radius) = &towns[position];
         let to = super::trails::local_of(site.direction, goal);
         let Some(route) = super::trails::route(ground, site.direction, (0.0, 0.0), to) else {
             continue;
         };
+        // Inter-town edges are named `{id}:{other_id}` (both town anchors); those get a wayfarer.
+        if name.matches(':').count() == 1
+            && !name.contains("graveyard")
+            && !name.contains("harbour")
+            && !name.contains("fold")
+        {
+            if let Some((other_index, _)) =
+                towns.iter().enumerate().find(|(other, (_, id, _, _))| {
+                    *other != position && name.ends_with(&format!(":{id}"))
+                })
+            {
+                corridors.push(TravelCorridor {
+                    from_index: position,
+                    to_index: other_index,
+                    line: route.line.clone(),
+                });
+            }
+        }
+        if cache_hit {
+            continue;
+        }
         let Some(bridged) = lay_bridges(&name, site.direction, &route.spans, ground, built) else {
             continue;
         };
@@ -894,12 +937,60 @@ fn lay_trails(
             });
         }
     }
-    if let Ok(mut cache) = TRAILS.lock() {
-        *cache = Some((
-            key,
-            built.props[first..].to_vec(),
-            built.bridges[first_bridge..].to_vec(),
-        ));
+    if !cache_hit {
+        if let Ok(mut cache) = TRAILS.lock() {
+            *cache = Some((
+                key,
+                built.props[first..].to_vec(),
+                built.bridges[first_bridge..].to_vec(),
+            ));
+        }
+    }
+    corridors
+}
+
+/// Evenly spaced samples of a polyline for a traveler's patrol (at most `TRAVELER_WAYPOINTS`).
+fn travel_waypoints(line: &[(f64, f64)]) -> Vec<[f64; 2]> {
+    if line.len() < 2 {
+        return Vec::new();
+    }
+    let total: f64 = line
+        .windows(2)
+        .map(|pair| (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1))
+        .sum();
+    if total < 40.0 {
+        return vec![
+            [line[0].0, line[0].1],
+            [line[line.len() - 1].0, line[line.len() - 1].1],
+        ];
+    }
+    let count = TRAVELER_WAYPOINTS.min(line.len().max(2));
+    let mut points = Vec::with_capacity(count);
+    for i in 0..count {
+        let target = total * (i as f64) / ((count - 1) as f64);
+        let (mut walked, mut chosen) = (0.0, line[0]);
+        for pair in line.windows(2) {
+            let length = (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1);
+            if walked + length >= target || pair.as_ptr() == line[line.len() - 2..].as_ptr() {
+                let t = ((target - walked) / length.max(1e-9)).clamp(0.0, 1.0);
+                chosen = (
+                    pair[0].0 + (pair[1].0 - pair[0].0) * t,
+                    pair[0].1 + (pair[1].1 - pair[0].1) * t,
+                );
+                break;
+            }
+            walked += length;
+        }
+        points.push([chosen.0, chosen.1]);
+    }
+    points.dedup_by(|a, b| (a[0] - b[0]).hypot(a[1] - b[1]) < 1.0);
+    if points.len() < 2 {
+        vec![
+            [line[0].0, line[0].1],
+            [line[line.len() - 1].0, line[line.len() - 1].1],
+        ]
+    } else {
+        points
     }
 }
 
@@ -912,6 +1003,8 @@ pub fn finish(
     let mut built = Built::default();
     let mut harbours: Vec<(usize, Placed)> = Vec::new();
     let mut markets: Vec<(usize, Placed)> = Vec::new();
+    // Forges of villages and towns (not hamlets): a blacksmith who repairs worn gear.
+    let mut forges: Vec<(usize, Placed)> = Vec::new();
     // The folds of the towns with a pasture to drive the flock to, with the shepherd's walk to it.
     let mut folds: Vec<(usize, Placed, super::disk::Movement)> = Vec::new();
     // The settlements, for the trails between them and the places around them: (index, anchor id, site, radius).
@@ -948,6 +1041,18 @@ pub fn finish(
                         height_m: ground.height(stall).max(0.0),
                     },
                 ));
+                // Villages and towns keep a forge opposite the stall; hamlets are too small.
+                if matches!(size, Size::Village | Size::Town) {
+                    let forge = placement::offset(site.direction, -5.5, -1.2);
+                    forges.push((
+                        index,
+                        Placed {
+                            id: format!("forges:forge_{index:02}"),
+                            direction: forge,
+                            height_m: ground.height(forge).max(0.0),
+                        },
+                    ));
+                }
                 towns.push((index, anchor.id.clone(), site.clone(), size.radius_m()));
                 let sea = placement::sea_toward(ground, site.direction, placement::COAST_M);
                 let (pasture, shepherd) =
@@ -1024,7 +1129,7 @@ pub fn finish(
         }
     }
     let disks: Vec<&str> = story.disks.iter().map(|(_, _, sha)| sha.as_str()).collect();
-    lay_trails(
+    let corridors = lay_trails(
         &format!("{seed}:{}", disks.join(",")),
         &towns,
         &harbours,
@@ -1087,6 +1192,94 @@ pub fn finish(
         );
         story.add_disk(disk)?;
         story.check()?;
+    }
+    // Wayfarers on the roads between towns: one per inter-town trail that has a market at either end.
+    if !corridors.is_empty() && !markets.is_empty() {
+        let file: DialogueFile = serde_yaml::from_str(TRAVELER)?;
+        let mut disk = empty_disk(manifest("travelers", "Travelers"));
+        disk.dialogues.push(file.dialogue);
+        for (language, table) in file.strings {
+            disk.strings.entry(language).or_default().extend(table);
+        }
+        let market_towns: std::collections::HashSet<usize> =
+            markets.iter().map(|(index, _)| *index).collect();
+        for (number, corridor) in corridors.iter().enumerate() {
+            if !market_towns.contains(&towns[corridor.from_index].0)
+                && !market_towns.contains(&towns[corridor.to_index].0)
+            {
+                continue;
+            }
+            let waypoints = travel_waypoints(&corridor.line);
+            if waypoints.len() < 2 {
+                continue;
+            }
+            let (_, _, site, _) = &towns[corridor.from_index];
+            let local = format!("road_{number:02}");
+            disk.places.push(Place {
+                id: local.clone(),
+                kind: "landmark".to_owned(),
+                name_key: "traveler.road".to_owned(),
+                parent: None,
+                radius_m: Some(4.0),
+                spacing_m: None,
+                spawn: false,
+                terrain: None,
+                at: None,
+                locate: None,
+                geo: None,
+                music: None,
+                music_radius_m: None,
+                wildlife: None,
+                scenery: None,
+                structure: None,
+                requires: Requires::default(),
+            });
+            disk.npcs.push(Npc {
+                id: format!("traveler_{number:02}"),
+                name_key: "traveler.name".to_owned(),
+                place: local.clone(),
+                character: super::disk::Character {
+                    pack: "survivors".to_owned(),
+                    skin: "survivorFemaleA".to_owned(),
+                    model: None,
+                },
+                dialogue: "traveler".to_owned(),
+                bio_key: Some("traveler.bio".to_owned()),
+                about: None,
+                portrait: None,
+                tags: vec!["traveler".to_owned()],
+                size: None,
+                movement: Some(super::disk::Movement {
+                    kind: super::disk::MovementKind::Travel,
+                    radius_m: 25.0,
+                    speed_m_s: 1.4,
+                    pause_s: 12.0,
+                    waypoints,
+                    phase_s: 0.0,
+                }),
+            });
+            let mut placed = site.clone();
+            placed.id = format!("travelers:{local}");
+            sites.insert(placed.id.clone(), placed);
+        }
+        if !disk.npcs.is_empty() {
+            for language in ["en", "cs"] {
+                disk.strings.entry(language.to_owned()).or_default().insert(
+                    "traveler.road".to_owned(),
+                    if language == "cs" {
+                        "Stezka".to_owned()
+                    } else {
+                        "Trail".to_owned()
+                    },
+                );
+            }
+            disk.sha256 = format!(
+                "{:x}",
+                Sha256::digest(format!("travelers:{}", disk.npcs.len()).as_bytes())
+            );
+            story.add_disk(disk)?;
+            story.check()?;
+        }
     }
     if !folds.is_empty() {
         let file: DialogueFile = serde_yaml::from_str(SHEPHERD)?;
@@ -1194,6 +1387,60 @@ pub fn finish(
         disk.sha256 = format!(
             "{:x}",
             Sha256::digest(format!("harbours:{}", harbours.len()).as_bytes())
+        );
+        story.add_disk(disk)?;
+        story.check()?;
+    }
+    if !forges.is_empty() {
+        let file: DialogueFile = serde_yaml::from_str(BLACKSMITH)?;
+        let mut disk = empty_disk(manifest("forges", "Forges"));
+        disk.dialogues.push(file.dialogue);
+        for (language, table) in file.strings {
+            disk.strings.entry(language).or_default().extend(table);
+        }
+        for (index, site) in &forges {
+            let local = format!("forge_{index:02}");
+            disk.places.push(Place {
+                id: local.clone(),
+                kind: "landmark".to_owned(),
+                name_key: "forge.name".to_owned(),
+                parent: None,
+                radius_m: Some(8.0),
+                spacing_m: None,
+                spawn: false,
+                terrain: None,
+                at: None,
+                locate: None,
+                geo: None,
+                music: None,
+                music_radius_m: None,
+                wildlife: None,
+                scenery: None,
+                structure: None,
+                requires: Requires::default(),
+            });
+            disk.npcs.push(Npc {
+                id: format!("blacksmith_{index:02}"),
+                name_key: "blacksmith.name".to_owned(),
+                place: local,
+                character: super::disk::Character {
+                    pack: "survivors".to_owned(),
+                    skin: "survivorMaleB".to_owned(),
+                    model: None,
+                },
+                dialogue: "blacksmith".to_owned(),
+                bio_key: Some("blacksmith.bio".to_owned()),
+                about: None,
+                portrait: None,
+                tags: vec!["shop".to_owned(), "shop:smith".to_owned()],
+                size: None,
+                movement: None,
+            });
+            sites.insert(site.id.clone(), site.clone());
+        }
+        disk.sha256 = format!(
+            "{:x}",
+            Sha256::digest(format!("forges:{}", forges.len()).as_bytes())
         );
         story.add_disk(disk)?;
         story.check()?;

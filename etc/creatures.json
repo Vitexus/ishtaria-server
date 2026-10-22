@@ -19,7 +19,9 @@
     "sword_2": 4,
     "talwar": 4,
     "trident": 4,
-    "claymore": 5
+    "claymore": 5,
+    "devils_axe": 6,
+    "devils_sword": 6
   },
   "animals": [
     {"model": "animal.pig", "hits": 7, "respawn_minutes": 30, "drops": [{"item": "raw_meat", "min": 3, "max": 5}, {"item": "bone", "min": 1, "max": 1}, {"item": "hide", "min": 1, "max": 2}]},

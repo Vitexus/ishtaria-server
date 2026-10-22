@@ -1,0 +1,9 @@
+# Allow the ishtaria service user to manage its own systemd unit (ishtaria-admin).
+# Exact argv match — keep in sync with ishtaria-admin's privileged systemctl/journalctl calls.
+ishtaria ALL=(root) NOPASSWD: /usr/bin/systemctl start ishtaria-server, /usr/bin/systemctl start ishtaria-server.service
+ishtaria ALL=(root) NOPASSWD: /usr/bin/systemctl stop ishtaria-server, /usr/bin/systemctl stop ishtaria-server.service
+ishtaria ALL=(root) NOPASSWD: /usr/bin/systemctl restart ishtaria-server, /usr/bin/systemctl restart ishtaria-server.service
+ishtaria ALL=(root) NOPASSWD: /usr/bin/systemctl try-restart ishtaria-server, /usr/bin/systemctl try-restart ishtaria-server.service
+ishtaria ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed ishtaria-server, /usr/bin/systemctl reset-failed ishtaria-server.service
+ishtaria ALL=(root) NOPASSWD: /usr/bin/systemctl status ishtaria-server, /usr/bin/systemctl status ishtaria-server.service
+ishtaria ALL=(root) NOPASSWD: /usr/bin/journalctl -u ishtaria-server -n 60 --no-pager -o cat, /usr/bin/journalctl -u ishtaria-server.service -n 60 --no-pager -o cat

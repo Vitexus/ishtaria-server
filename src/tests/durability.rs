@@ -39,7 +39,7 @@ async fn tools_wear_out_and_are_destroyed(pool: PgPool) {
     let axe = item(&profile, "axe").unwrap();
     assert_eq!(
         (axe["durability"].as_i64(), axe["max_durability"].as_i64()),
-        (Some(120), Some(120)),
+        (Some(100), Some(100)),
         "a new tool"
     );
     assert!(
@@ -48,9 +48,9 @@ async fn tools_wear_out_and_are_destroyed(pool: PgPool) {
     );
 
     let swing = response_json(harvest_request(&router, &token, &tree.id).await).await;
-    assert_eq!(swing["wear"]["durability"], 119);
+    assert_eq!(swing["wear"]["durability"], 99);
     assert_eq!(swing["wear"]["broken"], false);
-    assert_eq!(item(&swing["player"], "axe").unwrap()["durability"], 119);
+    assert_eq!(item(&swing["player"], "axe").unwrap()["durability"], 99);
 
     // The last bit of durability breaks the piece: the tool is gone and out of hand.
     sqlx::query("UPDATE player_inventory SET durability = 1 WHERE item_id = 'axe'")
@@ -81,7 +81,7 @@ async fn tools_wear_out_and_are_destroyed(pool: PgPool) {
     let spare = item(&broken["player"], "pickaxe").unwrap();
     assert_eq!(
         (spare["quantity"].as_str(), spare["durability"].as_i64()),
-        (Some("1"), Some(120))
+        (Some("1"), Some(100))
     );
     assert_eq!(
         broken["player"]["equipment"]["hand"], "pickaxe",
@@ -126,7 +126,7 @@ async fn a_shield_in_the_other_hand_blocks(pool: PgPool) {
 
     let first = response_json(block(&router, &token).await).await;
     assert_eq!(first["blocking_seconds"], 2);
-    assert_eq!(first["wear"]["durability"], 149);
+    assert_eq!(first["wear"]["durability"], 119);
     assert_eq!(first["player"]["equipment"]["blocking"], true);
     let renewed = response_json(block(&router, &token).await).await;
     assert!(
@@ -135,7 +135,7 @@ async fn a_shield_in_the_other_hand_blocks(pool: PgPool) {
     );
     assert_eq!(
         item(&renewed["player"], "shield_round").unwrap()["durability"],
-        149
+        119
     );
 
     // Once the block has ended, the next one wears the shield again.
@@ -145,7 +145,7 @@ async fn a_shield_in_the_other_hand_blocks(pool: PgPool) {
         .unwrap();
     assert_eq!(
         response_json(block(&router, &token).await).await["wear"]["durability"],
-        148
+        118
     );
 
     // A shield that wears out is destroyed and the block ends.

@@ -25,6 +25,14 @@
           "price": 40
         },
         {
+          "item": "axe_2",
+          "price": 110
+        },
+        {
+          "item": "axe_double",
+          "price": 150
+        },
+        {
           "item": "pickaxe",
           "price": 40
         },
@@ -33,16 +41,52 @@
           "price": 90
         },
         {
+          "item": "sword_2",
+          "price": 180
+        },
+        {
+          "item": "talwar",
+          "price": 220
+        },
+        {
+          "item": "claymore",
+          "price": 350
+        },
+        {
           "item": "dagger",
           "price": 60
+        },
+        {
+          "item": "dagger_2",
+          "price": 95
+        },
+        {
+          "item": "spear",
+          "price": 100
         },
         {
           "item": "shield_round",
           "price": 70
         },
         {
+          "item": "shield_heater",
+          "price": 140
+        },
+        {
+          "item": "shield_celtic_golden",
+          "price": 280
+        },
+        {
           "item": "armor_leather",
           "price": 120
+        },
+        {
+          "item": "armor_golden",
+          "price": 250
+        },
+        {
+          "item": "armor_metal",
+          "price": 400
         },
         {
           "item": "glove",
@@ -151,6 +195,11 @@
           "price": 4
         }
       ]
+    },
+    "smith": {
+      "sells": [],
+      "buys": [],
+      "repairs": true
     }
   }
 }

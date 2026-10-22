@@ -1,0 +1,24 @@
+# The blacksmith of every village and town: repairs worn weapons, armour and shields for gold.
+# Goods are empty; the client opens the shop panel on the repair list from shops.json (`smith`).
+dialogue:
+  id: blacksmith
+  status: reviewed
+  start: greet
+  nodes:
+    greet:
+      text_key: blacksmith.greet
+      choices:
+        - {text_key: blacksmith.leave}
+strings:
+  en:
+    blacksmith.greet: "Bring me your worn blades and battered armour. Iron and hammer, and a fair fee, will make them whole again."
+    blacksmith.leave: Maybe later.
+    blacksmith.name: Blacksmith
+    blacksmith.bio: Repairs worn weapons, armour and shields for gold in villages and towns.
+    forge.name: Forge
+  cs:
+    blacksmith.greet: "Přineste ošoupané čepele a potrhanou zbroj. Železo, kladivo a slušný poplatek je zase dají dohromady."
+    blacksmith.leave: Možná později.
+    blacksmith.name: Kovář
+    blacksmith.bio: Za zlato opravuje opotřebené zbraně, zbroj a štíty ve vesnicích a městech.
+    forge.name: Kovárna

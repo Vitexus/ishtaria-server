@@ -942,6 +942,26 @@ pub async fn npcs_near(
             }
         }
     }
+    // Wayfarers carrying a find divert along the road toward their merchant.
+    let errands = crate::loot::errands(state).await;
+    if !errands.is_empty() {
+        for npc in &mut listed {
+            let Some(merchant_id) = errands.get(&npc.id) else {
+                continue;
+            };
+            let Some(merchant) = world
+                .npcs
+                .iter()
+                .find(|candidate| candidate.id == *merchant_id)
+            else {
+                continue;
+            };
+            let dest = position_now(state, merchant).await;
+            let route = crate::loot::errand_wander(npc, &dest, now);
+            npc.position = super::walking::position_at(&route, npc.position, now);
+            npc.wander = Some(route);
+        }
+    }
     listed
 }
 

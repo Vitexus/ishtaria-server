@@ -33,6 +33,9 @@ struct Price {
 struct Shop {
     sells: Vec<Price>,
     buys: Vec<Price>,
+    /// Weapons, armour and shields worn below full durability can be restored for gold.
+    #[serde(default)]
+    repairs: bool,
 }
 
 #[derive(Deserialize)]
@@ -63,11 +66,22 @@ pub(super) fn configured_items() -> Vec<String> {
         .collect()
 }
 
+/// What a general merchant asks for `item`, when it is on a sell list.
+pub(super) fn sell_price(item: &str) -> Option<i64> {
+    shops()
+        .shops
+        .values()
+        .flat_map(|shop| &shop.sells)
+        .find(|price| price.item == item)
+        .map(|price| price.price)
+}
+
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
         .route("/shops/{npc_id}", get(goods))
         .route("/shops/{npc_id}/buy", post(buy))
         .route("/shops/{npc_id}/sell", post(sell))
+        .route("/shops/{npc_id}/repair", post(repair))
 }
 
 fn status(code: StatusCode, message: &'static str) -> Error {
@@ -79,6 +93,18 @@ struct Good {
     item_id: String,
     name: String,
     price: String,
+    /// Present for limited merchant stock (wayfarer finds); absent for the infinite catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quantity: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RepairOffer {
+    item_id: String,
+    name: String,
+    durability: i32,
+    max_durability: i32,
+    price: String,
 }
 
 #[derive(Serialize)]
@@ -87,6 +113,9 @@ struct Goods {
     /// What the merchant sells (the character pays) and buys (the character is paid).
     sells: Vec<Good>,
     buys: Vec<Good>,
+    /// Worn weapons, armour and shields a blacksmith will restore, with the gold fee.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    repairs: Vec<RepairOffer>,
     /// The most gold this merchant pays one character a day, and how much is already used.
     daily_limit: String,
     sold_today: String,
@@ -149,25 +178,105 @@ async fn goods(
             .await?
             .into_iter()
             .collect();
-    let describe = |prices: &[Price]| {
+    let describe = |prices: &[Price]| -> Vec<Good> {
         prices
             .iter()
             .map(|price| Good {
                 item_id: price.item.clone(),
                 name: names.get(&price.item).cloned().unwrap_or_default(),
                 price: price.price.to_string(),
+                quantity: None,
             })
             .collect()
     };
+    let mut sells = describe(&shop.sells);
+    let stock: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT m.item_id, t.name, m.quantity FROM merchant_stock m
+         JOIN item_types t ON t.id = m.item_id
+         WHERE m.world_id = $1 AND m.npc_id = $2 ORDER BY m.item_id",
+    )
+    .bind(state.world_id)
+    .bind(&npc_id)
+    .fetch_all(&state.pool)
+    .await?;
+    for (item_id, name, quantity) in stock {
+        let price = crate::loot::merchant_found_price(&item_id).to_string();
+        let qty = Some(quantity.to_string());
+        if let Some(existing) = sells.iter_mut().find(|good| good.item_id == item_id) {
+            // While a wayfarer's find sits here, the shelf asks the markup and the stock is limited.
+            existing.price = price;
+            existing.quantity = qty;
+        } else {
+            sells.push(Good {
+                item_id,
+                name,
+                price,
+                quantity: qty,
+            });
+        }
+    }
+    let repairs = if shop.repairs {
+        sqlx::query_as::<_, (String, String, Option<i32>, i32)>(
+            "SELECT item_id, name, durability, max_durability FROM player_inventory JOIN item_types ON item_types.id = item_id WHERE player_id = $1 AND category IN ('weapon', 'armor', 'shield') AND max_durability IS NOT NULL AND coalesce(durability, max_durability) > 0 AND coalesce(durability, max_durability) < max_durability ORDER BY item_id",
+        )
+        .bind(player_id)
+        .fetch_all(&state.pool)
+        .await?
+        .into_iter()
+        .map(|(item_id, name, durability, max)| {
+            let current = durability.unwrap_or(max);
+            RepairOffer {
+                item_id,
+                name,
+                durability: current,
+                max_durability: max,
+                price: super::durability::repair_cost(max - current).to_string(),
+            }
+        })
+        .collect()
+    } else {
+        Vec::new()
+    };
     Ok(Json(Goods {
         npc_id,
-        sells: describe(&shop.sells),
+        sells,
         buys: describe(&shop.buys),
+        repairs,
         daily_limit: shops().daily_sell_limit_gold.to_string(),
         sold_today: sold_today(&state.pool, player_id, shop_id)
             .await?
             .to_string(),
     }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Repair {
+    item_id: String,
+}
+
+/// Restores one worn weapon, armour piece or shield at a blacksmith.
+async fn repair(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(npc_id): Path<String>,
+    Json(input): Json<Repair>,
+) -> Result<Json<players::Player>, Error> {
+    if input.item_id.is_empty() || input.item_id.len() > 64 {
+        return Err(status(StatusCode::BAD_REQUEST, "invalid quantity"));
+    }
+    let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
+    let (npc, _, shop) = merchant(&state, &npc_id).await?;
+    if !shop.repairs {
+        return Err(status(
+            StatusCode::NOT_FOUND,
+            "the merchant does not repair this",
+        ));
+    }
+    let mut transaction = begin(&state, player_id, &npc).await?;
+    super::durability::repair(&mut transaction, player_id, &input.item_id).await?;
+    transaction.commit().await?;
+    Ok(Json(players::profile(&state, player_id).await?))
 }
 
 #[derive(Deserialize)]
@@ -246,6 +355,68 @@ async fn buy(
     let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
     let quantity = quantity(&deal)?;
     let (npc, _, shop) = merchant(&state, &npc_id).await?;
+    let mut transaction = begin(&state, player_id, &npc).await?;
+    // Wayfarer finds override the shelf at a markup until that limited stock is gone.
+    let stock: Option<(i64, Option<i32>)> = sqlx::query_as(
+        "SELECT quantity, durability FROM merchant_stock
+         WHERE world_id = $1 AND npc_id = $2 AND item_id = $3 FOR UPDATE",
+    )
+    .bind(state.world_id)
+    .bind(&npc_id)
+    .bind(&deal.item_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if let Some((owned, durability)) = stock {
+        if owned < quantity {
+            return Err(status(StatusCode::CONFLICT, "not enough stock"));
+        }
+        let cost = crate::loot::merchant_found_price(&deal.item_id)
+            .checked_mul(quantity)
+            .ok_or_else(|| status(StatusCode::BAD_REQUEST, "invalid quantity"))?;
+        take(&mut transaction, player_id, "gold", cost).await?;
+        if owned == quantity {
+            sqlx::query(
+                "DELETE FROM merchant_stock WHERE world_id = $1 AND npc_id = $2 AND item_id = $3",
+            )
+            .bind(state.world_id)
+            .bind(&npc_id)
+            .bind(&deal.item_id)
+            .execute(&mut *transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE merchant_stock SET quantity = quantity - $4,
+                   durability = CASE WHEN $5::bool THEN NULL ELSE durability END
+                 WHERE world_id = $1 AND npc_id = $2 AND item_id = $3",
+            )
+            .bind(state.world_id)
+            .bind(&npc_id)
+            .bind(&deal.item_id)
+            .bind(quantity)
+            .bind(durability.is_some() && quantity == 1)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        add_items(
+            &mut transaction,
+            player_id,
+            &[(deal.item_id.clone(), quantity)],
+        )
+        .await?;
+        if let Some(left) = durability.filter(|_| quantity == 1) {
+            sqlx::query(
+                "UPDATE player_inventory SET durability = coalesce(durability, $3)
+                 WHERE player_id = $1 AND item_id = $2",
+            )
+            .bind(player_id)
+            .bind(&deal.item_id)
+            .bind(left)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        return Ok(Json(players::profile(&state, player_id).await?));
+    }
     let price = shop
         .sells
         .iter()
@@ -255,7 +426,6 @@ async fn buy(
         .price
         .checked_mul(quantity)
         .ok_or_else(|| status(StatusCode::BAD_REQUEST, "invalid quantity"))?;
-    let mut transaction = begin(&state, player_id, &npc).await?;
     take(&mut transaction, player_id, "gold", cost).await?;
     add_items(
         &mut transaction,
@@ -325,5 +495,28 @@ mod tests {
                 assert!(sold.price > 0, "{}", sold.item);
             }
         }
+    }
+
+    #[test]
+    fn better_gear_costs_more() {
+        let sells = &shops().shops["general"].sells;
+        let price = |id: &str| {
+            sells
+                .iter()
+                .find(|good| good.item == id)
+                .unwrap_or_else(|| panic!("shop does not sell {id}"))
+                .price
+        };
+        assert!(price("sword") < price("sword_2") && price("sword_2") < price("claymore"));
+        assert!(price("dagger") < price("dagger_2"));
+        assert!(price("axe") < price("axe_2") && price("axe_2") < price("axe_double"));
+        assert!(
+            price("armor_leather") < price("armor_golden")
+                && price("armor_golden") < price("armor_metal")
+        );
+        assert!(
+            price("shield_round") < price("shield_heater")
+                && price("shield_heater") < price("shield_celtic_golden")
+        );
     }
 }

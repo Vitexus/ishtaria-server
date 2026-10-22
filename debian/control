@@ -9,9 +9,12 @@ Rules-Requires-Root: no
 
 Package: ishtaria-server
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, adduser
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, sudo
 Recommends: ishtaria-content, ishtaria-worldgen, postgresql
 Description: authoritative world server of the Ishtaria virtual planet
  Ishtaria is a federated, persistent virtual planet of Earth-like size.
  This package runs one world: its simulation, persistence and the
  federation endpoint used to link worlds through portals.
+ .
+ Ships /etc/sudoers.d/ishtaria-server so the ishtaria user can start/stop/
+ restart the systemd unit without a password (used by ishtaria-admin).

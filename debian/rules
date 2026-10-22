@@ -13,10 +13,13 @@ override_dh_auto_test:
 override_dh_auto_install:
 	install -D -m 0755 target/release/ishtaria-server debian/ishtaria-server/usr/bin/ishtaria-server
 	install -D -m 0755 debian/ishtaria-server-init debian/ishtaria-server/usr/bin/ishtaria-server-init
+	install -D -m 0644 debian/ishtaria-server.1 debian/ishtaria-server/usr/share/man/man1/ishtaria-server.1
 	install -D -m 0644 assets/music/graveyard_midnightcem.ogg debian/ishtaria-server/usr/share/ishtaria-server/music/graveyard_midnightcem.ogg
 	install -d debian/ishtaria-server/usr/share/ishtaria-server/knowledge
 	install -m 0644 assets/knowledge/*.jpg debian/ishtaria-server/usr/share/ishtaria-server/knowledge/
 	install -D -m 0640 etc/server.toml debian/ishtaria-server/etc/ishtaria/server.toml
+	# Mode 0440 required by sudo; lets the ishtaria user run ishtaria-admin Start service.
+	install -D -m 0440 debian/sudoers.d/ishtaria-server debian/ishtaria-server/etc/sudoers.d/ishtaria-server
 
 override_dh_auto_clean:
 	rm -rf target debian/cargo-home
