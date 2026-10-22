@@ -55,9 +55,14 @@ which continues at normal speed. It does not change OS/PostgreSQL time,
 session expiry, survival, player positions or stored world data. Restarting
 without the option restores UTC-based solar time.
 
-This is a low-order solar approximation using UTC as UT1, not an N-body
-simulation or precision observatory ephemeris. Lunar motion, eclipses, weather
-and seasonal terrain/temperature simulation are not implemented.
+The same document announces a low-order lunar position (Meeus-style mean
+longitude, anomaly and latitude), angular radius from distance, and illuminated
+fraction from solar-lunar elongation, in the same planet-fixed frame. Clients
+validate the moon against the shared clock the same way they validate the sun.
+
+This is a low-order solar and lunar approximation using UTC as UT1, not an
+N-body simulation or precision observatory ephemeris. Eclipses, weather and
+seasonal terrain/temperature simulation are not implemented.
 
 ### Surface Environment
 

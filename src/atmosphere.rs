@@ -1,5 +1,5 @@
-//! The sun above the planet: where it stands at a moment, announced to clients with the world
-//! (`GET /world`) so that every client draws the same day and night.
+//! The sun and moon above the planet: where they stand at a moment, announced to clients with
+//! the world (`GET /world`) so that every client draws the same day and night.
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,11 @@ pub struct Solar {
     pub direction: [f64; 3],
     pub sidereal_day_seconds: f64,
     pub angular_radius_degrees: f64,
+    /// Unit vector toward the moon's centre in the same planet-fixed frame as `direction`.
+    pub moon_direction: [f64; 3],
+    pub moon_angular_radius_degrees: f64,
+    /// Lit fraction of the lunar disc as seen from the planet (0 = new, 1 = full).
+    pub moon_illumination: f64,
 }
 
 impl Solar {
@@ -37,18 +42,61 @@ impl Solar {
             .to_radians();
         let local_longitude = right_ascension - sidereal;
         let distance_au = 1.00014 - 0.01671 * anomaly.cos() - 0.00014 * (2.0 * anomaly).cos();
+        let direction = [
+            declination.cos() * local_longitude.cos(),
+            declination.sin(),
+            -declination.cos() * local_longitude.sin(),
+        ];
+        let (moon_direction, moon_angular_radius_degrees) = moon_at(days, obliquity, sidereal);
+        let elongation = (direction[0] * moon_direction[0]
+            + direction[1] * moon_direction[1]
+            + direction[2] * moon_direction[2])
+            .clamp(-1.0, 1.0)
+            .acos();
+        // New moon when the moon stands with the sun (elongation 0); full when opposite.
+        let moon_illumination = (1.0 - elongation.cos()) * 0.5;
         Self {
             version: 1,
             unix_seconds,
-            direction: [
-                declination.cos() * local_longitude.cos(),
-                declination.sin(),
-                -declination.cos() * local_longitude.sin(),
-            ],
+            direction,
             sidereal_day_seconds: 86164.0905,
             angular_radius_degrees: 0.2666 / distance_au,
+            moon_direction,
+            moon_angular_radius_degrees,
+            moon_illumination,
         }
     }
+}
+
+/// Low-order lunar position in the same planet-fixed frame as the sun (Meeus-style mean
+/// elements with the leading longitude and latitude terms). Distance is kilometres from
+/// the planet's centre; the angular radius uses the Moon's mean volumetric radius.
+fn moon_at(days: f64, obliquity: f64, sidereal: f64) -> ([f64; 3], f64) {
+    let mean_longitude = (218.316 + 13.176396 * days).rem_euclid(360.0).to_radians();
+    let mean_anomaly = (134.963 + 13.064993 * days).rem_euclid(360.0).to_radians();
+    let argument = (93.272 + 13.229350 * days).rem_euclid(360.0).to_radians();
+    let lambda = mean_longitude + 6.289_f64.to_radians() * mean_anomaly.sin();
+    let beta = 5.128_f64.to_radians() * argument.sin();
+    let distance_km = 385001.0 - 20905.0 * mean_anomaly.cos();
+    let cos_beta = beta.cos();
+    let sin_beta = beta.sin();
+    let cos_lambda = lambda.cos();
+    let sin_lambda = lambda.sin();
+    let cos_eps = obliquity.cos();
+    let sin_eps = obliquity.sin();
+    let x = cos_beta * cos_lambda;
+    let y = cos_beta * sin_lambda * cos_eps - sin_beta * sin_eps;
+    let z = cos_beta * sin_lambda * sin_eps + sin_beta * cos_eps;
+    let right_ascension = y.atan2(x);
+    let declination = z.atan2((x * x + y * y).sqrt());
+    let local_longitude = right_ascension - sidereal;
+    let direction = [
+        declination.cos() * local_longitude.cos(),
+        declination.sin(),
+        -declination.cos() * local_longitude.sin(),
+    ];
+    let angular_radius_degrees = (1737.4 / distance_km).asin().to_degrees();
+    (direction, angular_radius_degrees)
 }
 
 /// The sun's centre sits this many degrees below the horizon when the day begins and ends:
@@ -118,7 +166,32 @@ mod solar_tests {
                     < 1e-12
             );
             assert!((0.26..0.28).contains(&solar.angular_radius_degrees));
+            assert!(
+                (solar
+                    .moon_direction
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f64>()
+                    - 1.0)
+                    .abs()
+                    < 1e-12
+            );
+            assert!((0.24..0.30).contains(&solar.moon_angular_radius_degrees));
+            assert!((0.0..=1.0).contains(&solar.moon_illumination));
         }
+    }
+
+    #[test]
+    fn the_moon_moves_and_phases() {
+        let first = Solar::at(946728000.0);
+        let later = Solar::at(946728000.0 + 7.0 * 86400.0);
+        let fortnight = Solar::at(946728000.0 + 14.0 * 86400.0);
+        let moved = first.moon_direction[0] * later.moon_direction[0]
+            + first.moon_direction[1] * later.moon_direction[1]
+            + first.moon_direction[2] * later.moon_direction[2];
+        assert!(moved < 0.5, "moon should travel far in a week, cos={moved}");
+        // Over half a synodic month the illuminated fraction must change substantially.
+        assert!((first.moon_illumination - fortnight.moon_illumination).abs() > 0.3);
     }
 
     #[test]

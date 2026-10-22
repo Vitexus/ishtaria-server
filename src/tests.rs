@@ -1802,6 +1802,25 @@ async fn imported_map_survives_restart_and_http_roundtrip(pool: PgPool) {
         (solar["angular_radius_degrees"].as_f64().unwrap() - expected.angular_radius_degrees).abs()
             < 1e-12
     );
+    for (component, expected_component) in solar["moon_direction"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(expected.moon_direction)
+    {
+        assert!((component.as_f64().unwrap() - expected_component).abs() < 1e-12);
+    }
+    assert!(
+        (solar["moon_angular_radius_degrees"]
+            .as_f64()
+            .unwrap()
+            - expected.moon_angular_radius_degrees)
+            .abs()
+            < 1e-12
+    );
+    assert!(
+        (solar["moon_illumination"].as_f64().unwrap() - expected.moon_illumination).abs() < 1e-12
+    );
     let shifted_router = router.clone().layer(axum::Extension(43200_i64));
     let before_shifted = atmosphere::Solar::now().unix_seconds + 43200.0;
     let shifted = response_json(request(&shifted_router, "/world").await).await;
