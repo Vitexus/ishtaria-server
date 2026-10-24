@@ -46,11 +46,27 @@ pub(super) const OBJECT_GRID: i32 = 600_000;
 const FAUNA_GRID: i32 = 60_000;
 const FAUNA_PRESENCE: f64 = 0.35;
 /// How far from a patch's water (metres) a wildlife overlay still gathers game and lush growth.
-const WATERSIDE_REACH_M: f64 = 60.0;
+const WATERSIDE_REACH_M: f64 = 80.0;
+/// Land animals this close to patch water join the drink/graze cycle instead of milling in place.
+const WATERHOLE_REACH_M: f64 = 130.0;
+/// How far from the bank a waterhole animal grazes among the grass (metres).
+const WATERHOLE_GRAZE_MIN_M: f64 = 28.0;
+const WATERHOLE_GRAZE_MAX_M: f64 = 78.0;
+/// Walking speed of a waterhole drink cycle, metres per second.
+const WATERHOLE_SPEED_M_S: f64 = 1.4;
+/// How long it stands at the bank drinking, and how long it grazes before the next walk to water.
+const WATERHOLE_DRINK_MS: i64 = 22_000;
+const WATERHOLE_GRAZE_MS: i64 = 95_000;
+/// Waypoints of a waterhole route: one every step, covering about a minute and a half.
+const WATERHOLE_STEP_MS: i64 = 6_000;
+const WATERHOLE_POINTS: i64 = 16;
 /// Steepest bank (m/m, rise over run) that still grows lush plants; steeper is stony and bare.
 const LUSH_BANK_SLOPE: f64 = 0.18;
 /// Fish are only placed where the water is at least this deep.
 const MIN_WATER_DEPTH_M: f64 = 3.0;
+/// Reeds, papyrus and cattails stand on the bed only in this depth band (metres).
+const REED_MIN_DEPTH_M: f64 = 0.15;
+const REED_MAX_DEPTH_M: f64 = WADE_DEPTH_M;
 /// Animals are sent to clients only within this distance of the requested point.
 const FAUNA_RADIUS_M: f64 = 280.0;
 /// Land animals walk between waypoints that depend only on their id and the time: a slot lasts
@@ -342,28 +358,53 @@ fn patch_water(direction: [f64; 3]) -> Option<f64> {
 /// Distance in metres (to within a few metres) from a dry point to the nearest water of a patch,
 /// searched up to `reach_m`; `None` when the point is wet, outside every patch or far from water.
 fn patch_water_distance(direction: [f64; 3], reach_m: f64) -> Option<f64> {
+    nearest_water_bank(direction, reach_m).map(|(distance, _)| distance)
+}
+
+/// Dry bank beside the nearest patch water within `reach_m`: metres to the water and the unit
+/// direction of a standable spot a couple of metres inland. `None` when wet, outside every patch
+/// or farther than `reach_m` from water.
+fn nearest_water_bank(direction: [f64; 3], reach_m: f64) -> Option<(f64, [f64; 3])> {
     let stored = PATCHES.read().ok()?;
-    stored.1.iter().find_map(|patch| {
+    let mut best: Option<(f64, [f64; 3])> = None;
+    for patch in &stored.1 {
         patch.water.as_ref()?;
         let (x, z, _) = patch.project(direction)?;
         if patch.surface(x, z).is_some() {
-            return None;
+            continue;
         }
         let mut radius = 4.0;
         while radius <= reach_m {
-            for step in 0..12 {
-                let angle = f64::from(step) * std::f64::consts::TAU / 12.0;
-                if patch
-                    .surface(x + radius * angle.cos(), z + radius * angle.sin())
-                    .is_some()
-                {
-                    return Some(radius);
+            for step in 0..16 {
+                let angle = f64::from(step) * std::f64::consts::TAU / 16.0;
+                let wx = x + radius * angle.cos();
+                let wz = z + radius * angle.sin();
+                if patch.surface(wx, wz).is_none() {
+                    continue;
                 }
+                // Stand on the dry side of the bank, a couple of metres inland from the water pixel.
+                let bank_r = (radius - 2.5).max(1.0);
+                let bx = x + bank_r * angle.cos();
+                let bz = z + bank_r * angle.sin();
+                if patch.surface(bx, bz).is_some() {
+                    continue;
+                }
+                let (bank, _) = crate::scenery::world_from_local(
+                    patch.anchor,
+                    bx + patch.offset_m[0],
+                    bz + patch.offset_m[1],
+                    |_| 0.0,
+                    RADIUS,
+                );
+                if best.map_or(true, |(distance, _)| radius < distance) {
+                    best = Some((radius, bank));
+                }
+                break;
             }
             radius += 4.0;
         }
-        None
-    })
+    }
+    best
 }
 
 /// Whether a dry cell is close enough to patch water, the sea or standing water for a
@@ -977,10 +1018,15 @@ struct ObjectKind {
     #[serde(default = "default_altitude")]
     altitude_m: f64,
     /// Vertical placement offset in metres (negative sinks the model into the
-    /// ground). 0 A.D. trees have roots at Y=0 but their trunks start higher,
-    /// so they appear to float without this.
+    /// ground). 0 A.D. trees often have a few root-tip vertices at Y=0 while the
+    /// solid root flare sits one to two metres higher, so a shallow offset still
+    /// leaves them floating (figs, willows, olives).
     #[serde(default)]
     ground_offset_m: f64,
+    /// Reeds, papyrus and cattails: stand in shallow water or on its bank (within
+    /// [`WATERSIDE_REACH_M`]), never on dry steppe far from water.
+    #[serde(default)]
+    shallow_water: bool,
 }
 
 fn default_depth() -> f64 {
@@ -1714,6 +1760,68 @@ impl WalkingTerrain {
         })
     }
 
+    /// Reeds and similar plants standing on the bed of shallow water.
+    fn place_reed_bed(
+        &self,
+        id: String,
+        point: [f64; 3],
+        mut biome: u8,
+        sample: &dyn Fn(usize) -> f64,
+    ) -> Option<WorldObject> {
+        let overlay = wildlife_at(point);
+        let bed = self.height(point);
+        // Dense stand in a water-hole; thinner without an overlay.
+        let presence = if overlay.is_some() { 0.55 } else { 0.22 };
+        if sample(2) > presence {
+            return None;
+        }
+        let overlay_weights = overlay.as_ref().map(|zone| zone.flora.as_slice());
+        let from_overlay = overlay_weights.is_some_and(|w| !w.is_empty());
+        let candidates: Vec<_> = if let Some(weights) = overlay_weights.filter(|w| !w.is_empty()) {
+            weights
+                .iter()
+                .filter_map(|(model, weight, _)| {
+                    self.catalog
+                        .iter()
+                        .find(|kind| kind.id == *model && !kind.fauna && kind.shallow_water)
+                        .map(|kind| (kind, *weight))
+                })
+                .collect()
+        } else {
+            self.catalog
+                .iter()
+                // An empty biome list marks an overlay-only model; only a datadisk overlay grows it.
+                .filter(|kind| !kind.fauna && kind.shallow_water && kind.biomes.contains(&biome))
+                .map(|kind| (kind, kind.weight))
+                .collect()
+        };
+        let total: f64 = candidates.iter().map(|(_, weight)| *weight).sum();
+        if total <= 0.0 {
+            return None;
+        }
+        let mut choice = sample(3) * total;
+        let (kind, _) = candidates.into_iter().find(|(_, weight)| {
+            choice -= *weight;
+            choice <= 0.0
+        })?;
+        if from_overlay && !kind.biomes.is_empty() && !kind.biomes.contains(&biome) {
+            biome = kind.biomes[0];
+        } else if biome > 2 {
+            biome = 2;
+        }
+        let scale_m = varied_scale(kind.scale_m, sample(5));
+        Some(WorldObject {
+            id,
+            model: kind.id.clone(),
+            position: point.map(|value| value * (RADIUS + bed)),
+            scale_m,
+            yaw: sample(4) * std::f64::consts::TAU,
+            collision_radius_m: 0.0,
+            biome,
+            ground_offset_m: kind.ground_offset_m,
+        })
+    }
+
     /// Chooses the object of one grid cell from the hash of its identifier.
     fn place(
         &self,
@@ -1757,6 +1865,11 @@ impl WalkingTerrain {
         if patch_cleared(point) {
             return None;
         }
+        // Reeds grow from the bed of shallow water (and on the bank — handled below).
+        let water_depth = self.water_depth(point);
+        if !fauna && (REED_MIN_DEPTH_M..=REED_MAX_DEPTH_M).contains(&water_depth) {
+            return self.place_reed_bed(id, point, biome, &sample);
+        }
         let height = self.surface(point)?;
         let overlay = wildlife_at(point);
         let reference = if point[1].abs() < 0.9 {
@@ -1784,7 +1897,8 @@ impl WalkingTerrain {
             if let Some(distance) = patch_water_distance(point, WATERSIDE_REACH_M) {
                 let nearness = 1.0 - distance / WATERSIDE_REACH_M;
                 if fauna {
-                    density *= 1.0 + 2.0 * nearness;
+                    // A water-hole draws a herd: up to five times as many animals on the bank.
+                    density *= 1.0 + 4.0 * nearness;
                 } else if slope <= LUSH_BANK_SLOPE {
                     density *= 1.0 + 2.5 * nearness;
                 }
@@ -1810,7 +1924,9 @@ impl WalkingTerrain {
             }
         });
         let from_overlay = overlay_weights.is_some_and(|w| !w.is_empty());
-        let waterside_here = from_overlay && near_waterside(self, point);
+        // Probing the surroundings is costly, so only cells that ask about water pay for it.
+        let near_water = std::cell::LazyCell::new(|| near_waterside(self, point));
+        let waterside_here = from_overlay && *near_water;
         let candidates: Vec<_> = if let Some(weights) = overlay_weights.filter(|w| !w.is_empty()) {
             weights
                 .iter()
@@ -1824,6 +1940,7 @@ impl WalkingTerrain {
                             kind.id == *model
                                 && kind.fauna == fauna
                                 && !kind.aquatic
+                                && (!kind.shallow_water || *near_water)
                                 && slope <= kind.max_slope
                         })
                         .map(|kind| (kind, *weight))
@@ -1835,6 +1952,7 @@ impl WalkingTerrain {
                 .filter(|kind| {
                     kind.fauna == fauna
                         && !kind.aquatic
+                        && (!kind.shallow_water || *near_water)
                         && kind.biomes.contains(&biome)
                         && slope <= kind.max_slope
                 })
@@ -2131,9 +2249,146 @@ impl WalkingTerrain {
         altitude * (0.85 + sample * 0.3)
     }
 
+    /// Graze spot of a waterhole animal: among the grass away from the bank, seeded from its id.
+    fn waterhole_graze(&self, animal: &WorldObject, drink: [f64; 3]) -> [f64; 3] {
+        let hash = Sha256::digest(format!("{}:waterhole-graze", animal.id).as_bytes());
+        let word = |index: usize| {
+            f64::from(u32::from_le_bytes(
+                hash[index * 4..index * 4 + 4].try_into().unwrap(),
+            )) / 4_294_967_296.0
+        };
+        let distance =
+            WATERHOLE_GRAZE_MIN_M + word(1) * (WATERHOLE_GRAZE_MAX_M - WATERHOLE_GRAZE_MIN_M);
+        // Prefer dry land farther from water; a single random bearing often points into the pond.
+        let base = word(0) * std::f64::consts::TAU;
+        for step in 0..8 {
+            let angle = base + f64::from(step) * std::f64::consts::TAU / 8.0;
+            let (candidate, _) = crate::scenery::world_from_local(
+                drink,
+                angle.cos() * distance,
+                angle.sin() * distance,
+                |_| 0.0,
+                RADIUS,
+            );
+            if self.surface(candidate).is_none() || patch_water(candidate).is_some() {
+                continue;
+            }
+            if nearest_water_bank(candidate, WATERHOLE_REACH_M)
+                .is_some_and(|(metres, _)| metres >= WATERHOLE_GRAZE_MIN_M * 0.6)
+            {
+                return candidate;
+            }
+        }
+        // Last resort: walk inland from the bank along the outward radial of the seed place.
+        let anchor = unit(animal.position);
+        let (outward, _) = crate::scenery::world_from_local(
+            drink,
+            // A short push away from the drink spot toward the seed, then beyond it.
+            0.0,
+            WATERHOLE_GRAZE_MIN_M + 10.0,
+            |_| 0.0,
+            RADIUS,
+        );
+        if self.surface(outward).is_some() && patch_water(outward).is_none() {
+            outward
+        } else if self.surface(anchor).is_some() {
+            anchor
+        } else {
+            drink
+        }
+    }
+
+    /// Drink → graze → return cycle for land animals near a patch water-hole. No state: only id and time.
+    /// `None` for birds, farm animals, or anyone farther than [`WATERHOLE_REACH_M`] from patch water.
+    fn waterhole_route(&self, animal: &WorldObject, now_ms: i64) -> Option<Vec<[f64; 4]>> {
+        if animal.id.contains(":farm:") {
+            return None;
+        }
+        if self
+            .fauna_kind(&animal.model)
+            .is_some_and(|kind| kind.flying || kind.aquatic)
+        {
+            return None;
+        }
+        let anchor = unit(animal.position);
+        // Only animals of a wildlife overlay join the cycle: open-world fauna keep the short wander.
+        wildlife_at(anchor)?;
+        let (_, drink) = nearest_water_bank(anchor, WATERHOLE_REACH_M)?;
+        let graze = self.waterhole_graze(animal, drink);
+        let walk_m = length(std::array::from_fn(|axis| {
+            (drink[axis] - graze[axis]) * RADIUS
+        }))
+        .clamp(8.0, WATERHOLE_GRAZE_MAX_M + 10.0);
+        let walk_ms = ((walk_m / WATERHOLE_SPEED_M_S) * 1000.0).round() as i64;
+        let cycle_ms = WATERHOLE_GRAZE_MS + walk_ms + WATERHOLE_DRINK_MS + walk_ms;
+        let hash = Sha256::digest(format!("{}:waterhole-phase", animal.id).as_bytes());
+        let phase_ms = (f64::from(u32::from_le_bytes(hash[0..4].try_into().unwrap()))
+            / 4_294_967_296.0
+            * cycle_ms as f64) as i64;
+        let sway_phase = f64::from(u32::from_le_bytes(hash[4..8].try_into().unwrap()))
+            / 4_294_967_296.0
+            * std::f64::consts::TAU;
+        let along = |time_ms: i64| -> [f64; 3] {
+            let into = (time_ms + phase_ms).rem_euclid(cycle_ms);
+            let centre = if into < WATERHOLE_GRAZE_MS {
+                graze
+            } else if into < WATERHOLE_GRAZE_MS + walk_ms {
+                let fraction = (into - WATERHOLE_GRAZE_MS) as f64 / walk_ms as f64;
+                unit(std::array::from_fn(|axis| {
+                    graze[axis] + (drink[axis] - graze[axis]) * fraction
+                }))
+            } else if into < WATERHOLE_GRAZE_MS + walk_ms + WATERHOLE_DRINK_MS {
+                drink
+            } else {
+                let fraction =
+                    (into - WATERHOLE_GRAZE_MS - walk_ms - WATERHOLE_DRINK_MS) as f64 / walk_ms as f64;
+                unit(std::array::from_fn(|axis| {
+                    drink[axis] + (graze[axis] - drink[axis]) * fraction
+                }))
+            };
+            // Mill a little while grazing or drinking so the herd is not frozen in place.
+            let standing = into < WATERHOLE_GRAZE_MS
+                || (into >= WATERHOLE_GRAZE_MS + walk_ms
+                    && into < WATERHOLE_GRAZE_MS + walk_ms + WATERHOLE_DRINK_MS);
+            if standing {
+                let sway = time_ms as f64 / 1000.0 / 29.0 + sway_phase;
+                let (milled, _) = crate::scenery::world_from_local(
+                    centre,
+                    sway.sin() * 2.2,
+                    sway.cos() * 2.2,
+                    |_| 0.0,
+                    RADIUS,
+                );
+                if self.surface(milled).is_some() && patch_water(milled).is_none() {
+                    milled
+                } else {
+                    centre
+                }
+            } else {
+                centre
+            }
+        };
+        let first = now_ms.div_euclid(WATERHOLE_STEP_MS) * WATERHOLE_STEP_MS;
+        let round = |value: f64| (value * 100.0).round() / 100.0;
+        Some(
+            (0..=WATERHOLE_POINTS)
+                .map(|step| {
+                    let time = first + step * WATERHOLE_STEP_MS;
+                    let direction = along(time);
+                    let metres = RADIUS + self.height(direction).max(0.0);
+                    let point = direction.map(|value| round(value * metres));
+                    [time as f64, point[0], point[1], point[2]]
+                })
+                .collect(),
+        )
+    }
+
     /// Waypoints of a land animal (or bird) from the start of the current slot onwards.
     pub(super) fn animal_route(&self, animal: &WorldObject, now_ms: i64) -> Vec<[f64; 4]> {
         if let Some(route) = self.flock_route(animal, now_ms) {
+            return route;
+        }
+        if let Some(route) = self.waterhole_route(animal, now_ms) {
             return route;
         }
         let flying = self
@@ -2193,7 +2448,8 @@ impl WalkingTerrain {
         now_ms: i64,
     ) -> Vec<(WorldObject, Option<Vec<[f64; 4]>>)> {
         let mut wild = self.fauna(point);
-        wild.truncate(64);
+        // A water-hole herd is denser than the open steppe; keep room for the drinkers.
+        wild.truncate(96);
         let mut farm = self.farm_animals(point);
         farm.truncate(FARM_ANIMALS_MAX);
         wild.into_iter()
@@ -2598,7 +2854,7 @@ pub(super) async fn walk(
     let terrain = terrain(&state).await?;
     let _ = super::story::world::world(&state).await; // loads the walls and fences that block steps
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(players::Error::Obituary(Box::new(notice)));
@@ -2702,7 +2958,7 @@ pub(super) async fn walk(
             return Err(players::Error::Obituary(Box::new(notice)));
         }
         if moving
-            && !super::survival::activity(&mut transaction, player_id, seconds, intent.run).await?
+            && !super::survival::activity(&state, &mut transaction, player_id, seconds, intent.run).await?
         {
             let notice = super::survival::obituary(&mut transaction, player_id).await?;
             transaction.commit().await?;
@@ -3859,7 +4115,8 @@ mod tests {
         for kind in terrain
             .catalog
             .iter()
-            .filter(|kind| kind.id.starts_with("nature."))
+            // Reeds grow only in or beside water: see `reeds_grow_in_shallow_river_water`.
+            .filter(|kind| kind.id.starts_with("nature.") && !kind.shallow_water)
         {
             assert!(
                 selected.contains(&kind.id),
@@ -3867,6 +4124,32 @@ mod tests {
                 kind.id
             );
         }
+    }
+
+    #[test]
+    fn reeds_grow_in_shallow_river_water() {
+        set_patches(String::new(), Vec::new());
+        set_wildlife(String::new(), Vec::new());
+        let mut terrain = terrain_with(144, 2, object_catalog().unwrap());
+        let ground = terrain.height([0.0, 0.0, 1.0]).round() as i32;
+        terrain.environment.elevation_m.fill(ground - 1);
+        terrain.environment.water_m.fill(ground + 1);
+        let mut models = HashSet::new();
+        for row in 300_000..300_150 {
+            for column in 300_000..300_150 {
+                if let Some(object) = terrain.object_cell(0, column, row) {
+                    models.insert(object.model);
+                }
+            }
+        }
+        assert!(
+            models.contains("nature.reed_clump"),
+            "river reeds in shallow water: {models:?}"
+        );
+        assert!(
+            models.iter().all(|model| !model.starts_with("zeroad.")),
+            "overlay-only reeds must not grow without an overlay: {models:?}"
+        );
     }
 
     fn terrain_with(pixel: u8, biome: u8, catalog: Vec<ObjectKind>) -> WalkingTerrain {
@@ -4096,6 +4379,91 @@ mod tests {
     }
 
     #[test]
+    fn waterhole_animals_drink_then_graze_away_from_the_bank() {
+        set_patches(String::new(), Vec::new());
+        set_wildlife(String::new(), Vec::new());
+        let terrain = terrain_with(144, 4, catalog_with_fauna());
+        let anchor = [1.0, 0.0, 0.0];
+        let anchor_height = terrain.height(anchor);
+        // Pond in the middle of the patch; dry banks around it for drinking and grazing.
+        let mut water = vec![i16::MIN; 32 * 32];
+        for row in 12..20 {
+            for column in 12..20 {
+                water[row * 32 + column] = 10;
+            }
+        }
+        set_patches(
+            "42:waterhole".into(),
+            vec![TerrainPatch {
+                anchor,
+                anchor_height_m: anchor_height,
+                extent_m: [400.0, 400.0],
+                offset_m: [0.0, 0.0],
+                feather_m: 40.0,
+                width: 32,
+                height: 32,
+                elevation: vec![0; 32 * 32],
+                water: Some(water),
+                clear: None,
+            }],
+        );
+        let (axis_x, _) = crate::scenery::client_axes(anchor);
+        // Stand on the dry steppe outside the pond (pond is ~100 m across in the patch centre).
+        let bank = unit(std::array::from_fn(|axis| {
+            anchor[axis] * RADIUS + axis_x[axis] * 90.0
+        }));
+        set_wildlife(
+            "42:waterhole".into(),
+            vec![WildlifeZone {
+                direction: anchor,
+                radius_m: 500.0,
+                density: 8.0,
+                flora: Vec::new(),
+                fauna: vec![("animal.gazelle".into(), 10.0, false)],
+            }],
+        );
+        let animal = WorldObject {
+            id: format!("{}:fauna:0:0:0", terrain.environment.seed),
+            model: "animal.gazelle".into(),
+            position: bank.map(|value| value * (RADIUS + terrain.height(bank))),
+            scale_m: 2.09,
+            yaw: 0.0,
+            collision_radius_m: 0.0,
+            biome: 4,
+            ground_offset_m: 0.0,
+        };
+        assert!(
+            terrain.waterhole_route(&animal, 1_700_000_000_000).is_some(),
+            "bank animal joins the drink cycle"
+        );
+        let now = 1_700_000_000_000_i64;
+        let mut saw_near_water = false;
+        let mut saw_far_graze = false;
+        let mut previous = route_position(&terrain.animal_route(&animal, now), now);
+        for time in (now..now + 400_000).step_by(4_000) {
+            let route = terrain.animal_route(&animal, time);
+            assert_eq!(route, terrain.animal_route(&animal, time), "deterministic");
+            let position = route_position(&route, time);
+            let direction = unit(position);
+            let step = distance(previous, position);
+            assert!(step < 12.0, "jump {step} at {time}");
+            previous = position;
+            if let Some((metres, _)) = nearest_water_bank(direction, WATERHOLE_REACH_M) {
+                if metres < 12.0 {
+                    saw_near_water = true;
+                }
+                if metres > WATERHOLE_GRAZE_MIN_M * 0.7 {
+                    saw_far_graze = true;
+                }
+            }
+        }
+        assert!(saw_near_water, "animal visits the bank to drink");
+        assert!(saw_far_graze, "animal grazes away from the water");
+        set_wildlife(String::new(), Vec::new());
+        set_patches(String::new(), Vec::new());
+    }
+
+    #[test]
     fn waterside_overlay_fauna_only_stand_near_water() {
         set_patches(String::new(), Vec::new());
         let mut terrain = terrain_with(144, 4, catalog_with_fauna());
@@ -4131,6 +4499,51 @@ mod tests {
         assert!(
             far.iter().all(|animal| animal.model != "zeroad.crocodile"),
             "waterside crocodile must not stand on dry steppe: {far:?}"
+        );
+    }
+
+    #[test]
+    fn reeds_do_not_stand_on_dry_steppe_far_from_water() {
+        set_patches(String::new(), Vec::new());
+        let mut terrain = terrain_with(144, 4, catalog_with_fauna());
+        let ground = terrain.height([0.0, -1.0, 0.0]).floor() as i32;
+        terrain.environment.elevation_m.fill(ground);
+        terrain.environment.water_m.fill(ground);
+        let place = [0.0, -1.0, 0.0];
+        let origin = place.map(|value| value * (RADIUS + terrain.height(place)));
+        set_wildlife(
+            "test".into(),
+            vec![WildlifeZone {
+                direction: unit(origin),
+                radius_m: 3000.0,
+                density: 8.0,
+                flora: vec![
+                    ("nature.tree_palmTall".into(), 1.0, false),
+                    ("zeroad.cattails".into(), 50.0, true),
+                    ("nature.reed_clump".into(), 50.0, false),
+                ],
+                fauna: Vec::new(),
+            }],
+        );
+        let mut far = Vec::new();
+        for step in 0..100 {
+            let angle = f64::from(step) * 0.00002;
+            let near = unit([angle.sin(), -angle.cos(), 0.0]);
+            far.extend(
+                terrain.objects(near.map(|value| value * (RADIUS + terrain.height(near))), 2),
+            );
+        }
+        set_wildlife(String::new(), Vec::new());
+        assert!(
+            far.iter()
+                .any(|object| object.model == "nature.tree_palmTall"),
+            "shade trees still grow on dry ground"
+        );
+        assert!(
+            far.iter().all(|object| {
+                object.model != "zeroad.cattails" && object.model != "nature.reed_clump"
+            }),
+            "reeds must not stand far from water: {far:?}"
         );
     }
 

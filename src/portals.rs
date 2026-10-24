@@ -261,7 +261,7 @@ async fn build(
     }
     let terrain = super::movement::terrain(&state).await?;
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -329,7 +329,7 @@ async fn contribute(
             )
         })?;
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -398,6 +398,7 @@ async fn contribute(
     if complete {
         super::experience::grant(&mut transaction, player_id, super::experience::BUILD_END_XP)
             .await?;
+        super::achievements::unlock(&mut transaction, player_id, "portal_builder").await?;
         sqlx::query("UPDATE portal_pacts SET state = 'built', local_built_at = now(), updated_at = now() WHERE id = $1::uuid")
             .bind(&portal.id)
             .execute(&mut *transaction)

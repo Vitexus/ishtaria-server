@@ -70,14 +70,14 @@ struct Row {
 /// Locks two characters in a fixed order (so two exchanges never wait for each other) and
 /// returns whether both live.
 async fn lock_pair(
+    state: &crate::AppState,
     transaction: &mut Transaction<'_, Postgres>,
-    world_id: i64,
     first: i64,
     second: i64,
 ) -> Result<bool, Error> {
     let mut alive = true;
     for id in [first.min(second), first.max(second)] {
-        alive &= super::survival::lock_alive(transaction, world_id, id).await?;
+        alive &= super::survival::lock_alive(state, transaction, id).await?;
     }
     Ok(alive)
 }
@@ -174,7 +174,7 @@ async fn open(
             "you cannot trade with yourself",
         ));
     }
-    if !lock_pair(&mut transaction, state.world_id, player_id, partner).await? {
+    if !lock_pair(&state, &mut transaction, player_id, partner).await? {
         return Err(status(StatusCode::NOT_FOUND, "player not found"));
     }
     if !close_enough(&mut transaction, player_id, partner).await? {
@@ -287,7 +287,7 @@ async fn offer(
         return Err(status(StatusCode::BAD_REQUEST, "invalid offer"));
     }
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -336,11 +336,11 @@ struct Accepted {
 
 /// Swaps what is on the table, once both have accepted. Everything is checked again first.
 async fn swap(
+    state: &crate::AppState,
     transaction: &mut Transaction<'_, Postgres>,
-    world_id: i64,
     trade: &Row,
 ) -> Result<(), Error> {
-    if !lock_pair(transaction, world_id, trade.initiator_id, trade.partner_id).await? {
+    if !lock_pair(state, transaction, trade.initiator_id, trade.partner_id).await? {
         return Err(status(StatusCode::CONFLICT, "a trader is gone"));
     }
     if !close_enough(transaction, trade.initiator_id, trade.partner_id).await? {
@@ -373,6 +373,9 @@ async fn swap(
         .bind(trade.id)
         .execute(&mut **transaction)
         .await?;
+    for player_id in [trade.initiator_id, trade.partner_id] {
+        super::achievements::unlock(transaction, player_id, "first_trade").await?;
+    }
     Ok(())
 }
 
@@ -391,9 +394,9 @@ async fn accept(
     .fetch_optional(&mut *transaction)
     .await?;
     if let Some((first, second)) = pair {
-        lock_pair(&mut transaction, state.world_id, first, second).await?;
+        lock_pair(&state, &mut transaction, first, second).await?;
     }
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -423,7 +426,7 @@ async fn accept(
         }));
     }
     let trade_id = trade.id;
-    match swap(&mut transaction, state.world_id, &trade).await {
+    match swap(&state, &mut transaction, &trade).await {
         Ok(()) => {
             transaction.commit().await?;
             Ok(Json(Accepted {

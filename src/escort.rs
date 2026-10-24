@@ -375,8 +375,13 @@ pub(super) async fn tick(state: &AppState) -> Result<(), Error> {
             // Soft-fail: restart the active story quest at its checkpoint (Uruk for the
             // hunter–Šamḫat road). Checkpoint clears the escort row.
             let mut tx = state.pool.begin().await?;
-            let _ = crate::story::checkpoint::restart_active_quest(state, &mut tx, row.player_id)
-                .await?;
+            let _ = crate::story::checkpoint::restart_active_quest(
+                state,
+                &mut tx,
+                row.player_id,
+                None,
+            )
+            .await?;
             tx.commit().await?;
             notify(
                 state,

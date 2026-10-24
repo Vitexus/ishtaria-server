@@ -7,6 +7,19 @@
   "counter_cooldown_seconds": 3.0,
   "engage_range_m": 8.0,
   "strike_range_m": 4.5,
+  "chase_range_m": 120.0,
+  "chase_speed_m_s": 4.0,
   "apology_gold": 50,
-  "defeat_health": 0
+  "defeat_health": 0,
+  "npcs": {
+    "enkidu": {
+      "max_health": 500,
+      "strike_damage": 3,
+      "counter_damage": 55,
+      "counter_chance": 1.0,
+      "counter_cooldown_seconds": 1.5,
+      "chase_speed_m_s": 6.0,
+      "chase_range_m": 200.0
+    }
+  }
 }

@@ -178,6 +178,7 @@ async fn settle_animal(
         .map(|drop| (drop.item.clone(), rng.gen_range(drop.min..=drop.max)))
         .collect();
     let items = add_items(transaction, player_id, &drops).await?;
+    super::achievements::unlock(transaction, player_id, "first_hunt").await?;
     let until: i64 = sqlx::query_scalar("UPDATE world_object_state SET hits = 0, last_hit_at = now(), depleted_until = now() + make_interval(mins => $3) WHERE world_id = $1 AND object_id = $2 RETURNING extract(epoch FROM depleted_until)::bigint")
         .bind(world_id).bind(object_id).bind(kind.respawn_minutes as i32)
         .fetch_one(&mut **transaction).await?;
@@ -302,7 +303,7 @@ async fn butcher(
         .ok_or_else(|| status(StatusCode::BAD_REQUEST, "animal cannot be butchered"))?;
 
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -403,7 +404,7 @@ async fn milk(
         return Err(status(StatusCode::BAD_REQUEST, "animal gives no milk"));
     }
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));

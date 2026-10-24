@@ -635,7 +635,9 @@ pub struct StageFile {
     pub fail_restart: Option<FailRestart>,
 }
 
-/// Prologue lines for the client's tablet UI when a quest first appears.
+/// Prologue for the client's clay-tablet UI when a quest first appears.
+/// `paraphrase_key` is spoken by the narrator and shown as subtitles;
+/// `akkadian_key` (Latin) is carved as Unicode cuneiform on the tablet.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct QuestExcerpt {
@@ -708,6 +710,29 @@ pub fn media_type(path: &str) -> Option<&'static str> {
         "pgm" => Some("image/x-portable-graymap"),
         _ => None,
     }
+}
+
+/// Models that `etc/placeables.json` draws from this disk (`disk:<id>:media/models/…`).
+/// Without them in the disk's media map the client places an invisible thing.
+fn placeable_models_for(disk_id: &str) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct Thing {
+        model: String,
+    }
+    #[derive(Deserialize)]
+    struct Placeables {
+        things: BTreeMap<String, Thing>,
+    }
+    let Ok(config) = serde_json::from_str::<Placeables>(include_str!("../../etc/placeables.json"))
+    else {
+        return Vec::new();
+    };
+    let prefix = format!("disk:{disk_id}:");
+    config
+        .things
+        .into_values()
+        .filter_map(|thing| thing.model.strip_prefix(&prefix).map(str::to_owned))
+        .collect()
 }
 
 /// Parses the header of an equirectangular world raster (a binary P5 PGM of
@@ -989,7 +1014,10 @@ impl Disk {
             );
             strings.insert(language.clone(), table);
         }
-        // Only files that an NPC or a track names are shipped; they are part of the hash.
+        // Only files that an NPC, a track or a server placeable on this disk names are shipped;
+        // they are part of the hash. Placeables (etc/placeables.json `disk:<id>:…`) are otherwise
+        // invisible: the client fetches them through /story/media and a missing file is never drawn.
+        let placeable_media = placeable_models_for(&manifest.id);
         let mut wanted: Vec<&str> = npcs.iter().filter_map(|n| n.portrait.as_deref()).collect();
         wanted.extend(npcs.iter().filter_map(|n| n.character.model.as_deref()));
         for structure in places.iter().filter_map(|place| place.structure.as_ref()) {
@@ -1005,6 +1033,7 @@ impl Disk {
         wanted.extend(knowledge.iter().map(|card| card.image.as_str()));
         wanted.extend(manifest.cover.as_deref());
         wanted.extend(manifest.player_model.as_deref());
+        wanted.extend(placeable_media.iter().map(String::as_str));
         let world_files: Vec<&str> = manifest
             .world
             .iter()
@@ -1018,12 +1047,17 @@ impl Disk {
             .flatten()
             .collect();
         wanted.extend(world_files.iter().copied());
-        // Spoken lines: a file `media/voice/<language>/<text key>.ogg` for a key a dialogue node shows.
-        let spoken: std::collections::BTreeSet<&str> = dialogues
+        // Spoken lines: dialogue node text, and quest tablet intros (narrator paraphrase).
+        let mut spoken: std::collections::BTreeSet<&str> = dialogues
             .iter()
             .flat_map(|d| d.nodes.values())
             .filter_map(|n| n.text_key.as_deref())
             .collect();
+        for quest in &quests {
+            if let Some(excerpt) = &quest.excerpt {
+                spoken.insert(excerpt.paraphrase_key.as_str());
+            }
+        }
         let mut voices = BTreeMap::new();
         let mut voice_paths = Vec::new();
         for language in &manifest.languages {
@@ -2015,4 +2049,20 @@ pub fn order(disks: Vec<Disk>) -> Result<Vec<Disk>> {
         .into_iter()
         .map(|id| by_id.remove(&id).expect("listed above"))
         .collect())
+}
+
+#[cfg(test)]
+mod placeable_media_tests {
+    use super::placeable_models_for;
+
+    #[test]
+    fn gilgamesh_placeables_ship_the_snare_model() {
+        let models = placeable_models_for("gilgamesh");
+        assert!(
+            models
+                .iter()
+                .any(|path| path == "media/models/snare_trap.glb"),
+            "snare must be in the disk media map or the client draws nothing: {models:?}"
+        );
+    }
 }

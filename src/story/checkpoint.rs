@@ -93,10 +93,14 @@ pub async fn teleport_to_place(
 
 /// Resets the active quest to its checkpoint and restores the player. Returns true when
 /// a restart was applied (caller must not create a memorial).
+///
+/// `death_cause` is set when zero health triggered the restart (`creature`, `fall`, …) so the
+/// client can show a funeral notice before the quest toast; escort soft-fails pass `None`.
 pub async fn restart_active_quest(
     state: &AppState,
     tx: &mut Transaction<'_, Postgres>,
     player_id: i64,
+    death_cause: Option<&str>,
 ) -> Result<bool, Error> {
     let Some(world) = world::world(state).await? else {
         return Ok(false);
@@ -119,23 +123,35 @@ pub async fn restart_active_quest(
     if let Some(place) = &restart.place {
         teleport_to_place(tx, &world, player_id, place).await?;
     }
-    sqlx::query("UPDATE players SET health = 100, stamina = 100.0 WHERE id = $1")
-        .bind(player_id)
-        .execute(&mut **tx)
-        .await?;
+    // Full reserves: thirst/exhaustion/hunger soft-restart must not kill the character again.
+    sqlx::query(
+        "UPDATE players SET health = 100, health_fraction = 0, stamina = 100.0, stamina_fraction = 0,
+         water = 100.0, water_fraction = 0, food = 100, last_ate_at = now(), activity_seconds = 0,
+         survival_updated_at = clock_timestamp() WHERE id = $1",
+    )
+    .bind(player_id)
+    .execute(&mut **tx)
+    .await?;
     // Soft-reset escort companion if one is active.
     sqlx::query("DELETE FROM player_escorts WHERE player_id = $1")
         .bind(player_id)
         .execute(&mut **tx)
         .await?;
+    let body = match death_cause {
+        Some(cause) => format!(
+            r#"{{"quest":"{}","stage":"{}","cause":"{}"}}"#,
+            restart.quest_id, restart.stage, cause
+        ),
+        None => format!(
+            r#"{{"quest":"{}","stage":"{}"}}"#,
+            restart.quest_id, restart.stage
+        ),
+    };
     sqlx::query(
         "INSERT INTO player_events (recipient_id, kind, subject, body) VALUES ($1, 'story', 'quest_restart', $2)",
     )
     .bind(player_id)
-    .bind(format!(
-        r#"{{"quest":"{}","stage":"{}"}}"#,
-        restart.quest_id, restart.stage
-    ))
+    .bind(body)
     .execute(&mut **tx)
     .await?;
     Ok(true)
@@ -188,5 +204,19 @@ mod tests {
         let restart = resolve(&story, "d:q", "road").unwrap();
         assert_eq!(restart.stage, "start");
         assert_eq!(restart.place.as_deref(), Some("d:temple"));
+    }
+
+    #[test]
+    fn quest_restart_body_names_a_death_cause() {
+        let with_cause = format!(
+            r#"{{"quest":"{}","stage":"{}","cause":"{}"}}"#,
+            "gilgamesh:hunter", "lay_snares", "creature"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&with_cause).unwrap();
+        assert_eq!(parsed["cause"], "creature");
+        assert_eq!(parsed["quest"], "gilgamesh:hunter");
+        let without = format!(r#"{{"quest":"{}","stage":"{}"}}"#, "gilgamesh:hunter", "start");
+        let plain: serde_json::Value = serde_json::from_str(&without).unwrap();
+        assert!(plain.get("cause").is_none());
     }
 }

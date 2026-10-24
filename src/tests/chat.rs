@@ -9,11 +9,15 @@ async fn post_json(router: &Router, path: &str, body: serde_json::Value, token: 
     player_request(router, "POST", path, &body.to_string(), token).await
 }
 
+/// The waiting events without achievements (a first friend earns one; tests/achievements.rs).
 async fn events(router: &Router, token: &str) -> Vec<serde_json::Value> {
     response_json(player_request(router, "GET", "/events?after=0", "", token).await).await["events"]
         .as_array()
         .unwrap()
-        .clone()
+        .iter()
+        .filter(|event| event["kind"] != "achievement")
+        .cloned()
+        .collect()
 }
 
 #[sqlx::test]

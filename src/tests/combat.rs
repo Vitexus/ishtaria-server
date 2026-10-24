@@ -11,7 +11,7 @@ async fn strike(
     for _ in 0..400 {
         let mut transaction = pool.begin().await.unwrap();
         assert!(
-            survival::lock_alive(&mut transaction, state.world_id, player_id)
+            survival::lock_alive(state, &mut transaction, player_id)
                 .await
                 .unwrap()
         );

@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{npc_combat, players, AppState};
 use axum::{
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -183,6 +183,7 @@ async fn apply_ops(
                     .bind(stage)
                     .execute(&mut **tx)
                     .await?;
+                crate::achievements::unlock(tx, player_id, "first_quest").await?;
             }
             Op::Flourish(_) => {}
             Op::Playable(playable) => {
@@ -559,6 +560,24 @@ async fn leave(State(state): State<AppState>, headers: HeaderMap) -> Result<Stat
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct QuestsQuery {
+    /// Language of the client's UI (two lowercase letters): only selects the narrator line.
+    /// It is never stored.
+    #[serde(default)]
+    lang: Option<String>,
+}
+
+#[derive(Serialize)]
+struct QuestExcerptView {
+    paraphrase_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    akkadian_key: Option<String>,
+    /// Spoken paraphrase for the tablet intro, when a recording exists for `lang`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voice: Option<String>,
+}
+
 #[derive(Serialize)]
 struct QuestEntry {
     quest: String,
@@ -568,7 +587,11 @@ struct QuestEntry {
     #[serde(rename = "final")]
     final_stage: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    excerpt: Option<disk::QuestExcerpt>,
+    excerpt: Option<QuestExcerptView>,
+}
+
+fn ui_lang(lang: Option<&str>) -> Option<&str> {
+    lang.filter(|value| value.len() == 2 && value.chars().all(|c| c.is_ascii_lowercase()))
 }
 
 /// Moves quests on whose current stage asks the player to reach a place, when they have.
@@ -664,10 +687,12 @@ async fn about(
 async fn quests(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<QuestsQuery>,
 ) -> Result<Json<Vec<QuestEntry>>, Error> {
     let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
     let story = story_of(&state).await?;
     advance_reach(&state, &story, player_id).await?;
+    let lang = ui_lang(query.lang.as_deref());
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT quest_id, stage FROM player_quests WHERE player_id = $1 ORDER BY updated_at DESC",
     )
@@ -679,11 +704,27 @@ async fn quests(
             .filter_map(|(quest, stage)| {
                 let definition = story.story.quests.get(&quest)?;
                 let found = definition.stages.get(&stage)?;
+                // Tablet prologue only at the opening stage (reconnect mid-quest must not re-open it).
+                let excerpt = if stage == definition.start_stage {
+                    definition.excerpt.as_ref().map(|excerpt| QuestExcerptView {
+                        paraphrase_key: excerpt.paraphrase_key.clone(),
+                        akkadian_key: excerpt.akkadian_key.clone(),
+                        voice: lang.and_then(|l| {
+                            story
+                                .story
+                                .voices
+                                .get(&(l.to_owned(), excerpt.paraphrase_key.clone()))
+                                .map(|file| world::media_url(file))
+                        }),
+                    })
+                } else {
+                    None
+                };
                 Some(QuestEntry {
                     title_key: definition.title_key.clone(),
                     text_key: found.text_key.clone(),
                     final_stage: found.final_stage,
-                    excerpt: definition.excerpt.clone(),
+                    excerpt,
                     quest,
                     stage,
                 })
@@ -706,11 +747,11 @@ pub(super) struct Marker {
     pub(super) next: bool,
 }
 
-/// The item that lets the player see the markers (given by Faust).
+/// The item that reveals markers for quests not yet begun (Faust / Endland intro).
 const GUIDE_ITEM: &str = "aetherglass";
 
-/// Markers of the player's active quests. Empty until the player holds the aetherglass,
-/// and it never names a place that no quest of the player points to.
+/// Markers of the player's quests. Active quest guides always show (the Gilgamesh hunter
+/// never meets Faust). Markers for quests not yet started need the aetherglass.
 async fn markers(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -724,15 +765,16 @@ async fn markers(
     .bind(GUIDE_ITEM)
     .fetch_optional(&state.pool)
     .await?;
-    if holds.is_none() {
-        return Ok(Json(Vec::new()));
-    }
     let rows: Vec<(String, String)> =
         sqlx::query_as("SELECT quest_id, stage FROM player_quests WHERE player_id = $1")
             .bind(player_id)
             .fetch_all(&state.pool)
             .await?;
-    Ok(Json(markers_of(&story.story, &story.sites, &rows)))
+    let mut found = markers_of(&story.story, &story.sites, &rows);
+    if holds.is_none() {
+        found.retain(|marker| !marker.next);
+    }
+    Ok(Json(found))
 }
 
 /// The places the quests point to, given the player's `(quest, stage)` rows.

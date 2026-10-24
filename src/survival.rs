@@ -57,7 +57,11 @@ async fn save_reserves(
     Ok(())
 }
 
-async fn rest(transaction: &mut Transaction<'_, Postgres>, id: i64) -> Result<bool, Error> {
+async fn rest(
+    state: &AppState,
+    transaction: &mut Transaction<'_, Postgres>,
+    id: i64,
+) -> Result<bool, Error> {
     let mut value = reserves(transaction, id).await?;
     let sitting: bool =
         sqlx::query_scalar("SELECT sitting_object_id IS NOT NULL FROM players WHERE id = $1")
@@ -86,17 +90,14 @@ async fn rest(transaction: &mut Transaction<'_, Postgres>, id: i64) -> Result<bo
         .execute(&mut **transaction)
         .await?;
     if value.health < 1.0 {
-        die(
-            transaction,
-            id,
-            if value.water < 1.0 {
-                "dehydration"
-            } else {
-                "exhaustion"
-            },
-        )
-        .await?;
-        return Ok(false);
+        // Through lethal so an active story quest soft-restarts (e.g. talking while thirsty).
+        let cause = if value.water < 1.0 {
+            DamageCause::Dehydration
+        } else {
+            DamageCause::Exhaustion
+        };
+        let died = lethal(state, transaction, id, cause).await?;
+        return Ok(!died);
     }
     Ok(true)
 }
@@ -136,6 +137,7 @@ pub(super) async fn jump(
 }
 
 pub(super) async fn activity(
+    state: &AppState,
     transaction: &mut Transaction<'_, Postgres>,
     id: i64,
     seconds: f64,
@@ -160,8 +162,8 @@ pub(super) async fn activity(
         .execute(&mut **transaction)
         .await?;
     if value.health < 1.0 {
-        die(transaction, id, "exhaustion").await?;
-        return Ok(false);
+        let died = lethal(state, transaction, id, DamageCause::Exhaustion).await?;
+        return Ok(!died);
     }
     Ok(true)
 }
@@ -337,14 +339,14 @@ pub(super) async fn inventory(
 }
 
 async fn lock(
+    state: &AppState,
     transaction: &mut Transaction<'_, Postgres>,
-    world_id: i64,
     id: i64,
 ) -> Result<LockedPlayer, Error> {
     let mut player: LockedPlayer = sqlx::query_as("SELECT id, died_at IS NULL AS alive, last_ate_at <= now() - interval '7 days' AS starving FROM players WHERE world_id = $1 AND id = $2 FOR UPDATE")
-        .bind(world_id).bind(id).fetch_one(&mut **transaction).await?;
+        .bind(state.world_id).bind(id).fetch_one(&mut **transaction).await?;
     if player.alive && !player.starving {
-        player.alive = rest(transaction, id).await?;
+        player.alive = rest(state, transaction, id).await?;
     }
     Ok(player)
 }
@@ -379,13 +381,14 @@ async fn die(
 }
 
 pub(super) async fn lock_alive(
+    state: &AppState,
     transaction: &mut Transaction<'_, Postgres>,
-    world_id: i64,
     id: i64,
 ) -> Result<bool, Error> {
-    let player = lock(transaction, world_id, id).await?;
+    let player = lock(state, transaction, id).await?;
     if player.alive && player.starving {
-        die(transaction, id, "starvation").await?;
+        let died = lethal(state, transaction, id, DamageCause::Starvation).await?;
+        return Ok(!died);
     }
     Ok(player.alive && !player.starving)
 }
@@ -419,6 +422,9 @@ pub(super) enum DamageCause {
     HostilePlayer,
     Creature,
     Drowning,
+    Dehydration,
+    Exhaustion,
+    Starvation,
 }
 
 impl DamageCause {
@@ -430,6 +436,9 @@ impl DamageCause {
             DamageCause::HostilePlayer => "hostile_player",
             DamageCause::Creature => "creature",
             DamageCause::Drowning => "drowning",
+            DamageCause::Dehydration => "dehydration",
+            DamageCause::Exhaustion => "exhaustion",
+            DamageCause::Starvation => "starvation",
         }
     }
 }
@@ -482,10 +491,28 @@ async fn lethal(
             .await?;
         return Ok(false);
     }
-    if crate::story::checkpoint::restart_active_quest(state, transaction, id).await? {
+    // A hostile story NPC that kills the player leaves a memorial; quest soft-restart
+    // does not apply (Enkidu pursuit, lasting hostility).
+    let npc_kill = matches!(cause, DamageCause::HostilePlayer);
+    if !npc_kill
+        && crate::story::checkpoint::restart_active_quest(
+            state,
+            transaction,
+            id,
+            Some(cause.name()),
+        )
+        .await?
+    {
         return Ok(false);
     }
     die(transaction, id, cause.name()).await?;
+    if npc_kill {
+        // Hostility was toward this life; the memorial world must not keep a chase.
+        sqlx::query("DELETE FROM player_npc_combat WHERE player_id = $1")
+            .bind(id)
+            .execute(&mut **transaction)
+            .await?;
+    }
     Ok(true)
 }
 
@@ -500,10 +527,10 @@ pub(super) async fn apply_damage(
         return Err(Error::Status(StatusCode::BAD_REQUEST, "invalid damage"));
     }
     let mut transaction = state.pool.begin().await?;
-    let player = lock(&mut transaction, state.world_id, id).await?;
+    let player = lock(state, &mut transaction, id).await?;
     if player.alive {
         if player.starving {
-            die(&mut transaction, id, "starvation").await?;
+            lethal(state, &mut transaction, id, DamageCause::Starvation).await?;
         } else {
             hurt(state, &mut transaction, id, damage, cause).await?;
         }
@@ -514,9 +541,9 @@ pub(super) async fn apply_damage(
 
 pub(super) async fn settle(state: &AppState, id: i64) -> Result<(), Error> {
     let mut transaction = state.pool.begin().await?;
-    let player = lock(&mut transaction, state.world_id, id).await?;
+    let player = lock(state, &mut transaction, id).await?;
     if player.alive && player.starving {
-        die(&mut transaction, player.id, "starvation").await?;
+        lethal(state, &mut transaction, player.id, DamageCause::Starvation).await?;
     }
     transaction.commit().await?;
     Ok(())
@@ -546,14 +573,17 @@ async fn eat(
     let id = players::player_id(&state, &players::token_hash(&headers)?).await?;
     settle(&state, id).await?;
     let mut transaction = state.pool.begin().await?;
-    let player = lock(&mut transaction, state.world_id, id).await?;
+    let player = lock(&state, &mut transaction, id).await?;
     if !player.alive {
         return Err(Error::Status(StatusCode::GONE, "player is dead"));
     }
     if player.starving {
-        die(&mut transaction, id, "starvation").await?;
-        transaction.commit().await?;
-        return Err(Error::Status(StatusCode::GONE, "player is dead"));
+        let died = lethal(&state, &mut transaction, id, DamageCause::Starvation).await?;
+        if died {
+            transaction.commit().await?;
+            return Err(Error::Status(StatusCode::GONE, "player is dead"));
+        }
+        // Soft-restart restored appetite; continue eating on this transaction.
     }
     let food: Option<(i64, i32, i32)> = sqlx::query_as("SELECT quantity, calories, water FROM player_inventory JOIN item_types ON item_types.id = item_id WHERE player_id = $1 AND item_id = $2 AND calories > 0")
         .bind(id).bind(&input.item_id).fetch_optional(&mut *transaction).await?;
@@ -613,7 +643,7 @@ async fn drink(
     settle(&state, id).await?;
     let terrain = super::movement::terrain(&state).await?;
     let mut transaction = state.pool.begin().await?;
-    let player = lock(&mut transaction, state.world_id, id).await?;
+    let player = lock(&state, &mut transaction, id).await?;
     if !player.alive {
         return Err(Error::Status(StatusCode::GONE, "player is dead"));
     }
@@ -678,7 +708,7 @@ async fn grave(
     let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
     settle(&state, player_id).await?;
     let mut transaction = state.pool.begin().await?;
-    let player = lock(&mut transaction, state.world_id, player_id).await?;
+    let player = lock(&state, &mut transaction, player_id).await?;
     if !player.alive || player.starving {
         return Err(Error::Status(StatusCode::CONFLICT, "player is dead"));
     }
@@ -709,7 +739,7 @@ async fn loot(
     let id = players::player_id(&state, &players::token_hash(&headers)?).await?;
     settle(&state, id).await?;
     let mut transaction = state.pool.begin().await?;
-    let player = lock(&mut transaction, state.world_id, id).await?;
+    let player = lock(&state, &mut transaction, id).await?;
     if !player.alive || player.starving {
         return Err(Error::Status(StatusCode::CONFLICT, "player is dead"));
     }

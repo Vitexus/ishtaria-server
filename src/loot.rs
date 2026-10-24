@@ -285,7 +285,7 @@ async fn drop(
     }
     let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -383,7 +383,7 @@ async fn pickup(
 ) -> Result<Json<players::Player>, Error> {
     let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -566,7 +566,7 @@ async fn buy_found(
         return Err(status(StatusCode::FORBIDDEN, "character is out of reach"));
     }
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));

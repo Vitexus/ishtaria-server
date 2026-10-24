@@ -109,6 +109,9 @@ async fn befriend(
         .bind(low).bind(high).execute(&mut **transaction).await?;
     sqlx::query("DELETE FROM friend_requests WHERE (from_id = $1 AND to_id = $2) OR (from_id = $2 AND to_id = $1)")
         .bind(first).bind(second).execute(&mut **transaction).await?;
+    for player_id in [first, second] {
+        super::achievements::unlock(transaction, player_id, "first_friend").await?;
+    }
     Ok(())
 }
 

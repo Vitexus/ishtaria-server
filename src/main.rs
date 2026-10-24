@@ -2,6 +2,7 @@
 //! Each gameplay area is a module with its own `routes()` merged here; see the developer tour in
 //! the documentation (`development/server-tour`).
 
+mod achievements;
 mod atmosphere;
 mod chat;
 mod combat;
@@ -256,6 +257,7 @@ fn app(state: AppState) -> Router {
         .merge(portals::routes())
         .merge(land::routes())
         .merge(hall::routes())
+        .merge(achievements::routes())
         .merge(social::routes())
         .merge(chat::routes())
         .merge(shops::routes())
@@ -550,6 +552,9 @@ async fn main() -> Result<()> {
             }
             if npc_combat::tick(&survival_state).await.is_err() {
                 eprintln!("npc combat update failed");
+            }
+            if combat::ambush_tick(&survival_state).await.is_err() {
+                eprintln!("ambush update failed");
             }
         }
     });

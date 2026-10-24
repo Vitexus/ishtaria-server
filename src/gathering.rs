@@ -231,7 +231,7 @@ struct Harvest {
     object_id: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub(super) struct Gained {
     item_id: String,
     name: String,
@@ -253,7 +253,11 @@ struct HarvestReply {
     xp: i64,
     /// Wear of the tool after this swing; `broken` when it was destroyed.
     wear: Option<super::durability::Wear>,
+    /// Everything the harvest produced (in the pack or left on the ground).
     items: Vec<Gained>,
+    /// Share of [`items`] that did not fit and was left at the character's feet.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ground: Vec<Gained>,
     player: players::Player,
 }
 
@@ -267,8 +271,37 @@ pub(super) async fn add_items(
     player_id: i64,
     items: &[(String, i64)],
 ) -> Result<Vec<Gained>, Error> {
+    let (gained, leftover) = place_items(transaction, None, player_id, [0.0; 3], items).await?;
+    if !leftover.is_empty() {
+        return Err(status(StatusCode::CONFLICT, "inventory is full"));
+    }
+    Ok(gained)
+}
+
+/// Like [`add_items`], but what does not fit is left on the ground at `position`.
+pub(super) async fn add_items_or_drop(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    world_id: i64,
+    player_id: i64,
+    position: [f64; 3],
+    items: &[(String, i64)],
+) -> Result<(Vec<Gained>, Vec<Gained>), Error> {
+    place_items(transaction, Some(world_id), player_id, position, items).await
+}
+
+/// Puts as much as will fit into the pack. With `world_id` set, the rest is inserted into
+/// `ground_items` at `position`; without it, any remainder is returned and the caller treats
+/// that as a full inventory.
+async fn place_items(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    world_id: Option<i64>,
+    player_id: i64,
+    position: [f64; 3],
+    items: &[(String, i64)],
+) -> Result<(Vec<Gained>, Vec<Gained>), Error> {
     let (capacity, mut used) = super::survival::slots(transaction, player_id).await?;
     let mut gained = Vec::new();
+    let mut dropped = Vec::new();
     for (item, quantity) in items {
         let (name, limit, multi_slot, cost): (String, i64, bool, i64) = sqlx::query_as(
             "SELECT name, stack_limit, multi_slot, slot_cost::bigint FROM item_types WHERE id = $1",
@@ -284,37 +317,94 @@ pub(super) async fn add_items(
         .bind(item)
         .fetch_optional(&mut **transaction)
         .await?;
-        let total = owned
-            .unwrap_or(0)
-            .checked_add(*quantity)
+        let have = owned.unwrap_or(0);
+        let take = room_for(have, *quantity, limit, multi_slot, cost, used, capacity);
+        let leave = quantity
+            .checked_sub(take)
             .ok_or_else(|| status(StatusCode::CONFLICT, "stack overflow"))?;
-        let slots_for = |count: i64| (count / limit + i64::from(count % limit != 0)) * cost;
-        let extra = if multi_slot {
-            slots_for(total) - slots_for(owned.unwrap_or(0))
-        } else if total > limit {
-            return Err(status(StatusCode::CONFLICT, "stack is full"));
-        } else if owned.is_none() {
-            cost
-        } else {
-            0
-        };
-        if used + extra > capacity {
-            return Err(status(StatusCode::CONFLICT, "inventory is full"));
+        if take > 0 {
+            let total = have
+                .checked_add(take)
+                .ok_or_else(|| status(StatusCode::CONFLICT, "stack overflow"))?;
+            let slots_for = |count: i64| (count / limit + i64::from(count % limit != 0)) * cost;
+            let extra = if multi_slot {
+                slots_for(total) - slots_for(have)
+            } else if owned.is_none() {
+                cost
+            } else {
+                0
+            };
+            used += extra;
+            sqlx::query("INSERT INTO player_inventory (player_id, item_id, quantity) VALUES ($1, $2, $3) ON CONFLICT (player_id, item_id) DO UPDATE SET quantity = EXCLUDED.quantity")
+                .bind(player_id)
+                .bind(item)
+                .bind(total)
+                .execute(&mut **transaction)
+                .await?;
+            gained.push(Gained {
+                item_id: item.clone(),
+                name: name.clone(),
+                quantity: take.to_string(),
+            });
         }
-        used += extra;
-        sqlx::query("INSERT INTO player_inventory (player_id, item_id, quantity) VALUES ($1, $2, $3) ON CONFLICT (player_id, item_id) DO UPDATE SET quantity = EXCLUDED.quantity")
-            .bind(player_id)
-            .bind(item)
-            .bind(total)
-            .execute(&mut **transaction)
-            .await?;
-        gained.push(Gained {
-            item_id: item.clone(),
-            name,
-            quantity: quantity.to_string(),
-        });
+        if leave > 0 {
+            if let Some(world_id) = world_id {
+                sqlx::query(
+                    "INSERT INTO ground_items (world_id, item_id, quantity, durability, position_x, position_y, position_z)
+                     VALUES ($1, $2, $3, NULL, $4, $5, $6)",
+                )
+                .bind(world_id)
+                .bind(item)
+                .bind(leave)
+                .bind(position[0])
+                .bind(position[1])
+                .bind(position[2])
+                .execute(&mut **transaction)
+                .await?;
+            }
+            dropped.push(Gained {
+                item_id: item.clone(),
+                name,
+                quantity: leave.to_string(),
+            });
+        }
     }
-    Ok(gained)
+    Ok((gained, dropped))
+}
+
+/// How many of `quantity` fit given current ownership, stack rules and free slots.
+fn room_for(
+    owned: i64,
+    quantity: i64,
+    limit: i64,
+    multi_slot: bool,
+    cost: i64,
+    used: i64,
+    capacity: i64,
+) -> i64 {
+    if quantity <= 0 || cost <= 0 || limit <= 0 {
+        return 0;
+    }
+    let slots_for = |count: i64| (count / limit + i64::from(count % limit != 0)) * cost;
+    if !multi_slot {
+        let space = (limit - owned).max(0);
+        if owned == 0 && used + cost > capacity {
+            return 0;
+        }
+        return quantity.min(space);
+    }
+    let mut lo = 0;
+    let mut hi = quantity;
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        let extra = slots_for(owned + mid) - slots_for(owned);
+        if used + extra <= capacity {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
 }
 
 fn roll(resource: &Resource) -> Vec<(String, i64)> {
@@ -349,7 +439,7 @@ async fn harvest(
         .ok_or_else(|| status(StatusCode::BAD_REQUEST, "object cannot be harvested"))?;
 
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -402,10 +492,22 @@ async fn harvest(
     let wear = super::durability::wear(&mut transaction, player_id, &tool, 1).await?;
     // Every swing is worth one point of experience.
     super::experience::grant(&mut transaction, player_id, 1).await?;
+    super::achievements::unlock(&mut transaction, player_id, "first_harvest").await?;
     let mut items = Vec::new();
+    let mut ground = Vec::new();
     let mut regrow_at = None;
     if progress >= needed {
-        items = add_items(&mut transaction, player_id, &roll(resource)).await?;
+        let (taken, dropped) = add_items_or_drop(
+            &mut transaction,
+            state.world_id,
+            player_id,
+            [x, y, z],
+            &roll(resource),
+        )
+        .await?;
+        items = taken;
+        items.extend(dropped.iter().cloned());
+        ground = dropped;
         let until: i64 = sqlx::query_scalar("UPDATE world_object_state SET hits = 0, last_hit_at = now(), depleted_until = now() + make_interval(mins => $3) WHERE world_id = $1 AND object_id = $2 RETURNING extract(epoch FROM depleted_until)::bigint")
             .bind(state.world_id).bind(&input.object_id).bind(resource.regrow_minutes as i32)
             .fetch_one(&mut *transaction).await?;
@@ -439,6 +541,7 @@ async fn harvest(
         xp: 1,
         wear,
         items,
+        ground,
         player: players::profile(&state, player_id).await?,
     }))
 }
@@ -478,7 +581,7 @@ async fn sit(
     }
 
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -529,7 +632,7 @@ async fn sit(
 async fn stand(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<SitReply>, Error> {
     let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -560,7 +663,7 @@ async fn equip(
 ) -> Result<Json<players::Player>, Error> {
     let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -650,7 +753,7 @@ async fn block(
 ) -> Result<Json<BlockReply>, Error> {
     let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -707,7 +810,7 @@ async fn craft(
         .find(|recipe| recipe.id == input.recipe)
         .ok_or_else(|| status(StatusCode::NOT_FOUND, "recipe not found"))?;
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -760,6 +863,7 @@ async fn craft(
         .collect();
     add_items(&mut transaction, player_id, &outputs).await?;
     super::experience::grant(&mut transaction, player_id, recipe.xp * count).await?;
+    super::achievements::unlock(&mut transaction, player_id, "first_craft").await?;
     transaction.commit().await?;
     Ok(Json(players::profile(&state, player_id).await?))
 }

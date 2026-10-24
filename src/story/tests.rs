@@ -1187,6 +1187,32 @@ fn markers_point_at_the_places_of_active_quests_only() {
 }
 
 #[test]
+fn hunter_fifth_snare_points_at_the_fathers_camp() {
+    use super::{api::markers_of, placement::place_anchors};
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ishtaria-datadisk-gilgamesh");
+    if !path.join("datadisk.yaml").is_file() {
+        return;
+    }
+    let story = Story::load(&[path], true).unwrap();
+    let sites: std::collections::HashMap<_, _> = place_anchors(&story, &Flat, "42", &[])
+        .unwrap()
+        .into_iter()
+        .map(|site| (site.id.clone(), site))
+        .collect();
+    assert!(sites.contains_key("gilgamesh:hunter_village"));
+    let quest = "gilgamesh:the_hunter_and_the_wild_man";
+    for stage in ["snare_ruined_5", "ask_father"] {
+        let found = markers_of(&story, &sites, &[(quest.to_owned(), stage.to_owned())]);
+        let guide = found
+            .iter()
+            .find(|marker| marker.quest == quest)
+            .expect("active hunter quest has a guide");
+        assert_eq!(guide.id, "gilgamesh:hunter_village");
+        assert!(!guide.next);
+    }
+}
+
+#[test]
 fn the_endland_characters_stand_in_different_parts_of_the_town() {
     use super::{
         placement::{distance_m, place_anchors},

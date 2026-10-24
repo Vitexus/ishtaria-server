@@ -79,7 +79,7 @@
         4
       ],
       "weight": 2,
-      "scale_m": 0.391,
+      "scale_m": 0.978,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -128,7 +128,7 @@
       "id": "animal.sheep",
       "biomes": [],
       "weight": 1,
-      "scale_m": 0.355,
+      "scale_m": 1.065,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -144,7 +144,7 @@
       "id": "animal.gazelle",
       "biomes": [],
       "weight": 1,
-      "scale_m": 1.0,
+      "scale_m": 2.09,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -152,7 +152,7 @@
       "id": "animal.onager",
       "biomes": [],
       "weight": 1,
-      "scale_m": 1.0,
+      "scale_m": 2.09,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -160,7 +160,7 @@
       "id": "animal.goat",
       "biomes": [],
       "weight": 1,
-      "scale_m": 1.0,
+      "scale_m": 2.09,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -168,7 +168,7 @@
       "id": "animal.lizard",
       "biomes": [],
       "weight": 1,
-      "scale_m": 1.0,
+      "scale_m": 2.09,
       "max_slope": 0.45,
       "collision_radius": 0.0
     },
@@ -176,7 +176,7 @@
       "id": "animal.turtle",
       "biomes": [],
       "weight": 1,
-      "scale_m": 1.0,
+      "scale_m": 2.09,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -184,7 +184,7 @@
       "id": "animal.falcon",
       "biomes": [],
       "weight": 1,
-      "scale_m": 1.0,
+      "scale_m": 1.2,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -192,7 +192,7 @@
       "id": "animal.pigeon",
       "biomes": [],
       "weight": 1,
-      "scale_m": 1.0,
+      "scale_m": 0.8,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -200,7 +200,7 @@
       "id": "animal.duck",
       "biomes": [],
       "weight": 1,
-      "scale_m": 1.0,
+      "scale_m": 1.5,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -208,7 +208,7 @@
       "id": "animal.goose",
       "biomes": [],
       "weight": 1,
-      "scale_m": 1.0,
+      "scale_m": 1.8,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -658,7 +658,7 @@
         3
       ],
       "weight": 2.0,
-      "scale_m": 0.22,
+      "scale_m": 0.59,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -666,7 +666,7 @@
       "id": "zeroad.goat",
       "biomes": [],
       "weight": 2.0,
-      "scale_m": 0.26,
+      "scale_m": 0.64,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -674,7 +674,7 @@
       "id": "zeroad.sheep",
       "biomes": [],
       "weight": 2.0,
-      "scale_m": 0.35,
+      "scale_m": 2.25,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -682,7 +682,7 @@
       "id": "zeroad.cow",
       "biomes": [],
       "weight": 1.0,
-      "scale_m": 0.42,
+      "scale_m": 0.84,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },
@@ -725,7 +725,7 @@
         4
       ],
       "weight": 1.0,
-      "scale_m": 0.27,
+      "scale_m": 0.675,
       "max_slope": 0.4,
       "collision_radius": 0.0
     },
@@ -736,7 +736,7 @@
         6
       ],
       "weight": 1.0,
-      "scale_m": 0.31,
+      "scale_m": 0.66,
       "max_slope": 0.4,
       "collision_radius": 0.0
     },
@@ -769,7 +769,7 @@
         4
       ],
       "weight": 1.0,
-      "scale_m": 0.32,
+      "scale_m": 0.71,
       "max_slope": 0.4,
       "collision_radius": 0.0
     },
@@ -779,7 +779,7 @@
         5
       ],
       "weight": 1.0,
-      "scale_m": 0.40,
+      "scale_m": 0.85,
       "max_slope": 0.4,
       "collision_radius": 0.0
     },
@@ -797,7 +797,7 @@
         3
       ],
       "weight": 1.0,
-      "scale_m": 0.31,
+      "scale_m": 0.93,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },

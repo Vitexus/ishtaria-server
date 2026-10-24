@@ -293,7 +293,7 @@ async fn begin(
     npc: &NpcDescriptor,
 ) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, Error> {
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));

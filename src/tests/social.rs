@@ -32,9 +32,18 @@ async fn befriend(router: &Router, first: &str, second: &str, second_name: &str)
     );
 }
 
+/// The events after `after`, without achievements (a first friend earns one;
+/// tests/achievements.rs); `last` still counts them.
 async fn poll(router: &Router, token: &str, after: i64) -> serde_json::Value {
-    response_json(player_request(router, "GET", &format!("/events?after={after}"), "", token).await)
-        .await
+    let mut reply = response_json(
+        player_request(router, "GET", &format!("/events?after={after}"), "", token).await,
+    )
+    .await;
+    reply["events"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|event| event["kind"] != "achievement");
+    reply
 }
 
 #[sqlx::test]
@@ -362,7 +371,8 @@ async fn a_level_up_restores_the_player_and_tells_the_friends_once(pool: PgPool)
         0,
         "an event is delivered once"
     );
-    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM player_events")
+    // The hero has not asked yet, so their own achievement event is still waiting.
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM player_events WHERE recipient_id = (SELECT id FROM players WHERE username = 'friend')")
         .fetch_one(&pool)
         .await
         .unwrap();

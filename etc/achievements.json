@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "achievements": [
+    { "id": "first_harvest", "category": "gathering", "icon": "axe", "title": "Woodcutter", "description": "Swing an axe or a pickaxe at a tree or a rock.", "hidden": false },
+    { "id": "first_craft", "category": "gathering", "icon": "oak_plank", "title": "Craftsman", "description": "Craft your first item.", "hidden": false },
+    { "id": "first_catch", "category": "gathering", "icon": "fish_koi", "title": "Patient Angler", "description": "Catch a fish.", "hidden": false },
+    { "id": "first_hunt", "category": "gathering", "icon": "spear", "title": "Hunter", "description": "Bring down an animal.", "hidden": false },
+    { "id": "first_build", "category": "gathering", "icon": "stone_block", "title": "Builder", "description": "Place something you made, or plant a crop.", "hidden": false },
+    { "id": "first_spell", "category": "magic", "icon": "scroll", "title": "Spellcaster", "description": "Cast a spell.", "hidden": false },
+    { "id": "portal_builder", "category": "magic", "icon": "aetherglass", "title": "Gatekeeper", "description": "Finish building a portal.", "hidden": true },
+    { "id": "first_friend", "category": "social", "icon": "necklace", "title": "Companion", "description": "Make a friend.", "hidden": false },
+    { "id": "first_trade", "category": "social", "icon": "coin_pouch", "title": "Merchant", "description": "Complete an exchange with another player.", "hidden": false },
+    { "id": "first_quest", "category": "story", "icon": "open_book", "title": "The Tale Begins", "description": "Set out on a quest.", "hidden": false },
+    { "id": "level_5", "category": "progress", "icon": "star_coin", "title": "Apprentice", "description": "Reach level 5.", "hidden": false },
+    { "id": "level_10", "category": "progress", "icon": "chalice", "title": "Journeyman", "description": "Reach level 10.", "hidden": false },
+    { "id": "level_20", "category": "progress", "icon": "necklace_2", "title": "Master", "description": "Reach level 20.", "hidden": false },
+    { "id": "level_30", "category": "progress", "icon": "crown", "title": "Legend of Ishtaria", "description": "Reach level 30.", "hidden": true }
+  ]
+}

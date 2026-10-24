@@ -520,6 +520,27 @@
       "xp": 6
     },
     {
+      "id": "make_snare",
+      "inputs": [
+        {
+          "item": "pine_wood",
+          "quantity": 1
+        },
+        {
+          "item": "hide",
+          "quantity": 1
+        }
+      ],
+      "outputs": [
+        {
+          "item": "snare",
+          "quantity": 1
+        }
+      ],
+      "xp": 4
+    },
+
+    {
       "id": "make_scroll_refresh",
       "station": "workbench",
       "inputs": [

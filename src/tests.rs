@@ -1,5 +1,6 @@
 use super::*;
 
+mod achievements;
 mod building;
 mod chat;
 mod combat;
@@ -736,11 +737,11 @@ async fn survival_activity_recovery_and_dehydration(pool: PgPool) {
         .await
         .unwrap();
     let mut warmup = pool.begin().await.unwrap();
-    assert!(survival::lock_alive(&mut warmup, world_id, ids[0])
+    assert!(survival::lock_alive(&state, &mut warmup, ids[0])
         .await
         .unwrap());
     for _ in 0..4 {
-        assert!(survival::activity(&mut warmup, ids[0], 0.25, false)
+        assert!(survival::activity(&state, &mut warmup, ids[0], 0.25, false)
             .await
             .unwrap());
     }
@@ -759,13 +760,15 @@ async fn survival_activity_recovery_and_dehydration(pool: PgPool) {
         .unwrap();
     for (index, id) in ids.iter().enumerate() {
         let mut transaction = pool.begin().await.unwrap();
-        assert!(survival::lock_alive(&mut transaction, world_id, *id)
+        assert!(survival::lock_alive(&state, &mut transaction, *id)
             .await
             .unwrap());
         for _ in 0..4 {
-            assert!(survival::activity(&mut transaction, *id, 0.25, index == 1)
-                .await
-                .unwrap());
+            assert!(
+                survival::activity(&state, &mut transaction, *id, 0.25, index == 1)
+                    .await
+                    .unwrap()
+            );
         }
         transaction.commit().await.unwrap();
     }

@@ -204,7 +204,7 @@ async fn trees_and_rocks_are_harvested_by_the_server(pool: PgPool) {
         .iter()
         .any(|item| item["item_id"] == "stone"));
 
-    // A full inventory refuses the final hit and leaves the object standing.
+    // A full inventory still fells the tree; the wood is left on the ground.
     let other = find_object(&terrain, spawn, "tree");
     let other = terrain
         .objects(spawn, 16)
@@ -233,26 +233,58 @@ async fn trees_and_rocks_are_harvested_by_the_server(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(
-        harvest_request(&router, &token, &other.id).await.status(),
-        StatusCode::CONFLICT
+    cooldown_reset(&pool).await;
+    let overflow = response_json(harvest_request(&router, &token, &other.id).await).await;
+    assert_eq!(overflow["state"], "depleted");
+    assert!(terrain.object_by_id(&other.id).is_none());
+    let ground = overflow["ground"].as_array().expect("ground drops");
+    assert!(
+        ground
+            .iter()
+            .any(|item| item["item_id"] == other_resource.log),
+        "logs lie at the character's feet"
     );
-    assert!(terrain.object_by_id(&other.id).is_some());
-    let (hits, depleted): (i32, bool) = sqlx::query_as("SELECT hits, coalesce(depleted_until > now(), false) FROM world_object_state WHERE object_id = $1")
-        .bind(&other.id).fetch_one(&pool).await.unwrap();
-    assert_eq!((hits, depleted), (other_resource.hits * 2 - 1, false));
+    let logs_in_pack: Option<i64> =
+        sqlx::query_scalar("SELECT quantity FROM player_inventory WHERE item_id = $1")
+            .bind(&other_resource.log)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert!(
+        logs_in_pack.is_none() || logs_in_pack == Some(0),
+        "a full pack takes none of the logs"
+    );
+    let on_ground: i64 = sqlx::query_scalar(
+        "SELECT coalesce(sum(quantity), 0)::bigint FROM ground_items WHERE world_id = $1 AND item_id = $2",
+    )
+    .bind(world_id)
+    .bind(&other_resource.log)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        (1..=3).contains(&on_ground),
+        "one to three logs on the ground, got {on_ground}"
+    );
 
     // An exhausted character cannot swing.
     sqlx::query("DELETE FROM player_inventory WHERE item_id LIKE 'filler-%'")
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("DELETE FROM ground_items WHERE world_id = $1")
+        .bind(world_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let tired = find_object(&terrain, spawn, "tree");
+    teleport(&pool, player_id, tired.position).await;
     sqlx::query("UPDATE players SET stamina = 1, last_gathered_at = NULL")
         .execute(&pool)
         .await
         .unwrap();
     assert_eq!(
-        harvest_request(&router, &token, &other.id).await.status(),
+        harvest_request(&router, &token, &tired.id).await.status(),
         StatusCode::CONFLICT
     );
 }

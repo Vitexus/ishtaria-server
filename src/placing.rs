@@ -272,7 +272,7 @@ async fn put_down(
     let point = surface(state, target).await?;
     let config = config();
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -320,6 +320,7 @@ async fn put_down(
         .bind(id)
         .fetch_one(&mut *transaction)
         .await?;
+    super::achievements::unlock(&mut transaction, player_id, "first_build").await?;
     transaction.commit().await?;
     let object =
         view(row).ok_or_else(|| status(StatusCode::INTERNAL_SERVER_ERROR, "unknown thing"))?;
@@ -424,7 +425,7 @@ async fn own_nearby(
     id: i64,
 ) -> Result<(sqlx::Transaction<'static, sqlx::Postgres>, Row), Error> {
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));

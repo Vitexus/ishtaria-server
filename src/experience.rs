@@ -62,6 +62,7 @@ pub(super) async fn grant(
             .bind(level)
             .execute(&mut **transaction)
             .await?;
+        super::achievements::levels_reached(transaction, player_id, old_level, level).await?;
     }
     Ok((level, experience))
 }

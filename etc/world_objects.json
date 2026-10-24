@@ -1522,7 +1522,8 @@
       "biomes": [
         3
       ],
-      "collision_radius": 0.077
+      "collision_radius": 0.077,
+      "ground_offset_m": -0.7
     },
     {
       "id": "nature.tree_palmBend",
@@ -1532,7 +1533,8 @@
       "biomes": [
         3
       ],
-      "collision_radius": 0.093
+      "collision_radius": 0.093,
+      "ground_offset_m": -0.7
     },
     {
       "id": "nature.tree_palmDetailedShort",
@@ -1542,7 +1544,8 @@
       "biomes": [
         3
       ],
-      "collision_radius": 0.12
+      "collision_radius": 0.12,
+      "ground_offset_m": -0.7
     },
     {
       "id": "nature.tree_palmDetailedTall",
@@ -1552,7 +1555,8 @@
       "biomes": [
         3
       ],
-      "collision_radius": 0.12
+      "collision_radius": 0.12,
+      "ground_offset_m": -0.8
     },
     {
       "id": "nature.tree_palmShort",
@@ -1562,7 +1566,8 @@
       "biomes": [
         3
       ],
-      "collision_radius": 0.12
+      "collision_radius": 0.12,
+      "ground_offset_m": -0.7
     },
     {
       "id": "nature.tree_palmTall",
@@ -1572,7 +1577,8 @@
       "biomes": [
         3
       ],
-      "collision_radius": 0.12
+      "collision_radius": 0.12,
+      "ground_offset_m": -0.8
     },
     {
       "id": "nature.tree_pineDefaultB",
@@ -2146,7 +2152,8 @@
       "biomes": [
         3
       ],
-      "collision_radius": 0.299
+      "collision_radius": 0.299,
+      "ground_offset_m": -0.6
     },
     {
       "id": "quaternius.rock_1",
@@ -2326,11 +2333,10 @@
       "scale_m": 1.0,
       "max_slope": 0.45,
       "biomes": [
-        2,
-        3,
-        4
+        2
       ],
-      "collision_radius": 0.0
+      "collision_radius": 0.0,
+      "shallow_water": true
     },
     {
       "id": "hyper3d.tamarisk",
@@ -2338,7 +2344,8 @@
       "scale_m": 1.0,
       "max_slope": 0.45,
       "biomes": [],
-      "collision_radius": 0.0
+      "collision_radius": 0.0,
+      "ground_offset_m": -0.35
     },
     {
       "id": "zeroad.palm_date_a",
@@ -2349,7 +2356,7 @@
         3
       ],
       "collision_radius": 0.25,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.palm_date_b",
@@ -2360,7 +2367,7 @@
         3
       ],
       "collision_radius": 0.28,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.palm_date_c",
@@ -2371,7 +2378,7 @@
         3
       ],
       "collision_radius": 0.22,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.palm_date_new_1",
@@ -2382,7 +2389,7 @@
         3
       ],
       "collision_radius": 0.25,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.palm_date_new_2",
@@ -2393,7 +2400,7 @@
         3
       ],
       "collision_radius": 0.25,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.reed_beach_a",
@@ -2402,7 +2409,8 @@
       "max_slope": 0.45,
       "biomes": [],
       "collision_radius": 0.0,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.3,
+      "shallow_water": true
     },
     {
       "id": "zeroad.reed_beach_b",
@@ -2411,7 +2419,8 @@
       "max_slope": 0.45,
       "biomes": [],
       "collision_radius": 0.0,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.3,
+      "shallow_water": true
     },
     {
       "id": "zeroad.reed_pond_lush",
@@ -2420,7 +2429,8 @@
       "max_slope": 0.45,
       "biomes": [],
       "collision_radius": 0.0,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.3,
+      "shallow_water": true
     },
     {
       "id": "zeroad.papyrus_1",
@@ -2429,7 +2439,8 @@
       "max_slope": 0.45,
       "biomes": [],
       "collision_radius": 0.0,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.3,
+      "shallow_water": true
     },
     {
       "id": "zeroad.papyrus_2",
@@ -2438,7 +2449,8 @@
       "max_slope": 0.45,
       "biomes": [],
       "collision_radius": 0.0,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.3,
+      "shallow_water": true
     },
     {
       "id": "zeroad.cattails",
@@ -2447,7 +2459,8 @@
       "max_slope": 0.45,
       "biomes": [],
       "collision_radius": 0.0,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.3,
+      "shallow_water": true
     },
     {
       "id": "zeroad.tamarix_a",
@@ -2543,7 +2556,7 @@
         5
       ],
       "collision_radius": 0.22,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.85
     },
     {
       "id": "zeroad.bush_desert_a",
@@ -2567,7 +2580,7 @@
         5
       ],
       "collision_radius": 0.3,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -2.0
     },
     {
       "id": "zeroad.olive_01",
@@ -2579,7 +2592,7 @@
         4
       ],
       "collision_radius": 0.2,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -2.0
     },
     {
       "id": "zeroad.olive_02",
@@ -2591,7 +2604,7 @@
         4
       ],
       "collision_radius": 0.2,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -2.0
     },
     {
       "id": "zeroad.olive_03",
@@ -2650,7 +2663,7 @@
         3
       ],
       "collision_radius": 0.25,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.palm_doum_2",
@@ -2661,7 +2674,7 @@
         3
       ],
       "collision_radius": 0.28,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.fig_top_a",
@@ -2673,7 +2686,7 @@
         4
       ],
       "collision_radius": 0.15,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.7
     },
     {
       "id": "zeroad.fig_top_b",
@@ -2685,7 +2698,7 @@
         4
       ],
       "collision_radius": 0.15,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.7
     },
     {
       "id": "zeroad.reed_giant",
@@ -2694,7 +2707,8 @@
       "max_slope": 0.45,
       "biomes": [],
       "collision_radius": 0.0,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.3,
+      "shallow_water": true
     },
     {
       "id": "zeroad.cretan_date_01",
@@ -2810,7 +2824,7 @@
         4
       ],
       "collision_radius": 0.25,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -2.0
     },
     {
       "id": "zeroad.fig_b",
@@ -2822,7 +2836,7 @@
         4
       ],
       "collision_radius": 0.25,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -1.9
     },
     {
       "id": "zeroad.palm_dead_1",
@@ -2866,7 +2880,7 @@
         3
       ],
       "collision_radius": 0.25,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.palm_date_fruit_2",
@@ -2877,7 +2891,7 @@
         3
       ],
       "collision_radius": 0.25,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.cedar_atlas_dead_1",
@@ -2913,7 +2927,7 @@
         5
       ],
       "collision_radius": 0.2,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.85
     },
     {
       "id": "zeroad.palm_date_d",
@@ -2924,7 +2938,7 @@
         3
       ],
       "collision_radius": 0.22,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.palm_date_e",
@@ -2935,7 +2949,7 @@
         3
       ],
       "collision_radius": 0.18,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.palm_date_new_3",
@@ -2946,7 +2960,7 @@
         3
       ],
       "collision_radius": 0.25,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     },
     {
       "id": "zeroad.palm_date_new_4",
@@ -2957,7 +2971,7 @@
         3
       ],
       "collision_radius": 0.25,
-      "ground_offset_m": -0.3
+      "ground_offset_m": -0.9
     }
   ]
 }

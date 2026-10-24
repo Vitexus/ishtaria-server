@@ -460,6 +460,16 @@ up to level 30. `GET /hall-of-fame` lists the ten best characters, living or dea
 `score = 100 * level + 10 * days lived` with their wealth; a dead character's wealth shows as zero once
 anyone has taken something from the grave (`looted`).
 
+Achievements (`src/achievements.rs`, migration `0053_achievements.sql`) are milestones a character
+reaches once: the first swing, craft, catch, kill, placed thing, spell, friend, exchange and quest stage,
+a finished portal, and levels 5, 10, 20 and 30. The catalog (`etc/achievements.json`: id, category, item
+icon, English title and description as translation keys, `hidden`) is data; what earns one is code, run
+inside the transaction of the action, so nothing a client sends can grant it. A new one is one row in
+`player_achievements` and one `achievement` event (subject = id) for its owner; repeating the action
+changes nothing. `GET /achievements` is the catalog and `GET /players/me/achievements` adds what the
+character has earned (`earned: [{id, unlocked_at}]`); hidden ones come without title and description
+until earned.
+
 ## Gathering and crafting
 
 `POST /players/me/harvest` (`{"object_id": …}`) fells trees and mines rocks of the generated world;

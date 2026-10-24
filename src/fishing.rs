@@ -33,7 +33,7 @@ async fn fish(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<
     let fishing = &config().fishing;
     let terrain = super::movement::terrain(&state).await?;
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -65,6 +65,7 @@ async fn fish(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<
     if caught {
         items = add_items(&mut transaction, player_id, &[(fishing.catch.clone(), 1)]).await?;
         super::experience::grant(&mut transaction, player_id, 1).await?;
+        super::achievements::unlock(&mut transaction, player_id, "first_catch").await?;
     }
     transaction.commit().await?;
     Ok(Json(Reply {

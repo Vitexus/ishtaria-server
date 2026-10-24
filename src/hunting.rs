@@ -70,6 +70,11 @@ pub(super) fn is_snare(item_id: &str) -> bool {
     item_id == config().item_id
 }
 
+/// Quest stages during which snares are armed (and predators may ambush the trapper).
+pub(super) fn snare_stages() -> Vec<String> {
+    config().stages.keys().cloned().collect()
+}
+
 /// The trapper may set a snare only while the hunter quest is on a trap stage, and only one
 /// armed snare at a time.
 pub(super) async fn may_place(state: &AppState, player_id: i64) -> Result<(), Error> {
@@ -355,6 +360,7 @@ mod tests {
         assert_eq!(config.item_id, "snare");
         assert!(config.stages.contains_key("lay_snares"));
         assert_eq!(config.stages["snare_ruined_2"].next, "snare_ruined_3");
+        assert_eq!(config.stages["snare_ruined_4"].next, "snare_ruined_5");
     }
 
     #[test]

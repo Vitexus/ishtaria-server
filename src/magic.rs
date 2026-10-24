@@ -205,7 +205,7 @@ async fn learn(
         .find(|spell| spell.scroll == input.item_id)
         .ok_or_else(|| status(StatusCode::CONFLICT, "this is not a scroll"))?;
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -284,7 +284,7 @@ async fn cast(
         _ => None,
     };
     let mut transaction = state.pool.begin().await?;
-    if !super::survival::lock_alive(&mut transaction, state.world_id, player_id).await? {
+    if !super::survival::lock_alive(&state, &mut transaction, player_id).await? {
         let notice = super::survival::obituary(&mut transaction, player_id).await?;
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
@@ -406,6 +406,7 @@ async fn cast(
     sqlx::query("UPDATE player_spells SET cooldown_until = clock_timestamp() + make_interval(secs => $3) WHERE player_id = $1 AND spell_id = $2")
         .bind(player_id).bind(&spell.id).bind(spell.cooldown_ms as f64 / 1000.0)
         .execute(&mut *transaction).await?;
+    super::achievements::unlock(&mut transaction, player_id, "first_spell").await?;
     transaction.commit().await?;
     Ok(Json(Cast_ {
         spell: spell.id.clone(),

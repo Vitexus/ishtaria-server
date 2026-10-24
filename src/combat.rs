@@ -3,14 +3,18 @@
 //! Which armour goes where, how much it takes away and which animals strike back is data in
 //! `etc/combat.json`. The server decides every outcome: a client only swings at an animal and
 //! learns from the reply what it cost. Armour and shields wear out with the blows they stop.
+//! During the hunter's snare stages, fierce animals also ambush unprovoked when the trapper
+//! strays too close (`ambush_tick`).
 
 use super::durability::{self, Wear};
 use super::players::Error;
 use super::survival::{self, DamageCause};
+use super::AppState;
 use rand::{rngs::OsRng, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Deserialize)]
 pub(super) struct Armor {
@@ -28,6 +32,15 @@ struct Fierce {
 }
 
 #[derive(Deserialize)]
+struct Ambush {
+    range_m: f64,
+    cooldown_seconds: f64,
+    chance: f64,
+    /// Quest id suffix: only players on that quest's snare stages are ambushed.
+    quest_suffix: String,
+}
+
+#[derive(Deserialize)]
 struct Combat {
     version: u32,
     max_defense_percent: i32,
@@ -36,6 +49,8 @@ struct Combat {
     armor_wear: i32,
     armor: HashMap<String, Armor>,
     fierce: HashMap<String, Fierce>,
+    #[serde(default)]
+    ambush: Option<Ambush>,
 }
 
 fn combat() -> &'static Combat {
@@ -46,8 +61,20 @@ fn combat() -> &'static Combat {
         assert_eq!(config.version, 1);
         assert!((0.0..=1.0).contains(&config.block_damage_factor));
         assert!((0..=100).contains(&config.max_defense_percent));
+        if let Some(ambush) = &config.ambush {
+            assert!((3.0..=30.0).contains(&ambush.range_m));
+            assert!((2.0..=60.0).contains(&ambush.cooldown_seconds));
+            assert!((0.05..=1.0).contains(&ambush.chance));
+            assert!(!ambush.quest_suffix.is_empty());
+        }
         config
     })
+}
+
+/// Last ambush time per player (in-process; a restart only resets the pressure briefly).
+fn ambush_cooldowns() -> &'static Mutex<HashMap<i64, Instant>> {
+    static COOLDOWNS: OnceLock<Mutex<HashMap<i64, Instant>>> = OnceLock::new();
+    COOLDOWNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// The slot an armour item is worn in, if it is armour.
@@ -104,6 +131,118 @@ async fn worn(
         .collect())
 }
 
+fn distance_squared(first: [f64; 3], second: [f64; 3]) -> f64 {
+    first
+        .into_iter()
+        .zip(second)
+        .map(|(a, b)| (a - b).powi(2))
+        .sum()
+}
+
+/// During the hunter's snare stages, fierce animals within ambush range bite without being hit
+/// first — the trapper must clear them or keep distance while waiting on a snare.
+pub(super) async fn ambush_tick(state: &AppState) -> Result<(), Error> {
+    let Some(ambush) = &combat().ambush else {
+        return Ok(());
+    };
+    let stages = crate::hunting::snare_stages();
+    if stages.is_empty() {
+        return Ok(());
+    }
+    let suffix = &ambush.quest_suffix;
+    let players: Vec<(i64, f64, f64, f64)> = sqlx::query_as(
+        "SELECT p.id, p.position_x, p.position_y, p.position_z
+         FROM players p
+         JOIN player_quests q ON q.player_id = p.id
+         WHERE p.world_id = $1 AND p.died_at IS NULL
+           AND p.position_x IS NOT NULL AND p.position_y IS NOT NULL AND p.position_z IS NOT NULL
+           AND q.quest_id LIKE '%' || $2
+           AND q.stage = ANY($3)",
+    )
+    .bind(state.world_id)
+    .bind(suffix)
+    .bind(&stages)
+    .fetch_all(&state.pool)
+    .await?;
+    if players.is_empty() {
+        return Ok(());
+    }
+    let Ok(terrain) = crate::movement::terrain(state).await else {
+        return Ok(());
+    };
+    let now_ms = crate::movement::unix_now_ms();
+    let range2 = ambush.range_m * ambush.range_m;
+    let cooldown = Duration::from_secs_f64(ambush.cooldown_seconds);
+    for (player_id, x, y, z) in players {
+        {
+            let map = ambush_cooldowns()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if map
+                .get(&player_id)
+                .is_some_and(|at| at.elapsed() < cooldown)
+            {
+                continue;
+            }
+        }
+        let player = [x, y, z];
+        let mut nearest: Option<(String, String, f64)> = None;
+        for (animal, _) in terrain.moving_animals(player, now_ms) {
+            if !is_fierce(&animal.model) {
+                continue;
+            }
+            let dist2 = distance_squared(player, animal.position);
+            if dist2 > range2 {
+                continue;
+            }
+            let closer = match nearest.as_ref() {
+                None => true,
+                Some((_, _, best)) => dist2 < *best,
+            };
+            if closer {
+                nearest = Some((animal.id, animal.model, dist2));
+            }
+        }
+        let Some((_id, model, _)) = nearest else {
+            continue;
+        };
+        if !OsRng.gen_bool(ambush.chance.clamp(0.0, 1.0)) {
+            continue;
+        }
+        let mut tx = state.pool.begin().await?;
+        let alive: bool = sqlx::query_scalar(
+            "SELECT died_at IS NULL FROM players WHERE id = $1 FOR UPDATE",
+        )
+        .bind(player_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !alive {
+            continue;
+        }
+        let blow = fierce_bite(state, &mut tx, player_id, &model).await?;
+        let Some(blow) = blow else {
+            tx.commit().await?;
+            continue;
+        };
+        sqlx::query(
+            "INSERT INTO player_events (recipient_id, kind, subject, body) VALUES ($1, 'hurt', $2, $3)",
+        )
+        .bind(player_id)
+        .bind(&model)
+        .bind(format!(
+            r#"{{"damage":{},"attempted":{},"blocked":{},"defense":{},"died":{}}}"#,
+            blow.damage, blow.attempted, blow.blocked, blow.defense, blow.died
+        ))
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        if let Ok(mut map) = ambush_cooldowns().lock() {
+            map.insert(player_id, Instant::now());
+        }
+    }
+    Ok(())
+}
+
 /// Lets the animal named `model` bite back at a character who just hit it and left it alive.
 /// Returns `None` when the animal is not dangerous or this time it did not strike.
 /// The caller holds the character locked and alive in `transaction`.
@@ -113,13 +252,26 @@ pub(super) async fn counter_attack(
     player_id: i64,
     model: &str,
 ) -> Result<Option<Counter>, Error> {
-    let config = combat();
-    let Some(fierce) = config.fierce.get(model) else {
+    let Some(fierce) = combat().fierce.get(model) else {
         return Ok(None);
     };
     if !OsRng.gen_bool(fierce.chance.clamp(0.0, 1.0)) {
         return Ok(None);
     }
+    fierce_bite(state, transaction, player_id, model).await
+}
+
+/// Applies a fierce animal's bite (armour, shield, ward, wear). `None` when the model is not fierce.
+async fn fierce_bite(
+    state: &crate::AppState,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    player_id: i64,
+    model: &str,
+) -> Result<Option<Counter>, Error> {
+    let config = combat();
+    let Some(fierce) = config.fierce.get(model) else {
+        return Ok(None);
+    };
     let pieces = worn(transaction, player_id).await?;
     let defense: i32 = pieces.iter().map(|(_, defense)| defense).sum();
     let defense = defense.min(config.max_defense_percent);

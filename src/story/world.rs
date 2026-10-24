@@ -937,6 +937,14 @@ pub async fn npcs_near(
     }
     if let Some(id) = player_id {
         for npc in &mut listed {
+            if let Ok(Some((at, yaw))) =
+                crate::npc_combat::chase_pose(state, id, &npc.id, player_pos).await
+            {
+                npc.position = at;
+                npc.yaw = yaw;
+                npc.wander = None;
+                npc.movement = None;
+            }
             if let Ok(Some(bar)) = crate::npc_combat::bar_for(state, id, &npc.id).await {
                 npc.health = Some(bar);
             }

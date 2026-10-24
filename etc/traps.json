@@ -3,23 +3,33 @@
   "quest_suffix": "the_hunter_and_the_wild_man",
   "item_id": "snare",
   "player_clearance_m": 28.0,
-  "clear_hold_seconds": 10.0,
-  "animal_approach_seconds": 8.0,
+  "clear_hold_seconds": 12.0,
+  "animal_approach_seconds": 10.0,
   "stages": {
     "lay_snares": {
       "next": "snare_ruined_1",
-      "give_snare": false,
+      "give_snare": true,
       "flag": "snare_ruined_once"
     },
     "snare_ruined_1": {
       "next": "snare_ruined_2",
-      "give_snare": false,
+      "give_snare": true,
       "flag": "snare_ruined_twice"
     },
     "snare_ruined_2": {
       "next": "snare_ruined_3",
-      "give_snare": false,
+      "give_snare": true,
       "flag": "snare_ruined_thrice"
+    },
+    "snare_ruined_3": {
+      "next": "snare_ruined_4",
+      "give_snare": true,
+      "flag": "snare_ruined_four"
+    },
+    "snare_ruined_4": {
+      "next": "snare_ruined_5",
+      "give_snare": true,
+      "flag": "snare_ruined_five"
     }
   }
 }
