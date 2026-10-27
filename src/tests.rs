@@ -123,14 +123,16 @@ async fn new_player_gold_is_persistent_and_nonnegative(pool: PgPool) {
     assert_eq!(lifetime, 100, "the starting coins are counted once");
 }
 
-const SMALL_MAP: &[u8] = b"P5\n6 1\n255\n\x0a\x20\x00\x80\xfe\xff";
+const SMALL_MAP: &[u8] = b"P5\n6 1\n65535\n\x0a\x20\x00\x80\xfe\xff\x00\x01\x7d\x00\x00\x09";
 
 async fn initialize_spawn_world(pool: &PgPool) -> i64 {
     // Every test has a database of its own but the same world id: a story cached by an
     // earlier test must not be taken for this world's.
     crate::story::world::reset_cache().await;
-    let mut pgm = b"P5\n96 16\n255\n".to_vec();
-    pgm.extend(vec![144; 16 * 16 * 6]);
+    let mut pgm = b"P5\n96 16\n65535\n".to_vec();
+    pgm.extend(crate::terrain::sample_bytes(
+        &vec![crate::terrain::legacy_sample(144); 16 * 16 * 6],
+    ));
     initialize(pool, &config(), Some((&pgm, 42))).await.unwrap()
 }
 
@@ -147,8 +149,10 @@ async fn unsafe_spawn_rolls_back_registration(pool: PgPool) {
     let credentials = r#"{"username":"unsafe-player","password":""}"#;
     for has_ocean in [false, true] {
         if has_ocean {
-            let mut pgm = b"P5\n96 16\n255\n".to_vec();
-            pgm.extend(vec![80; 16 * 16 * 6]);
+            let mut pgm = b"P5\n96 16\n65535\n".to_vec();
+            pgm.extend(crate::terrain::sample_bytes(
+                &vec![crate::terrain::legacy_sample(80); 16 * 16 * 6],
+            ));
             initialize(&pool, &config(), Some((&pgm, 42)))
                 .await
                 .unwrap();
@@ -180,8 +184,10 @@ async fn response_json(response: Response) -> serde_json::Value {
 #[ignore = "requires DATABASE_URL and ISHTARIA_TEST_HEIGHTMAP"]
 async fn safe_spawn_on_imported_world(pool: PgPool) {
     let _auth_test = AUTH_TESTS.acquire().await.unwrap();
-    let mut pgm = b"P5\n96 16\n255\n".to_vec();
-    pgm.extend(vec![144; 16 * 16 * 6]);
+    let mut pgm = b"P5\n96 16\n65535\n".to_vec();
+    pgm.extend(crate::terrain::sample_bytes(
+        &vec![crate::terrain::legacy_sample(144); 16 * 16 * 6],
+    ));
     if let Ok(path) = std::env::var("ISHTARIA_TEST_HEIGHTMAP") {
         pgm = std::fs::read(path).unwrap();
     }
@@ -546,13 +552,8 @@ async fn survival_empty_password(pool: PgPool) {
         .map(|axis| position[axis].as_f64().unwrap().powi(2))
         .sum::<f64>()
         .sqrt();
-    let base = 144.0 * 16000.0 / 255.0 - 8000.0;
-    let point = ["x", "y", "z"].map(|axis| position[axis].as_f64().unwrap());
-    assert!(
-        (distance - (6_371_000.0 + base + crate::environment::relief_offset(point, base, "42")))
-            .abs()
-            < 0.000001
-    );
+    let base = crate::terrain::metres(crate::terrain::legacy_sample(144));
+    assert!((distance - (6_371_000.0 + base)).abs() < 0.000001);
     let stored: String = sqlx::query_scalar("SELECT password_hash FROM players")
         .fetch_one(&pool)
         .await
@@ -1728,7 +1729,7 @@ async fn persistence_and_conflicting_imports(pool: PgPool) {
     assert!(initialize(&pool, &cfg, Some((SMALL_MAP, 43)))
         .await
         .is_err());
-    let changed_map = b"P5\n6 1\n255\n\x00\x00\x00\x00\x00\x00";
+    let changed_map = b"P5\n6 1\n65535\n\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
     assert!(initialize(&pool, &cfg, Some((changed_map, 42)))
         .await
         .is_err());
@@ -1769,7 +1770,10 @@ async fn imported_map_survives_restart_and_http_roundtrip(pool: PgPool) {
             .await
             .unwrap();
     let decoded = Heightmap::parse(&pgm).unwrap();
-    assert_eq!(persisted_pixels, decoded.pixels);
+    assert_eq!(
+        persisted_pixels,
+        crate::terrain::sample_bytes(&decoded.pixels)
+    );
     let restarted_id = initialize(&pool, &cfg, None).await.unwrap();
     assert_eq!(restarted_id, world_id);
     let router = app(AppState {
@@ -1814,9 +1818,7 @@ async fn imported_map_survives_restart_and_http_roundtrip(pool: PgPool) {
         assert!((component.as_f64().unwrap() - expected_component).abs() < 1e-12);
     }
     assert!(
-        (solar["moon_angular_radius_degrees"]
-            .as_f64()
-            .unwrap()
+        (solar["moon_angular_radius_degrees"].as_f64().unwrap()
             - expected.moon_angular_radius_degrees)
             .abs()
             < 1e-12
@@ -1859,14 +1861,6 @@ async fn imported_map_survives_restart_and_http_roundtrip(pool: PgPool) {
         pgm
     );
     let size = decoded.face_size;
-    let response = request(&router, "/world/heightmap.png").await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
-    let png = response.into_body().collect().await.unwrap().to_bytes();
-    let png = image::load_from_memory_with_format(&png, image::ImageFormat::Png).unwrap();
-    assert_eq!(png.width(), size as u32 * 6);
-    assert_eq!(png.height(), size as u32);
-    assert_eq!(png.into_luma8().into_raw(), persisted_pixels);
     let environment = response_json(request(&router, "/world/environment").await).await;
     assert_eq!(environment["version"], 2);
     assert_eq!(environment["heightmap_sha256"], decoded.sha256);
@@ -1972,10 +1966,6 @@ async fn invalid_import_rolls_back_and_database_outage_fails_health(pool: PgPool
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        request(&router, "/world/heightmap.png").await.status(),
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
         request(&router, "/world/environment").await.status(),
         StatusCode::NOT_FOUND
     );
@@ -1994,8 +1984,10 @@ async fn invalid_import_rolls_back_and_database_outage_fails_health(pool: PgPool
 #[ignore = "requires DATABASE_URL and ISHTARIA_TEST_HEIGHTMAP"]
 async fn banned_player_cannot_log_in_or_use_session(pool: PgPool) {
     let _auth_test = AUTH_TESTS.acquire().await.unwrap();
-    let mut pgm = b"P5\n96 16\n255\n".to_vec();
-    pgm.extend(vec![144; 16 * 16 * 6]);
+    let mut pgm = b"P5\n96 16\n65535\n".to_vec();
+    pgm.extend(crate::terrain::sample_bytes(
+        &vec![crate::terrain::legacy_sample(144); 16 * 16 * 6],
+    ));
     if let Ok(path) = std::env::var("ISHTARIA_TEST_HEIGHTMAP") {
         pgm = std::fs::read(path).unwrap();
     }

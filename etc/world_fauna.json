@@ -79,7 +79,7 @@
         4
       ],
       "weight": 2,
-      "scale_m": 0.978,
+      "scale_m": 0.34,
       "max_slope": 0.35,
       "collision_radius": 0.0
     },

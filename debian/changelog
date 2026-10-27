@@ -1,3 +1,15 @@
+ishtaria-server (0.4.0) unstable; urgency=medium
+
+  * Read 16-bit height strips with the relief already in them; drop the
+    run-time relief and /world/heightmap.png; environment version 3 (ADR
+    0020).
+  * Migration 0058: two bytes per height sample; old 8-bit worlds must
+    be regenerated.
+  * ishtaria-server-init passes the seed to worldgen for datadisk
+    planets.
+
+ -- Vítězslav Dvořák <cybervitexus@gmail.com>  Tue, 27 Oct 2026 10:29:26 +0100
+
 ishtaria-server (0.3.0) unstable; urgency=medium
 
   * Release 0.3.0: Gilgamesh world support, Early Dynastic wildlife and water, quest checkpoints, grave obituary death cause fix.

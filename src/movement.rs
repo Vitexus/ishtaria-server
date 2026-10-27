@@ -903,7 +903,7 @@ pub(super) struct Reply {
 
 pub(super) struct WalkingTerrain {
     size: usize,
-    pixels: Vec<u8>,
+    pixels: Vec<u16>,
     environment: environment::Environment,
     catalog: Vec<ObjectKind>,
     removed: Removed,
@@ -1659,7 +1659,7 @@ impl WalkingTerrain {
         let column = horizontal as usize;
         let row = vertical as usize;
         let pixel = |column: usize, row: usize| {
-            f64::from(self.pixels[row * self.size * 6 + face * self.size + column])
+            crate::terrain::metres(self.pixels[row * self.size * 6 + face * self.size + column])
         };
         let interpolate =
             |first: f64, second: f64, fraction: f64| first + (second - first) * fraction;
@@ -1676,8 +1676,7 @@ impl WalkingTerrain {
             ),
             horizontal.fract(),
         );
-        let base = interpolate(upper, lower, vertical.fract()) * 16000.0 / 255.0 - 8000.0;
-        let base = base + environment::relief_offset(direction, base, &self.environment.seed);
+        let base = interpolate(upper, lower, vertical.fract());
         bridge_height(direction).unwrap_or_else(|| patch_height(direction, base).unwrap_or(base))
     }
 
@@ -2340,8 +2339,8 @@ impl WalkingTerrain {
             } else if into < WATERHOLE_GRAZE_MS + walk_ms + WATERHOLE_DRINK_MS {
                 drink
             } else {
-                let fraction =
-                    (into - WATERHOLE_GRAZE_MS - walk_ms - WATERHOLE_DRINK_MS) as f64 / walk_ms as f64;
+                let fraction = (into - WATERHOLE_GRAZE_MS - walk_ms - WATERHOLE_DRINK_MS) as f64
+                    / walk_ms as f64;
                 unit(std::array::from_fn(|axis| {
                     drink[axis] + (graze[axis] - drink[axis]) * fraction
                 }))
@@ -2727,6 +2726,7 @@ pub(super) async fn terrain(state: &AppState) -> Result<Arc<WalkingTerrain>, pla
             .bind(sha256.clone())
             .fetch_one(&state.pool)
             .await?;
+    let pixels = crate::terrain::samples_from_bytes(&pixels);
     let terrain = tokio::task::spawn_blocking(move || {
         let mut catalog = object_catalog()?;
         catalog.extend(fauna_catalog()?);
@@ -2958,7 +2958,8 @@ pub(super) async fn walk(
             return Err(players::Error::Obituary(Box::new(notice)));
         }
         if moving
-            && !super::survival::activity(&state, &mut transaction, player_id, seconds, intent.run).await?
+            && !super::survival::activity(&state, &mut transaction, player_id, seconds, intent.run)
+                .await?
         {
             let notice = super::survival::obituary(&mut transaction, player_id).await?;
             transaction.commit().await?;
@@ -3007,6 +3008,18 @@ async fn body_scale(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terrain::legacy_sample;
+
+    /// The walking terrain reads process-wide statics (landscape patches, wildlife overlays,
+    /// farms, bridges and structures). Tests that set or read them would see each other's
+    /// worlds when they run in parallel, so every test of this module runs alone.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn assert_capsule_clear(point: [f64; 3], object: &WorldObject) {
         let (transform, mesh) = object_shape(object).unwrap();
@@ -3033,6 +3046,7 @@ mod tests {
 
     #[test]
     fn jump_has_a_bounded_apex_and_returns_to_the_ground() {
+        let _serial = serial();
         let apex_time = JUMP_SPEED / GRAVITY;
         let (height, velocity) = flight_step(0.0, JUMP_SPEED, apex_time);
         assert!((height - JUMP_SPEED * JUMP_SPEED / (2.0 * GRAVITY)).abs() < 1e-10);
@@ -3045,7 +3059,8 @@ mod tests {
 
     #[test]
     fn jump_lands_on_original_rock_geometry() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let mut terrain = WalkingTerrain {
             size: 16,
             environment: environment::generate(16, &pixels, "42", "test").unwrap(),
@@ -3098,7 +3113,7 @@ mod tests {
     }
 
     fn staircase_with(riser: f64, tread: f64, steps: usize) -> (WalkingTerrain, WorldObject, f64) {
-        let pixels = vec![144; 16 * 16 * 6];
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let mut terrain = WalkingTerrain {
             size: 16,
             environment: environment::generate(16, &pixels, "42", "test").unwrap(),
@@ -3177,6 +3192,7 @@ mod tests {
 
     #[test]
     fn a_walker_climbs_stairs_with_low_risers_and_comes_down_again() {
+        let _serial = serial();
         let (terrain, object, ground) = staircase(0.3, 10);
         let mut flight = Flight {
             impact: 0.0,
@@ -3205,6 +3221,7 @@ mod tests {
 
     #[test]
     fn a_walker_climbs_stairs_as_steep_as_those_of_a_ziggurat() {
+        let _serial = serial();
         // Risers of 0.3 m and treads of 0.316 m: the 43 degrees of the stairs of the Anu ziggurat.
         let (terrain, object, ground) = staircase_with(0.3, 0.316, 25);
         let mut flight = Flight {
@@ -3236,6 +3253,7 @@ mod tests {
     #[test]
     #[ignore = "needs a model file in GLB"]
     fn real_stairs() {
+        let _serial = serial();
         let Ok(path) = std::env::var("GLB") else {
             return; // a utility: it needs GLB=path
         };
@@ -3284,6 +3302,7 @@ mod tests {
 
     #[test]
     fn a_wall_higher_than_a_step_stops_the_walker() {
+        let _serial = serial();
         let (terrain, object, ground) = staircase(1.2, 1);
         let mut flight = Flight {
             impact: 0.0,
@@ -3305,7 +3324,8 @@ mod tests {
 
     #[test]
     fn directional_jump_cannot_restart_in_air_and_returns_to_ground() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let mut terrain = WalkingTerrain {
             size: 16,
             environment: environment::generate(16, &pixels, "42", "test").unwrap(),
@@ -3351,6 +3371,7 @@ mod tests {
 
     #[test]
     fn fall_damage_grows_with_the_landing_speed() {
+        let _serial = serial();
         // Jumps and small drops are harmless: a run-jump lands at 8.5 m/s only slightly above the limit.
         assert_eq!(fall_damage(0.0), 0);
         assert_eq!(fall_damage(JUMP_SPEED), 0);
@@ -3396,7 +3417,8 @@ mod tests {
 
     #[test]
     fn a_fall_accelerates_and_lands_with_the_speed_of_its_height() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let mut terrain = WalkingTerrain {
             size: 16,
             environment: environment::generate(16, &pixels, "42", "test").unwrap(),
@@ -3437,7 +3459,8 @@ mod tests {
 
     #[test]
     fn round_obstacles_without_a_mesh_block_sideways_but_not_a_jump() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let mut terrain = WalkingTerrain {
             size: 16,
             environment: environment::generate(16, &pixels, "42", "test").unwrap(),
@@ -3485,7 +3508,8 @@ mod tests {
 
     #[test]
     fn directional_jump_clears_rock_side_and_lands_on_top() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let mut terrain = WalkingTerrain {
             size: 16,
             environment: environment::generate(16, &pixels, "42", "test").unwrap(),
@@ -3553,7 +3577,8 @@ mod tests {
 
     #[test]
     fn descending_capsule_slides_off_steep_rock_without_getting_stuck() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let mut terrain = WalkingTerrain {
             size: 16,
             environment: environment::generate(16, &pixels, "42", "test").unwrap(),
@@ -3655,7 +3680,8 @@ mod tests {
 
     #[test]
     fn running_is_bounded_and_launch_speed_survives_shift_release() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let mut terrain = WalkingTerrain {
             size: 16,
             environment: environment::generate(16, &pixels, "42", "test").unwrap(),
@@ -3746,7 +3772,8 @@ mod tests {
 
     #[test]
     fn a_bridge_deck_is_ground_over_deep_water() {
-        let pixels = vec![60; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(60); 16 * 16 * 6];
         let environment = environment::generate(16, &pixels, "42", "test").unwrap();
         let terrain = WalkingTerrain {
             size: 16,
@@ -3785,6 +3812,7 @@ mod tests {
 
     #[test]
     fn every_zeroad_model_of_the_catalog_is_used_by_the_generator_or_a_datadisk() {
+        let _serial = serial();
         // Overlay-only: water plants and the crocodile need a datadisk's water-hole, and the two flock animals
         // are driven by the shepherd of the Quaternius ones; the Gilgamesh and tutorial overlays place them.
         const OVERLAY_ONLY: [&str; 10] = [
@@ -3818,7 +3846,8 @@ mod tests {
 
     #[test]
     fn walking_is_bounded_and_cannot_fly_or_swim() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let environment = environment::generate(16, &pixels, "42", "test").unwrap();
         let mut terrain = WalkingTerrain {
             size: 16,
@@ -3841,7 +3870,8 @@ mod tests {
 
     #[test]
     fn a_swimmer_is_slow_and_can_reach_a_dry_shore() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let environment = environment::generate(16, &pixels, "42", "test").unwrap();
         let mut terrain = WalkingTerrain {
             size: 16,
@@ -3873,7 +3903,8 @@ mod tests {
 
     #[test]
     fn shallow_water_is_waded_slowly_and_only_deep_water_is_swum() {
-        let pixels = vec![145; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(145); 16 * 16 * 6];
         let environment = environment::generate(16, &pixels, "42", "test").unwrap();
         let mut terrain = WalkingTerrain {
             size: 16,
@@ -3939,6 +3970,7 @@ mod tests {
 
     #[test]
     fn swept_obstacles_block_tunnelling_but_allow_escape() {
+        let _serial = serial();
         let point = [RADIUS, 0.0, 0.0];
         let mut object = WorldObject {
             id: "test".into(),
@@ -3961,7 +3993,8 @@ mod tests {
 
     #[test]
     fn walls_of_places_block_steps_for_the_terrain_they_belong_to() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let mut environment = environment::generate(16, &pixels, "42", "walls").unwrap();
         environment.water_m.fill(environment::DRY);
         environment.biomes.fill(4);
@@ -4010,7 +4043,8 @@ mod tests {
 
     #[test]
     fn authoritative_objects_are_stable_and_block_actual_steps() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let mut environment = environment::generate(16, &pixels, "42", "test").unwrap();
         environment.water_m.fill(environment::DRY);
         environment.biomes.fill(5);
@@ -4084,7 +4118,8 @@ mod tests {
 
     #[test]
     fn every_nature_variant_can_be_selected_on_authoritative_terrain() {
-        let pixels = vec![144; 16 * 16 * 6];
+        let _serial = serial();
+        let pixels = vec![legacy_sample(144); 16 * 16 * 6];
         let mut terrain = WalkingTerrain {
             size: 16,
             environment: environment::generate(16, &pixels, "42", "test").unwrap(),
@@ -4128,6 +4163,7 @@ mod tests {
 
     #[test]
     fn reeds_grow_in_shallow_river_water() {
+        let _serial = serial();
         set_patches(String::new(), Vec::new());
         set_wildlife(String::new(), Vec::new());
         let mut terrain = terrain_with(144, 2, object_catalog().unwrap());
@@ -4153,7 +4189,7 @@ mod tests {
     }
 
     fn terrain_with(pixel: u8, biome: u8, catalog: Vec<ObjectKind>) -> WalkingTerrain {
-        let pixels = vec![pixel; 16 * 16 * 6];
+        let pixels = vec![legacy_sample(pixel); 16 * 16 * 6];
         let mut environment = environment::generate(16, &pixels, "42", "test").unwrap();
         environment.biomes.fill(biome);
         if biome < 3 {
@@ -4172,6 +4208,7 @@ mod tests {
 
     #[test]
     fn water_within_reach_is_fresh_salt_or_absent() {
+        let _serial = serial();
         let here = [RADIUS, 0.0, 0.0];
         assert_eq!(
             terrain_with(80, 1, Vec::new()).water_near(here, 6.0),
@@ -4210,6 +4247,7 @@ mod tests {
 
     #[test]
     fn animals_do_not_change_where_trees_and_rocks_stand() {
+        let _serial = serial();
         let flora = terrain_with(144, 5, object_catalog().unwrap());
         let both = terrain_with(144, 5, catalog_with_fauna());
         let point = [RADIUS + flora.height([1.0, 0.0, 0.0]), 0.0, 0.0];
@@ -4219,6 +4257,7 @@ mod tests {
 
     #[test]
     fn a_wildlife_overlay_puts_game_on_a_dry_floodplain_in_a_coarse_river_cell() {
+        let _serial = serial();
         // The hunter's water-hole: dry steppe the 150 km map marks "river". Without the overlay its cells only
         // hold fish; with it the herds of the epic stand there.
         set_patches(String::new(), Vec::new());
@@ -4266,6 +4305,7 @@ mod tests {
 
     #[test]
     fn land_animals_are_deterministic_passable_and_fit_their_biome() {
+        let _serial = serial();
         let terrain = terrain_with(144, 4, catalog_with_fauna());
         let point = [RADIUS + terrain.height([1.0, 0.0, 0.0]), 0.0, 0.0];
         let mut found = Vec::new();
@@ -4328,6 +4368,7 @@ mod tests {
 
     #[test]
     fn animals_walk_along_routes_that_depend_only_on_id_and_time() {
+        let _serial = serial();
         let terrain = terrain_with(144, 4, catalog_with_fauna());
         let animals = some_animals(&terrain);
         assert!(!animals.is_empty());
@@ -4380,6 +4421,7 @@ mod tests {
 
     #[test]
     fn waterhole_animals_drink_then_graze_away_from_the_bank() {
+        let _serial = serial();
         set_patches(String::new(), Vec::new());
         set_wildlife(String::new(), Vec::new());
         let terrain = terrain_with(144, 4, catalog_with_fauna());
@@ -4433,7 +4475,9 @@ mod tests {
             ground_offset_m: 0.0,
         };
         assert!(
-            terrain.waterhole_route(&animal, 1_700_000_000_000).is_some(),
+            terrain
+                .waterhole_route(&animal, 1_700_000_000_000)
+                .is_some(),
             "bank animal joins the drink cycle"
         );
         let now = 1_700_000_000_000_i64;
@@ -4465,6 +4509,7 @@ mod tests {
 
     #[test]
     fn waterside_overlay_fauna_only_stand_near_water() {
+        let _serial = serial();
         set_patches(String::new(), Vec::new());
         let mut terrain = terrain_with(144, 4, catalog_with_fauna());
         let ground = terrain.height([0.0, -1.0, 0.0]).floor() as i32;
@@ -4504,6 +4549,7 @@ mod tests {
 
     #[test]
     fn reeds_do_not_stand_on_dry_steppe_far_from_water() {
+        let _serial = serial();
         set_patches(String::new(), Vec::new());
         let mut terrain = terrain_with(144, 4, catalog_with_fauna());
         let ground = terrain.height([0.0, -1.0, 0.0]).floor() as i32;
@@ -4549,6 +4595,7 @@ mod tests {
 
     #[test]
     fn birds_fly_above_the_ground_along_routes() {
+        let _serial = serial();
         let terrain = terrain_with(144, 4, catalog_with_fauna());
         let direction = [1.0, 0.0, 0.0];
         let height = terrain.height(direction);
@@ -4606,6 +4653,7 @@ mod tests {
 
     #[test]
     fn animals_are_found_by_id_where_they_stand_until_butchered() {
+        let _serial = serial();
         let terrain = terrain_with(144, 4, catalog_with_fauna());
         let animals = some_animals(&terrain);
         let animal = animals
@@ -4637,6 +4685,7 @@ mod tests {
 
     #[test]
     fn farm_animals_graze_beside_a_settlement_without_changing_other_objects() {
+        let _serial = serial();
         let terrain = terrain_with(144, 4, catalog_with_fauna());
         let site = FarmSite {
             id: "world:town_00".into(),
@@ -4745,6 +4794,7 @@ mod tests {
 
     #[test]
     fn fish_swim_below_the_surface_of_deep_water_only() {
+        let _serial = serial();
         let sea = terrain_with(80, 0, catalog_with_fauna());
         let mut fish = Vec::new();
         for step in 0..40 {
@@ -4800,6 +4850,7 @@ mod tests {
 
     #[test]
     fn landscape_patch_shapes_ground_water_and_fades_at_the_edge() {
+        let _serial = serial();
         let terrain = terrain_with(144, 4, Vec::new());
         let anchor = [1.0, 0.0, 0.0];
         let (axis_x, axis_z) = crate::scenery::client_axes(anchor);
@@ -4863,6 +4914,7 @@ mod tests {
 
     #[test]
     fn dry_landscape_patch_over_coarse_water_is_walkable_and_not_a_drink() {
+        let _serial = serial();
         // Pixel 120 decodes below sea level so the bare heightmap is wet; only the patch dries it.
         let mut terrain = terrain_with(120, 0, Vec::new());
         terrain.environment.biomes.fill(0);
@@ -4901,6 +4953,7 @@ mod tests {
 
     #[test]
     fn dry_floodplain_in_a_coarse_river_cell_is_walkable() {
+        let _serial = serial();
         // Early Dynastic Mesopotamia: the heightmap is +30 m dry land, the 150 km cell is
         // marked river by drainage. Without this, spawn at the hunter water-hole only jumps.
         set_patches(String::new(), Vec::new());
@@ -4926,6 +4979,7 @@ mod tests {
 
     #[test]
     fn dry_heightmap_in_a_coarse_ocean_cell_is_walkable() {
+        let _serial = serial();
         // Gilgamesh earth strip: Uruk's pin is land (+30 m) inside a drowned coarse cell.
         set_patches(String::new(), Vec::new());
         let mut terrain = terrain_with(144, 0, Vec::new());
@@ -4943,10 +4997,12 @@ mod tests {
 
     #[test]
     fn live_gilgamesh_hunter_spawn_is_walkable() {
+        let _serial = serial();
         set_patches(String::new(), Vec::new());
         let Ok(pixels) = std::fs::read("target/gilgamesh_pixels.bin") else {
             return;
         };
+        let pixels = crate::terrain::samples_from_bytes(&pixels);
         let seed = "2235404937";
         let sha = "eb2707db9004b69ee7ff7279ec56191570d4dc66c99f77941f6657ba35419fed";
         let environment = environment::generate(256, &pixels, seed, sha).unwrap();

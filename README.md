@@ -17,7 +17,7 @@ The bundled configuration uses the local PostgreSQL Unix socket with peer authen
 
 The server applies the versioned SQL migrations in `migrations/` automatically before accepting requests. Migrations are embedded in the executable; add a new migration for schema changes rather than editing one already applied. Keep `Cargo.lock` in version control for reproducible `--locked` builds.
 
-Import accepts the worldgen binary P5, 8-bit grayscale strip of six square faces (up to 1024 pixels per face and 16 MiB per file). Both the original PGM and decoded pixels are stored in PostgreSQL, with a SHA-256 checksum and the explicitly supplied seed. PGM contains no seed, so the server cannot verify that it matches the generator input. An identical import is a no-op; a different map, seed or ruleset is rejected instead of silently replacing world data. Invalid imports roll back the world transaction.
+Import accepts the worldgen binary P5, 16-bit grayscale strip of six square faces (maxval 65535, big-endian, 0.25 m per step from -8000 m, the seed's local relief already in it; ADR 0020) (up to 1024 pixels per face and 16 MiB per file). Both the original PGM and decoded pixels are stored in PostgreSQL, with a SHA-256 checksum and the explicitly supplied seed. PGM contains no seed, so the server cannot verify that it matches the generator input. An identical import is a no-op; a different map, seed or ruleset is rejected instead of silently replacing world data. Invalid imports roll back the world transaction.
 
 Subsequent starts use the stored data without needing the source file:
 
@@ -29,7 +29,7 @@ curl --fail http://localhost:7400/terrain/0/128/128
 curl --fail http://localhost:7400/world/heightmap -o planet.pgm
 ```
 
-`GET /health` checks PostgreSQL availability; `/world` returns world metadata (including `server_version`, e.g. `0.1.0`); `/world/heightmap` downloads the original PGM; `/terrain/{face}/{x}/{y}` returns an 8-bit height sample. Face indices follow the worldgen strip order: +X, -X, +Y, -Y, +Z, -Z; coordinates are zero-based, with y increasing downwards. This raw sample endpoint does not infer metres because PGM does not store amplitude. Missing maps or out-of-bounds coordinates return 404; invalid coordinates return 400; database failures return 503. The world/terrain API is read-only and unauthenticated. Restrict network access or use a reverse proxy before exposing it publicly. SIGINT and SIGTERM shut the server down gracefully.
+`GET /health` checks PostgreSQL availability; `/world` returns world metadata (including `server_version`, e.g. `0.1.0`); `/world/heightmap` downloads the original PGM (clients read the surface from it); `/terrain/{face}/{x}/{y}` returns a 16-bit height sample (metres = sample x 0.25 - 8000). Face indices follow the worldgen strip order: +X, -X, +Y, -Y, +Z, -Z; coordinates are zero-based, with y increasing downwards. This raw sample endpoint does not infer metres because PGM does not store amplitude. Missing maps or out-of-bounds coordinates return 404; invalid coordinates return 400; database failures return 503. The world/terrain API is read-only and unauthenticated. Restrict network access or use a reverse proxy before exposing it publicly. SIGINT and SIGTERM shut the server down gracefully.
 
 ### Solar Clock
 
@@ -72,15 +72,13 @@ includes `heightmap_sha256` and the exact decimal-string `seed`; clients must
 verify both against `/world`. It uses the default worldgen amplitude convention
 of 8000 metres, not an amplitude inferred from arbitrary PGM input.
 
-Version 2 announces continuous seeded local relief, bounded to +/-12 metres,
-added to bilinear base-map sampling for walking, scenery and new spawns. The
-formula in `environment::relief_offset` uses normalized global coordinates,
-not cube-face coordinates, so its detail has no face seams. It smoothly fades
-out from 150 metres down to sea level. Coarse hydrology and `elevation_m` remain
-base-map data; the persisted PGM, seed and checksum are unchanged. Version-1
-clients must reject the new environment rather than render mismatched heights.
-Existing player records are not reset; the next accepted move projects their
-position onto the version-2 surface.
+Version 3 reads the local relief from the strip itself: `ishtaria-worldgen` generates the
+seeded relief (up to about +/-12 metres, faded out from 150 metres down to sea level) into
+every land sample, so walking, scenery, spawns, water and the client's surface all read one
+height per point (ADR 0020). The server no longer adds a relief of its own. Migration 0058
+stores two bytes per sample; worlds imported with the old 8-bit strip cannot be converted and
+are regenerated. Clients of version 2 must reject the new environment rather than add their
+run-time relief a second time.
 
 `face_size` is bounded to 64. Arrays use face-major order, then row and column,
 unlike the horizontal PNG strip. `elevation_m` contains terrain heights;

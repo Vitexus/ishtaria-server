@@ -224,7 +224,7 @@ async fn initialize(pool: &PgPool, cfg: &Config, import: Option<(&[u8], u64)>) -
         } else {
             sqlx::query("INSERT INTO heightmaps (world_id, seed, face_size, sha256, pgm, pixels) VALUES ($1, $2, $3, $4, $5, $6)")
                 .bind(world_id).bind(seed.to_string()).bind(map.face_size)
-                .bind(&map.sha256).bind(pgm).bind(&map.pixels)
+                .bind(&map.sha256).bind(pgm).bind(terrain::sample_bytes(&map.pixels))
                 .execute(&mut *transaction).await?;
         }
     }
@@ -244,7 +244,6 @@ fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/world", get(world))
         .route("/world/heightmap", get(heightmap))
-        .route("/world/heightmap.png", get(heightmap_png))
         .route("/world/environment", get(world_environment))
         .route("/world/objects", get(movement::world_objects))
         .route("/world/memorials", get(movement::world_memorials))
@@ -350,36 +349,6 @@ struct Sample {
     value: i32,
 }
 
-async fn heightmap_png(State(state): State<AppState>) -> Result<Response, ApiError> {
-    let map: Option<(i32, Vec<u8>)> =
-        sqlx::query_as("SELECT face_size, pixels FROM heightmaps WHERE world_id = $1")
-            .bind(state.world_id)
-            .fetch_optional(&state.pool)
-            .await?;
-    let Some((size, pixels)) = map else {
-        return Ok((StatusCode::NOT_FOUND, "no heightmap imported").into_response());
-    };
-    let encoded = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
-        let image = image::GrayImage::from_raw(size as u32 * 6, size as u32, pixels)
-            .context("invalid persisted heightmap dimensions")?;
-        let mut png = std::io::Cursor::new(Vec::new());
-        image.write_to(&mut png, image::ImageFormat::Png)?;
-        Ok(png.into_inner())
-    })
-    .await;
-    match encoded {
-        Ok(Ok(png)) => Ok(([(header::CONTENT_TYPE, "image/png")], png).into_response()),
-        error => {
-            eprintln!("heightmap encoding failed: {error:?}");
-            Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "heightmap encoding failed",
-            )
-                .into_response())
-        }
-    }
-}
-
 async fn world_environment(State(state): State<AppState>) -> Result<Response, ApiError> {
     let map: Option<(i32, Vec<u8>, String, String)> = sqlx::query_as(
         "SELECT face_size, pixels, seed, sha256 FROM heightmaps WHERE world_id = $1",
@@ -390,6 +359,7 @@ async fn world_environment(State(state): State<AppState>) -> Result<Response, Ap
     let Some((size, pixels, seed, sha256)) = map else {
         return Ok((StatusCode::NOT_FOUND, "no heightmap imported").into_response());
     };
+    let pixels = terrain::samples_from_bytes(&pixels);
     let painted = story::world::painted_biomes(&state).await;
     match tokio::task::spawn_blocking(move || {
         let biomes = painted.as_ref().map(|(map, _)| map.as_ref());
@@ -413,7 +383,8 @@ async fn sample(
     if !(0..6).contains(&face) || x < 0 || y < 0 {
         return Ok((StatusCode::BAD_REQUEST, "invalid terrain coordinates").into_response());
     }
-    let value: Option<i32> = sqlx::query_scalar("SELECT get_byte(pixels, y_index * 6 * face_size + face_index * face_size + x_index) FROM heightmaps CROSS JOIN (SELECT $2::integer AS face_index, $3::integer AS x_index, $4::integer AS y_index) AS coordinates WHERE world_id = $1 AND x_index < face_size AND y_index < face_size")
+    // Samples are two bytes each (big-endian); `index` counts samples, not bytes.
+    let value: Option<i32> = sqlx::query_scalar("SELECT get_byte(pixels, 2 * index) * 256 + get_byte(pixels, 2 * index + 1) FROM heightmaps CROSS JOIN (SELECT $2::integer AS face_index, $3::integer AS x_index, $4::integer AS y_index) AS coordinates CROSS JOIN LATERAL (SELECT coordinates.y_index * 6 * face_size + coordinates.face_index * face_size + coordinates.x_index AS index) AS position WHERE world_id = $1 AND x_index < face_size AND y_index < face_size")
         .bind(state.world_id).bind(face).bind(x).bind(y).fetch_optional(&state.pool).await?;
     Ok(match value {
         Some(value) => Json(Sample { face, x, y, value }).into_response(),

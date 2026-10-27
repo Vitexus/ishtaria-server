@@ -157,8 +157,10 @@ pub(super) async fn world(
     name: &str,
     policy: &str,
 ) -> World {
-    let mut pgm = b"P5\n96 16\n255\n".to_vec();
-    pgm.extend(vec![144; 16 * 16 * 6]);
+    let mut pgm = b"P5\n96 16\n65535\n".to_vec();
+    pgm.extend(crate::terrain::sample_bytes(
+        &vec![crate::terrain::legacy_sample(144); 16 * 16 * 6],
+    ));
     let cfg = world_config(name, policy);
     let id = initialize(pool, &cfg, Some((&pgm, 42))).await.unwrap();
     let directory: Arc<dyn PeerDirectory> = network.clone();

@@ -31,8 +31,9 @@ if [ -n "$IDS" ]; then
     fi
 fi
 if [ -n "$EARTH_ARGS" ]; then
+    # The seed sets the local relief generated into the strip (ADR 0020).
     # shellcheck disable=SC2086
-    ishtaria-worldgen $EARTH_ARGS "$SIZE" > "$TMP"
+    ishtaria-worldgen --seed "$SEED" $EARTH_ARGS "$SIZE" > "$TMP"
 else
     ishtaria-worldgen "$SEED" "$SIZE" > "$TMP"
 fi

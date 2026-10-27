@@ -433,10 +433,13 @@ async fn crops_grow_with_the_clock_and_only_the_owner_harvests(pool: PgPool) {
 async fn fishing_needs_a_rod_and_water(pool: PgPool) {
     let _auth_test = AUTH_TESTS.acquire().await.unwrap();
     // One of the six faces of the planet is sea, the rest is land.
-    let mut pgm = b"P5\n96 16\n255\n".to_vec();
+    let mut pgm = b"P5\n96 16\n65535\n".to_vec();
     for _row in 0..16 {
         for column in 0..96 {
-            pgm.push(if column / 16 == 5 { 60 } else { 144 });
+            let value = if column / 16 == 5 { 60 } else { 144 };
+            pgm.extend(crate::terrain::sample_bytes(&[
+                crate::terrain::legacy_sample(value),
+            ]));
         }
     }
     crate::story::world::reset_cache().await;

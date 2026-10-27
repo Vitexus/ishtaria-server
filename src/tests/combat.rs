@@ -10,11 +10,9 @@ async fn strike(
     // The animal bites back by chance; ask until it does.
     for _ in 0..400 {
         let mut transaction = pool.begin().await.unwrap();
-        assert!(
-            survival::lock_alive(state, &mut transaction, player_id)
-                .await
-                .unwrap()
-        );
+        assert!(survival::lock_alive(state, &mut transaction, player_id)
+            .await
+            .unwrap());
         let counter = crate::combat::counter_attack(state, &mut transaction, player_id, model)
             .await
             .unwrap();

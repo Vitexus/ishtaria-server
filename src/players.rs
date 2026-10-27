@@ -328,6 +328,7 @@ async fn ensure_position(
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or_else(unavailable)?;
+    let pixels = crate::terrain::samples_from_bytes(&pixels);
     let painted = super::story::world::painted_biomes(state).await;
     let position = tokio::task::spawn_blocking(move || {
         let biomes = painted.as_ref().map(|(map, _)| map.as_ref());

@@ -61,8 +61,10 @@ async fn lease_world(pool: &PgPool) -> (Router, i64) {
     cfg.monetization = Some(
         toml::from_str("enabled = true\ncurrency = \"CZK\"\ntile_price_minor = 1000\ngrace_days = 7\nmax_tiles = 100").unwrap(),
     );
-    let mut pgm = b"P5\n96 16\n255\n".to_vec();
-    pgm.extend(vec![144; 16 * 16 * 6]);
+    let mut pgm = b"P5\n96 16\n65535\n".to_vec();
+    pgm.extend(crate::terrain::sample_bytes(
+        &vec![crate::terrain::legacy_sample(144); 16 * 16 * 6],
+    ));
     let id = initialize(pool, &cfg, Some((&pgm, 42))).await.unwrap();
     (
         app(AppState {

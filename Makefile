@@ -18,6 +18,9 @@ import:
 ## All CI gates: formatting, lints and tests.
 check: fmt clippy test
 
+dbreset:
+	sudo -u postgres psql -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS ishtaria WITH (FORCE)" -c "CREATE DATABASE ishtaria OWNER ishtaria"
+
 fmt:
 	cargo fmt --check
 

@@ -215,7 +215,10 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&with_cause).unwrap();
         assert_eq!(parsed["cause"], "creature");
         assert_eq!(parsed["quest"], "gilgamesh:hunter");
-        let without = format!(r#"{{"quest":"{}","stage":"{}"}}"#, "gilgamesh:hunter", "start");
+        let without = format!(
+            r#"{{"quest":"{}","stage":"{}"}}"#,
+            "gilgamesh:hunter", "start"
+        );
         let plain: serde_json::Value = serde_json::from_str(&without).unwrap();
         assert!(plain.get("cause").is_none());
     }

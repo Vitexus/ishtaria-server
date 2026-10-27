@@ -104,9 +104,7 @@ fn rules_for(npc_id: &str) -> Rules {
             .and_then(|(_, local)| config.npcs.get(local))
     });
     Rules {
-        max_health: over
-            .and_then(|r| r.max_health)
-            .unwrap_or(config.max_health),
+        max_health: over.and_then(|r| r.max_health).unwrap_or(config.max_health),
         strike_damage: over
             .and_then(|r| r.strike_damage)
             .unwrap_or(config.strike_damage),
@@ -579,7 +577,9 @@ pub(super) async fn tick(state: &AppState) -> Result<(), Error> {
             tx.commit().await?;
             continue;
         }
-        let dt = since_update.unwrap_or(TICK_DT_S).clamp(0.5, TICK_DT_S * 1.5);
+        let dt = since_update
+            .unwrap_or(TICK_DT_S)
+            .clamp(0.5, TICK_DT_S * 1.5);
         if to_player > config.strike_range_m {
             let step = rules.chase_speed_m_s * dt;
             // Stop just inside strike reach so the next blow can land.
@@ -648,6 +648,9 @@ mod tests {
         assert!(enkidu.counter_damage * 2 > 100);
         let stepped = step_toward([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 4.0);
         assert!((stepped[0] - 4.0).abs() < 1e-9);
-        assert!((yaw_toward([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]) - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        assert!(
+            (yaw_toward([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]) - std::f64::consts::FRAC_PI_2).abs()
+                < 1e-9
+        );
     }
 }

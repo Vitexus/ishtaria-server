@@ -210,12 +210,11 @@ pub(super) async fn ambush_tick(state: &AppState) -> Result<(), Error> {
             continue;
         }
         let mut tx = state.pool.begin().await?;
-        let alive: bool = sqlx::query_scalar(
-            "SELECT died_at IS NULL FROM players WHERE id = $1 FOR UPDATE",
-        )
-        .bind(player_id)
-        .fetch_one(&mut *tx)
-        .await?;
+        let alive: bool =
+            sqlx::query_scalar("SELECT died_at IS NULL FROM players WHERE id = $1 FOR UPDATE")
+                .bind(player_id)
+                .fetch_one(&mut *tx)
+                .await?;
         if !alive {
             continue;
         }

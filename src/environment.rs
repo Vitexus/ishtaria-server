@@ -1,5 +1,6 @@
-//! Local relief and spawning: the gentle hills laid over the imported map, and where a new
-//! character may appear (dry, temperate land away from water).
+//! Environment and spawning: the coarse grid of elevation, water and biomes derived from the
+//! imported height strip (which already carries its local relief), and where a new character may
+//! appear (dry, temperate land away from water).
 
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use serde::Serialize;
@@ -7,21 +8,6 @@ use std::{cmp::Reverse, collections::BinaryHeap};
 
 pub const MAX_FACE_SIZE: usize = 64;
 pub const DRY: i32 = -8001;
-
-pub fn relief_offset(direction: [f64; 3], base_height: f64, seed: &str) -> f64 {
-    let radius = direction.iter().map(|axis| axis * axis).sum::<f64>().sqrt();
-    let point = direction.map(|axis| axis / radius * 6_371_000.0);
-    let phase = seed
-        .bytes()
-        .fold(0u32, |value, byte| (value * 31 + u32::from(byte)) % 997);
-    let phase = f64::from(phase) * std::f64::consts::TAU / 997.0;
-    let coast = (base_height / 150.0).clamp(0.0, 1.0);
-    let fade = coast * coast * (3.0 - 2.0 * coast);
-    fade * (9.0
-        * ((point[0] * 0.73 + point[1] * 0.41 + point[2] * 0.55) / 93.0 + phase).sin()
-        * ((point[0] * -0.38 + point[1] * 0.87 + point[2] * 0.31) / 127.0 - phase).sin()
-        + 3.0 * ((point[0] * 0.21 + point[1] * -0.52 + point[2] * 0.83) / 37.0 + phase).sin())
-}
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Environment {
@@ -239,14 +225,14 @@ impl BiomeMap {
 }
 
 #[cfg(test)]
-pub fn generate(size: usize, pixels: &[u8], seed: &str, sha256: &str) -> Option<Environment> {
+pub fn generate(size: usize, pixels: &[u16], seed: &str, sha256: &str) -> Option<Environment> {
     generate_with(size, pixels, seed, sha256, None)
 }
 
 /// Like [`generate`], with the land biomes a datadisk paints taking the place of the derived ones.
 pub fn generate_with(
     size: usize,
-    pixels: &[u8],
+    pixels: &[u16],
     seed: &str,
     sha256: &str,
     painted: Option<&BiomeMap>,
@@ -263,7 +249,7 @@ pub fn generate_with(
                 let source_row = ((row * 2 + 1) * size / (resolution * 2)).min(size - 1);
                 let source_column = ((column * 2 + 1) * size / (resolution * 2)).min(size - 1);
                 let value = pixels[source_row * size * 6 + face * size + source_column];
-                elevation_m.push(i32::from(value) * 16000 / 255 - 8000);
+                elevation_m.push(crate::terrain::metres(value).round() as i32);
             }
         }
     }
@@ -349,7 +335,7 @@ pub fn generate_with(
         };
     }
     Some(Environment {
-        version: 2,
+        version: 3,
         heightmap_sha256: sha256.to_owned(),
         seed: seed.to_owned(),
         face_size: resolution,
@@ -362,13 +348,13 @@ pub fn generate_with(
 }
 
 #[cfg(test)]
-pub fn spawn_position(size: usize, pixels: &[u8], seed: &str, sha256: &str) -> Option<[f64; 3]> {
+pub fn spawn_position(size: usize, pixels: &[u16], seed: &str, sha256: &str) -> Option<[f64; 3]> {
     spawn_position_with(size, pixels, seed, sha256, None)
 }
 
 pub fn spawn_position_with(
     size: usize,
-    pixels: &[u8],
+    pixels: &[u16],
     seed: &str,
     sha256: &str,
     painted: Option<&BiomeMap>,
@@ -402,11 +388,9 @@ pub fn spawn_position_with(
                 for sample_column in
                     source_column.saturating_sub(1)..=(source_column + 1).min(size - 1)
                 {
-                    let height =
-                        f64::from(pixels[sample_row * size * 6 + face * size + sample_column])
-                            * 16000.0
-                            / 255.0
-                            - 8000.0;
+                    let height = crate::terrain::metres(
+                        pixels[sample_row * size * 6 + face * size + sample_column],
+                    );
                     minimum = minimum.min(height);
                     maximum = maximum.max(height);
                 }
@@ -420,9 +404,7 @@ pub fn spawn_position_with(
             let horizontal = (column as f64 + 0.5) * size as f64 / resolution as f64 - 0.5;
             let vertical = (row as f64 + 0.5) * size as f64 / resolution as f64 - 0.5;
             let height_at = |sample_column: usize, sample_row: usize| {
-                f64::from(pixels[sample_row * size * 6 + face * size + sample_column]) * 16000.0
-                    / 255.0
-                    - 8000.0
+                crate::terrain::metres(pixels[sample_row * size * 6 + face * size + sample_column])
             };
             let left = horizontal.floor() as usize;
             let top = vertical.floor() as usize;
@@ -452,7 +434,6 @@ pub fn spawn_position_with(
                         + point[0].powi(2) * point[1].powi(2) / 3.0)
                         .sqrt(),
             ];
-            let elevation = elevation + relief_offset(direction, elevation, seed);
             Some(direction.map(|coordinate| coordinate * (radius + elevation)))
         })
         .choose(&mut OsRng)
@@ -461,11 +442,12 @@ pub fn spawn_position_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terrain::legacy_sample;
 
     #[test]
     fn land_biomes_form_coherent_regions_with_both_vegetation_kinds() {
         let size = 32;
-        let pixels = vec![150; size * size * 6];
+        let pixels = vec![legacy_sample(150); size * size * 6];
         let environment = generate(size, &pixels, "42", "test").unwrap();
         let biomes = &environment.biomes;
         assert!(biomes.contains(&4) && biomes.contains(&5), "{biomes:?}");
@@ -517,7 +499,7 @@ mod tests {
     #[test]
     fn painted_biomes_replace_land_biomes_but_never_water() {
         let size = 16;
-        let mut pixels = vec![144; size * size * 6];
+        let mut pixels = vec![legacy_sample(144); size * size * 6];
         // The first cells of the first face are sea.
         for value in pixels.iter_mut().take(size * 4) {
             *value = 0;
@@ -538,50 +520,17 @@ mod tests {
     }
 
     #[test]
-    fn relief_is_bounded_continuous_seeded_and_coast_safe() {
-        for (direction, seed, expected) in [
-            ([1.0, 0.0, 0.0], "42", -7.595497428807521),
-            ([1.0, 1.0, 0.0], "42", 4.106134823054352),
-            ([1.0, 2.0, 3.0], "18446744073709551615", -1.7645037024417682),
-            ([6371000.0, 0.01, 0.0], "42", -7.594750622916318),
-        ] {
-            assert!((relief_offset(direction, 1000.0, seed) - expected).abs() < 0.000001);
-        }
-        let mut minimum = f64::MAX;
-        let mut maximum = f64::MIN;
-        for metre in 0..1000 {
-            let point = [6_371_000.0, f64::from(metre), 0.0];
-            let height = relief_offset(point, 1000.0, "42");
-            minimum = minimum.min(height);
-            maximum = maximum.max(height);
-            assert!(height.abs() <= 12.0);
-            let adjacent = [point[0], point[1] + 0.01, point[2]];
-            assert!((height - relief_offset(adjacent, 1000.0, "42")).abs() < 0.003);
-            assert_eq!(relief_offset(point, 0.0, "42"), 0.0);
-            assert_eq!(relief_offset(point, -1000.0, "42"), 0.0);
-        }
-        assert!(maximum - minimum > 10.0);
-        assert_ne!(
-            relief_offset([1.0, 0.0, 0.0], 1000.0, "42"),
-            relief_offset([1.0, 0.0, 0.0], 1000.0, "43")
-        );
-    }
-
-    #[test]
     fn spawns_only_on_dry_temperate_lowlands() {
         let size = 16;
-        let pixels = vec![144; size * size * 6];
+        let pixels = vec![legacy_sample(144); size * size * 6];
         for _ in 0..32 {
             let position = spawn_position(size, &pixels, "42", "test").unwrap();
             let radius = position.iter().map(|axis| axis * axis).sum::<f64>().sqrt();
-            let base = 144.0 * 16000.0 / 255.0 - 8000.0;
-            assert!(
-                (radius - (6_371_000.0 + base + relief_offset(position, base, "42"))).abs()
-                    < 0.000001
-            );
+            let base = crate::terrain::metres(legacy_sample(144));
+            assert!((radius - (6_371_000.0 + base)).abs() < 0.000001);
             assert!(position[1].abs() / radius + (radius - 6_371_000.0) / 6000.0 <= 0.72);
         }
-        for value in [0, 127, 128, 160, 255] {
+        for value in [0, 127, 128, 160, 255].map(legacy_sample) {
             assert!(spawn_position(size, &vec![value; size * size * 6], "42", "test").is_none());
         }
     }
@@ -589,11 +538,11 @@ mod tests {
     #[test]
     fn spawns_away_from_ocean_and_lakes() {
         let size = 16;
-        let mut pixels = vec![144; size * size * 6];
+        let mut pixels = vec![legacy_sample(144); size * size * 6];
         for row in 0..size {
-            pixels[row * size * 6..row * size * 6 + size].fill(80);
+            pixels[row * size * 6..row * size * 6 + size].fill(legacy_sample(80));
         }
-        pixels[8 * size * 6 + 4 * size + 8] = 135;
+        pixels[8 * size * 6 + 4 * size + 8] = legacy_sample(135);
         let environment = generate(size, &pixels, "42", "test").unwrap();
         assert!(environment.biomes.contains(&0));
         assert!(environment.biomes.contains(&1));
@@ -601,11 +550,8 @@ mod tests {
             let position = spawn_position(size, &pixels, "42", "test").unwrap();
             assert!(position[0] < position[1].abs().max(position[2].abs()));
             let radius = position.iter().map(|axis| axis * axis).sum::<f64>().sqrt();
-            let base = 144.0 * 16000.0 / 255.0 - 8000.0;
-            assert!(
-                (radius - (6_371_000.0 + base + relief_offset(position, base, "42"))).abs()
-                    < 0.000001
-            );
+            let base = crate::terrain::metres(legacy_sample(144));
+            assert!((radius - (6_371_000.0 + base)).abs() < 0.000001);
             if position[2] > position[0].abs().max(position[1].abs()) {
                 let horizontal = position[0] / radius;
                 let vertical = position[1] / radius;
@@ -635,9 +581,9 @@ mod tests {
     #[test]
     fn fills_lakes_routes_rivers_and_never_cycles() {
         let size = 8;
-        let mut pixels = vec![160; size * size * 6];
-        pixels[0] = 80;
-        pixels[4 * size * 6 + 4] = 140;
+        let mut pixels = vec![legacy_sample(160); size * size * 6];
+        pixels[0] = legacy_sample(80);
+        pixels[4 * size * 6 + 4] = legacy_sample(140);
         let map = generate(size, &pixels, "42", "test").unwrap();
         assert_eq!(map, generate(size, &pixels, "42", "test").unwrap());
         assert!(map.biomes.contains(&0));
@@ -664,7 +610,7 @@ mod tests {
         assert!(generate(0, &[], "42", "test").is_none());
         assert!(generate(1025, &[], "42", "test").is_none());
         assert!(generate(1, &[0; 6], "bad", "test").is_none());
-        let map = generate(128, &vec![180; 128 * 128 * 6], "42", "test").unwrap();
+        let map = generate(128, &vec![legacy_sample(180); 128 * 128 * 6], "42", "test").unwrap();
         assert_eq!(map.face_size, MAX_FACE_SIZE);
         assert_eq!(map.biomes.len(), MAX_FACE_SIZE * MAX_FACE_SIZE * 6);
         assert!(!map.biomes.contains(&0));

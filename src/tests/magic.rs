@@ -264,7 +264,9 @@ async fn a_ward_softens_the_bite_of_creatures(pool: PgPool) {
     let bite = |pool: PgPool, state: AppState| async move {
         for _ in 0..400 {
             let mut transaction = pool.begin().await.unwrap();
-            assert!(survival::lock_alive(&state, &mut transaction, id).await.unwrap());
+            assert!(survival::lock_alive(&state, &mut transaction, id)
+                .await
+                .unwrap());
             let counter =
                 crate::combat::counter_attack(&state, &mut transaction, id, "animal.wolf")
                     .await
