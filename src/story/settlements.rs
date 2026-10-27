@@ -1445,5 +1445,38 @@ pub fn finish(
         story.add_disk(disk)?;
         story.check()?;
     }
+    wear_disk_looks(story);
     Ok(built)
+}
+
+/// The generated characters (`<disk>:<role>_NN`) by the generated disk that holds them.
+const GENERATED_ROLES: [(&str, &str); 5] = [
+    ("markets", "trader"),
+    ("travelers", "traveler"),
+    ("shepherds", "shepherd"),
+    ("harbours", "shipwright"),
+    ("forges", "blacksmith"),
+];
+
+/// A datadisk NPC tagged `look_<role>` (tags are plain identifiers) lends its look (pack, skin and model) to every generated
+/// character of that role, so the shepherds of a Sumerian world look Sumerian. Its model path is
+/// already qualified with its own disk, so it is copied after the generated disks were added.
+pub(super) fn wear_disk_looks(story: &mut Story) {
+    for (disk, role) in GENERATED_ROLES {
+        let tag = format!("look_{role}");
+        let Some(look) = story
+            .npcs
+            .values()
+            .find(|npc| npc.tags.contains(&tag))
+            .map(|npc| npc.character.clone())
+        else {
+            continue;
+        };
+        let prefix = format!("{disk}:{role}_");
+        for npc in story.npcs.values_mut() {
+            if npc.id.starts_with(&prefix) {
+                npc.character = look.clone();
+            }
+        }
+    }
 }

@@ -1038,6 +1038,25 @@ fn every_world_grows_towns_with_graveyards_and_harbours_with_shipwrights() {
             |movement| movement.kind == MovementKind::Herd && movement.waypoints.len() == 1
         )));
     assert!(story.dialogues.contains_key("shepherds:shepherd"));
+    // A datadisk character tagged `look_shepherd` lends its look to the generated shepherds, and only to them.
+    let mut lender = shepherds[0].clone();
+    lender.id = "disk:crowd_shepherd".to_owned();
+    lender.tags = vec!["look_shepherd".to_owned()];
+    lender.character.model = Some("disk/media/models/crowd_shepherd.glb".to_owned());
+    let trader_look = traders[0].character.model.clone();
+    let shepherd_ids: Vec<String> = shepherds.iter().map(|npc| npc.id.clone()).collect();
+    let mut dressed = story.clone();
+    dressed.npcs.insert(lender.id.clone(), lender);
+    settlements::wear_disk_looks(&mut dressed);
+    assert!(shepherd_ids
+        .iter()
+        .all(|id| dressed.npcs[id].character.model.as_deref()
+            == Some("disk/media/models/crowd_shepherd.glb")));
+    assert!(dressed
+        .npcs
+        .values()
+        .filter(|npc| npc.id.starts_with("markets:trader_"))
+        .all(|npc| npc.character.model == trader_look));
     // The characters of generated towns tell their knowledge cards, with a picture and an article to read.
     for npc in story.npcs.values().filter(|npc| {
         ["trader", "shepherd", "guard", "shipwright"]
