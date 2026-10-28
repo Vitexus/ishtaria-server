@@ -75,8 +75,8 @@ pub(super) fn snare_stages() -> Vec<String> {
     config().stages.keys().cloned().collect()
 }
 
-/// The trapper may set a snare only while the hunter quest is on a trap stage, and only one
-/// armed snare at a time.
+/// The trapper may set a snare only while the hunter quest is on a trap stage; as many as he carries
+/// (placing spends one from the inventory).
 pub(super) async fn may_place(state: &AppState, player_id: i64) -> Result<(), Error> {
     let config = config();
     let suffix = format!("%{}", config.quest_suffix);
@@ -92,14 +92,6 @@ pub(super) async fn may_place(state: &AppState, player_id: i64) -> Result<(), Er
     };
     if !config.stages.contains_key(&stage) {
         return Err(status(StatusCode::CONFLICT, "snares already done"));
-    }
-    let armed: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM hunting_snares WHERE owner_id = $1)")
-            .bind(player_id)
-            .fetch_one(&state.pool)
-            .await?;
-    if armed {
-        return Err(status(StatusCode::CONFLICT, "snare already set"));
     }
     Ok(())
 }
@@ -165,7 +157,6 @@ struct SnareRow {
     placed_id: i64,
     owner_id: i64,
     quest_id: String,
-    stage: String,
     phase: String,
     /// Seconds since clear_since, or null when not clearing yet.
     clear_for: Option<f64>,
@@ -183,7 +174,7 @@ struct SnareRow {
 pub(super) async fn tick(state: &AppState) -> Result<(), Error> {
     let config = config();
     let rows: Vec<SnareRow> = sqlx::query_as(
-        "SELECT s.placed_id, s.owner_id, s.quest_id, s.stage, s.phase,
+        "SELECT s.placed_id, s.owner_id, s.quest_id, s.phase,
                 CASE WHEN s.clear_since IS NULL THEN NULL ELSE extract(epoch FROM (clock_timestamp() - s.clear_since))::float8 END AS clear_for,
                 CASE WHEN s.animal_since IS NULL THEN NULL ELSE extract(epoch FROM (clock_timestamp() - s.animal_since))::float8 END AS animal_for,
                 o.position_x, o.position_y, o.position_z,
@@ -270,19 +261,10 @@ pub(super) async fn tick(state: &AppState) -> Result<(), Error> {
     Ok(())
 }
 
+/// Enkidu tears a snare apart and the quest moves one trap stage on from wherever it is now: with
+/// several snares set, each one he ruins counts, not only the one set on the current stage.
 async fn ruin(state: &AppState, row: &SnareRow) -> Result<(), Error> {
     let config = config();
-    let Some(advance) = config.stages.get(&row.stage) else {
-        sqlx::query("DELETE FROM hunting_snares WHERE placed_id = $1")
-            .bind(row.placed_id)
-            .execute(&state.pool)
-            .await?;
-        sqlx::query("DELETE FROM placed_objects WHERE id = $1")
-            .bind(row.placed_id)
-            .execute(&state.pool)
-            .await?;
-        return Ok(());
-    };
     let mut transaction = state.pool.begin().await?;
     let current: Option<String> = sqlx::query_scalar(
         "SELECT stage FROM player_quests WHERE player_id = $1 AND quest_id = $2 FOR UPDATE",
@@ -291,8 +273,11 @@ async fn ruin(state: &AppState, row: &SnareRow) -> Result<(), Error> {
     .bind(&row.quest_id)
     .fetch_optional(&mut *transaction)
     .await?;
-    if current.as_deref() != Some(row.stage.as_str()) {
-        // Quest moved on elsewhere; drop the snare quietly.
+    let advance = current
+        .as_deref()
+        .and_then(|stage| config.stages.get(stage));
+    let Some(advance) = advance else {
+        // The trap stages are over (or the quest is gone); drop the snare quietly.
         sqlx::query("DELETE FROM hunting_snares WHERE placed_id = $1")
             .bind(row.placed_id)
             .execute(&mut *transaction)
@@ -303,7 +288,7 @@ async fn ruin(state: &AppState, row: &SnareRow) -> Result<(), Error> {
             .await?;
         transaction.commit().await?;
         return Ok(());
-    }
+    };
     sqlx::query(
         "UPDATE player_quests SET stage = $3, updated_at = now() WHERE player_id = $1 AND quest_id = $2",
     )
@@ -320,7 +305,17 @@ async fn ruin(state: &AppState, row: &SnareRow) -> Result<(), Error> {
     .bind(&flag)
     .execute(&mut *transaction)
     .await?;
-    if advance.give_snare {
+    // A replacement only when the trapper would otherwise be stuck: none carried and none still set.
+    let stuck: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM player_inventory WHERE player_id = $1 AND item_id = $2)
+            AND NOT EXISTS (SELECT 1 FROM hunting_snares WHERE owner_id = $1 AND placed_id <> $3)",
+    )
+    .bind(row.owner_id)
+    .bind(&config.item_id)
+    .bind(row.placed_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if advance.give_snare && stuck {
         crate::gathering::add_items(
             &mut transaction,
             row.owner_id,

@@ -745,6 +745,8 @@ pub(super) struct Marker {
     pub(super) position: [f64; 3],
     /// The place where a quest not yet begun waits (instead of one of an active quest).
     pub(super) next: bool,
+    /// A place the player already knows from a quest that has moved on (not the current goal).
+    pub(super) known: bool,
 }
 
 /// The item that reveals markers for quests not yet begun (Faust / Endland intro).
@@ -774,7 +776,67 @@ async fn markers(
     if holds.is_none() {
         found.retain(|marker| !marker.next);
     }
+    // Every goal shown and every place where a begun quest started becomes known for good.
+    let mut learned: Vec<(String, String)> = found
+        .iter()
+        .filter(|marker| !marker.next)
+        .map(|marker| (marker.id.clone(), marker.quest.clone()))
+        .collect();
+    for (quest, _) in &rows {
+        if let Some(place) = story
+            .story
+            .quests
+            .get(quest)
+            .and_then(|q| q.start_place.clone())
+        {
+            learned.push((place, quest.clone()));
+        }
+    }
+    for (place, quest) in &learned {
+        sqlx::query(
+            "INSERT INTO player_known_places (player_id, place_id, quest_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(player_id)
+        .bind(place)
+        .bind(quest)
+        .execute(&state.pool)
+        .await?;
+    }
+    let known: Vec<(String, String)> = sqlx::query_as(
+        "SELECT place_id, quest_id FROM player_known_places WHERE player_id = $1 ORDER BY learned_at",
+    )
+    .bind(player_id)
+    .fetch_all(&state.pool)
+    .await?;
+    found.extend(known_markers(&story.story, &story.sites, &known, &found));
+    found.truncate(64);
     Ok(Json(found))
+}
+
+/// Markers of known places (`(place, quest)`) that are not among the current ones.
+pub(super) fn known_markers(
+    story: &Story,
+    sites: &HashMap<String, Placed>,
+    known: &[(String, String)],
+    current: &[Marker],
+) -> Vec<Marker> {
+    known
+        .iter()
+        .filter(|(place, _)| current.iter().all(|marker| &marker.id != place))
+        .filter_map(|(place, quest)| {
+            let site = sites.get(place)?;
+            let anchor = story.anchors.iter().find(|anchor| &anchor.id == place)?;
+            Some(Marker {
+                id: place.clone(),
+                quest: quest.clone(),
+                name_key: anchor.place.name_key.clone(),
+                kind: anchor.place.kind.clone(),
+                position: world::site_position(site),
+                next: false,
+                known: true,
+            })
+        })
+        .collect()
 }
 
 /// The places the quests point to, given the player's `(quest, stage)` rows.
@@ -816,6 +878,7 @@ pub(super) fn markers_of(
             kind: anchor.place.kind.clone(),
             position: world::site_position(site),
             next,
+            known: false,
         });
     }
     found.truncate(64);

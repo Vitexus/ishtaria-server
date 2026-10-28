@@ -12,6 +12,7 @@ mod farming;
 mod guard;
 mod halls;
 mod harvest;
+mod hunting;
 mod leases;
 mod loot;
 mod magic;
@@ -1862,7 +1863,7 @@ async fn imported_map_survives_restart_and_http_roundtrip(pool: PgPool) {
     );
     let size = decoded.face_size;
     let environment = response_json(request(&router, "/world/environment").await).await;
-    assert_eq!(environment["version"], 2);
+    assert_eq!(environment["version"], 3);
     assert_eq!(environment["heightmap_sha256"], decoded.sha256);
     assert_eq!(environment["seed"], "42");
     assert_eq!(

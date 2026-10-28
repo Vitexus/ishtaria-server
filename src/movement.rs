@@ -78,6 +78,18 @@ const WANDER_PARTS: i64 = 3;
 const WANDER_SLOTS: i64 = 3;
 /// How far a free animal strays from where the seed put it, and a farm animal from its pasture.
 const WILD_WANDER_M: f64 = 40.0;
+/// A struck animal that does not fight back runs this far from the hunter, in this time, rests where it
+/// stopped and then walks back into its usual wandering.
+const FLEE_DISTANCE_M: f64 = 45.0;
+const FLEE_RUN_MS: i64 = 6_000;
+const FLEE_REST_MS: i64 = 60_000;
+const FLEE_RETURN_MS: i64 = 40_000;
+
+/// Animals fleeing from a hunter: id -> (start, where it was struck, where it runs to). In memory only:
+/// a flight lasts under two minutes and a restart just ends it.
+#[allow(clippy::type_complexity)]
+static FLEES: std::sync::Mutex<Option<HashMap<String, (i64, [f64; 3], [f64; 3])>>> =
+    std::sync::Mutex::new(None);
 /// Birds circle farther than herds; they stay above the same seed cell.
 const FLY_WANDER_M: f64 = 70.0;
 const FARM_WANDER_M: f64 = 14.0;
@@ -1596,18 +1608,27 @@ impl WalkingTerrain {
             return (level - height).max(0.0);
         }
         // A dry patch is dry even over a coarse sea or river cell, down to sea level.
-        if height <= 0.0 || patch_dry(direction) {
+        if patch_dry(direction) {
             return (-height).max(0.0);
         }
+        // The same rule as the client's `_detail_water_km`, so there is no water the player cannot see:
+        // ground below sea level is not sea by itself (the strip is interpolated between its samples, and
+        // land next to a water sample dips below zero far from any coast), only the water of its cell is.
         let (face, horizontal, vertical) = coordinates(direction);
         let size = self.environment.face_size;
         let index = face * size * size
             + ((vertical * size as f64) as usize).min(size - 1) * size
             + ((horizontal * size as f64) as usize).min(size - 1);
         let water = self.environment.water_m[index];
-        let elevation = self.environment.elevation_m[index];
-        if water != environment::DRY && water > elevation && f64::from(water) - height >= 0.5 {
-            return f64::from(water) - height;
+        if water == environment::DRY {
+            return 0.0;
+        }
+        let depth = f64::from(water) - height;
+        if environment::is_open_water(self.environment.biomes[index]) {
+            return depth.max(0.0);
+        }
+        if water > self.environment.elevation_m[index] && depth >= 0.5 {
+            return depth;
         }
         0.0
     }
@@ -2384,6 +2405,58 @@ impl WalkingTerrain {
 
     /// Waypoints of a land animal (or bird) from the start of the current slot onwards.
     pub(super) fn animal_route(&self, animal: &WorldObject, now_ms: i64) -> Vec<[f64; 4]> {
+        self.flee_route(animal, now_ms)
+            .unwrap_or_else(|| self.usual_route(animal, now_ms))
+    }
+
+    /// Sends a struck animal running away from `hunter` (metres from the centre).
+    pub(super) fn start_flee(&self, animal: &WorldObject, hunter: [f64; 3], now_ms: i64) {
+        let here = unit(animal.position);
+        let away: [f64; 3] = std::array::from_fn(|axis| animal.position[axis] - hunter[axis]);
+        let along = away.iter().zip(here).map(|(a, b)| a * b).sum::<f64>();
+        let mut tangent: [f64; 3] = std::array::from_fn(|axis| away[axis] - here[axis] * along);
+        if length(tangent) < 1e-6 {
+            // Struck from straight above or below: any way along the ground will do.
+            tangent = [-here[1], here[0], 0.0];
+        }
+        let tangent = unit(tangent);
+        let target = unit(std::array::from_fn(|axis| {
+            here[axis] + tangent[axis] * FLEE_DISTANCE_M / RADIUS
+        }));
+        let metres = RADIUS + self.height(target).max(0.0);
+        let to = target.map(|value| value * metres);
+        let mut flees = FLEES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let flees = flees.get_or_insert_with(HashMap::new);
+        flees.retain(|_, (start, _, _)| {
+            now_ms - *start < FLEE_RUN_MS + FLEE_REST_MS + FLEE_RETURN_MS
+        });
+        flees.insert(animal.id.clone(), (now_ms, animal.position, to));
+    }
+
+    /// The run, the rest and the walk back of a fleeing animal, while it lasts.
+    fn flee_route(&self, animal: &WorldObject, now_ms: i64) -> Option<Vec<[f64; 4]>> {
+        let (start, from, to) = *FLEES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()?
+            .get(&animal.id)?;
+        let end = start + FLEE_RUN_MS + FLEE_REST_MS + FLEE_RETURN_MS;
+        if now_ms >= end {
+            return None;
+        }
+        let back = route_position(&self.usual_route(animal, end), end);
+        let entry = |time: i64, point: [f64; 3]| [time as f64, point[0], point[1], point[2]];
+        Some(vec![
+            entry(start, from),
+            entry(start + FLEE_RUN_MS, to),
+            entry(start + FLEE_RUN_MS + FLEE_REST_MS, to),
+            entry(end, back),
+        ])
+    }
+
+    fn usual_route(&self, animal: &WorldObject, now_ms: i64) -> Vec<[f64; 4]> {
         if let Some(route) = self.flock_route(animal, now_ms) {
             return route;
         }
@@ -3899,6 +3972,84 @@ mod tests {
         // The shore is dry again: a swimmer climbs out.
         terrain.environment.water_m.fill(environment::DRY);
         assert!(terrain.step(swum, [0.0, 0.0, 1.0], 0.25).is_some());
+    }
+
+    #[test]
+    fn a_struck_herbivore_runs_from_the_hunter_rests_and_walks_back() {
+        let _serial = serial();
+        let pixels = vec![legacy_sample(145); 16 * 16 * 6];
+        let environment = environment::generate(16, &pixels, "42", "test").unwrap();
+        let terrain = WalkingTerrain {
+            size: 16,
+            pixels,
+            environment,
+            catalog: Vec::new(),
+            removed: Default::default(),
+        };
+        let ground = RADIUS + terrain.height([1.0, 0.0, 0.0]);
+        let animal = WorldObject {
+            id: "test:flee:gazelle".to_owned(),
+            model: "zeroad.gazelle".to_owned(),
+            position: [ground, 0.0, 0.0],
+            scale_m: 1.0,
+            yaw: 0.0,
+            collision_radius_m: 0.0,
+            biome: 4,
+            ground_offset_m: 0.0,
+        };
+        let now = 1_000_000_000;
+        // The hunter stands 3 m to the -z side; the gazelle runs off to +z.
+        terrain.start_flee(&animal, [ground, 0.0, -3.0], now);
+        let route = terrain.animal_route(&animal, now);
+        let distance =
+            |a: [f64; 3], b: [f64; 3]| length(std::array::from_fn(|axis| a[axis] - b[axis]));
+        let ran = route_position(&route, now + FLEE_RUN_MS);
+        assert!(
+            (distance(ran, animal.position) - FLEE_DISTANCE_M).abs() < 1.0,
+            "ran {}",
+            distance(ran, animal.position)
+        );
+        assert!(ran[2] > 40.0, "away from the hunter: {ran:?}");
+        assert_eq!(
+            route_position(&route, now + FLEE_RUN_MS + FLEE_REST_MS / 2),
+            ran,
+            "it rests where it stopped"
+        );
+        let end = now + FLEE_RUN_MS + FLEE_REST_MS + FLEE_RETURN_MS;
+        assert_eq!(
+            terrain.animal_route(&animal, end),
+            terrain.usual_route(&animal, end),
+            "then it wanders as before"
+        );
+    }
+
+    #[test]
+    fn ground_below_sea_level_in_a_dry_cell_is_land_as_the_client_draws_it() {
+        let _serial = serial();
+        let pixels = vec![legacy_sample(145); 16 * 16 * 6];
+        let environment = environment::generate(16, &pixels, "42", "test").unwrap();
+        let mut terrain = WalkingTerrain {
+            size: 16,
+            pixels,
+            environment,
+            catalog: Vec::new(),
+            removed: Default::default(),
+        };
+        // The strip dips below zero between a water sample and land: the client draws no water there.
+        terrain.pixels.fill(31_996); // -1 m
+        terrain.environment.biomes.fill(4);
+        terrain.environment.water_m.fill(environment::DRY);
+        let here = [1.0, 0.0, 0.0];
+        assert!(terrain.height(here) < 0.0);
+        assert_eq!(
+            terrain.water_depth(here),
+            0.0,
+            "no invisible sea to drown in"
+        );
+        // An ocean cell is water over its whole area.
+        terrain.environment.biomes.fill(0);
+        terrain.environment.water_m.fill(0);
+        assert!(terrain.water_depth(here) > 0.5);
     }
 
     #[test]

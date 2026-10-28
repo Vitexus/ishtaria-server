@@ -1229,6 +1229,25 @@ fn hunter_fifth_snare_points_at_the_fathers_camp() {
         assert_eq!(guide.id, "gilgamesh:hunter_village");
         assert!(!guide.next);
     }
+    // On the way to Uruk the water-hole is no goal any more but stays on the map as a known place.
+    let rows = [(quest.to_owned(), "seek_gilgamesh".to_owned())];
+    // Without the aetherglass only the goals of begun quests are shown.
+    let mut current = markers_of(&story, &sites, &rows);
+    current.retain(|marker| !marker.next);
+    assert!(current
+        .iter()
+        .all(|marker| marker.id != "gilgamesh:hunter_waterhole"));
+    let known = [("gilgamesh:hunter_waterhole".to_owned(), quest.to_owned())];
+    let kept = super::api::known_markers(&story, &sites, &known, &current);
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].known && !kept[0].next);
+    // A known place that is the current goal again is not drawn twice.
+    let back = markers_of(
+        &story,
+        &sites,
+        &[(quest.to_owned(), "find_enkidu".to_owned())],
+    );
+    assert!(super::api::known_markers(&story, &sites, &known, &back).is_empty());
 }
 
 #[test]

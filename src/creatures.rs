@@ -362,6 +362,10 @@ async fn butcher(
     if let Some(until) = returns_at {
         terrain.mark_removed(&input.object_id, until, None);
     }
+    // An animal that does not fight back runs from the hunter when it survives the blow.
+    if returns_at.is_none() && !super::combat::is_fierce(&animal.model) {
+        terrain.start_flee(&animal, [x, y, z], super::movement::unix_now_ms());
+    }
     Ok(Json(ButcherReply {
         object_id: input.object_id,
         model: animal.model,

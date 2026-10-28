@@ -9,6 +9,12 @@ use std::{cmp::Reverse, collections::BinaryHeap};
 pub const MAX_FACE_SIZE: usize = 64;
 pub const DRY: i32 = -8001;
 
+/// Ocean (0) and lake (1) cells hold open water over their whole area; a river cell (2) only where its
+/// water stands above the coarse ground (the client's `_detail_water_km` reads the same numbers).
+pub fn is_open_water(biome: u8) -> bool {
+    biome <= 1
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Environment {
     pub version: u32,
