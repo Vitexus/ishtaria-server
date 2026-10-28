@@ -323,11 +323,11 @@ pub fn triangles(bytes: &[u8]) -> Result<Triangles> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A glb with one triangle on a node translated by (0, 2, 0) and scaled by 2.
-    fn sample(index_type: u32) -> Vec<u8> {
+    pub(crate) fn sample(index_type: u32) -> Vec<u8> {
         let mut binary = Vec::new();
         for value in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0] {
             binary.extend(value.to_le_bytes());

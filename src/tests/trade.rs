@@ -226,6 +226,10 @@ async fn merchants_trade_for_gold_within_reach_and_a_daily_limit(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+
+    // The cached story of the disk would otherwise follow the next test into its world (its hut is a spawn point).
+    std::env::remove_var("ISHTARIA_DATADISK_DIR");
+    world::reset_cache().await;
 }
 
 async fn trade(

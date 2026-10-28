@@ -304,6 +304,10 @@ pub struct Structure {
     /// Stand at mean sea level (ships, floating docks) instead of on the terrain.
     #[serde(default)]
     pub at_sea: bool,
+    /// A knowledge card (`knowledge.yaml`) a player standing at the structure can read: an inscription, a tablet.
+    pub about: Option<String>,
+    /// An achievement of the disk (`achievements.yaml`) the player earns by reading `about` there.
+    pub achievement: Option<String>,
 }
 
 /// A landscape patch of a datadisk place (ADR 0013): real-world relief around the site, with the
@@ -520,6 +524,35 @@ pub fn is_wiki_title(title: &str) -> bool {
         && !title
             .chars()
             .any(|c| c.is_whitespace() || c.is_control() || "#?<>[]{}|\\/%\"&=+".contains(c))
+}
+
+/// An achievement of the disk (`achievements.yaml`), shown next to the engine's own (`etc/achievements.json`).
+/// The id is stable once released: it is stored with the characters who earned it and names the achievement on
+/// platforms such as Steam (`achievements::steam_api_name`). Texts are string keys of the disk.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiskAchievement {
+    pub id: String,
+    pub title_key: String,
+    pub description_key: String,
+    /// An item id whose inventory icon the client shows.
+    pub icon: String,
+    /// One of the engine's categories (default `story`).
+    #[serde(default = "story_category")]
+    pub category: String,
+    /// A hidden achievement shows neither title nor description until it is earned.
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+fn story_category() -> String {
+    "story".to_owned()
+}
+
+/// An achievement id of a disk: lowercase letters, digits and single underscores, so that `<disk>__<id>` is a
+/// Steam API name that cannot be mistaken for another (`achievements::steam_api_name`).
+pub fn is_achievement_id(text: &str) -> bool {
+    is_id(text, 40) && !text.contains("__") && !text.starts_with('_') && !text.ends_with('_')
 }
 
 /// Hidden animation unlock for an NPC (Easter egg). Conditions are evaluated server-side.
@@ -828,6 +861,8 @@ pub struct Disk {
     pub easter_eggs: Vec<EasterEgg>,
     /// Knowledge cards of the characters (`knowledge.yaml` at the disk root).
     pub knowledge: Vec<KnowledgeCard>,
+    /// Achievements of the disk (`achievements.yaml` at the disk root).
+    pub achievements: Vec<DiskAchievement>,
     /// Media files (path below the disk -> absolute file) with their sha256.
     pub media: BTreeMap<String, (PathBuf, String)>,
     /// Spoken lines: (language, local text key) -> media path, from `media/voice/<language>/<key>.ogg`.
@@ -998,6 +1033,17 @@ impl Disk {
                 Vec::new()
             }
         };
+        let achievements = {
+            let path = dir.join("achievements.yaml");
+            if path.is_file() {
+                count += 1;
+                ensure!(count <= MAX_FILES, "too many files in the datadisk");
+                let text = read_limited(&path, &mut hasher, dir)?;
+                parse::<Vec<DiskAchievement>>(&path, &text)?
+            } else {
+                Vec::new()
+            }
+        };
         let mut strings = BTreeMap::new();
         for language in &manifest.languages {
             ensure!(
@@ -1127,6 +1173,7 @@ impl Disk {
             music,
             easter_eggs,
             knowledge,
+            achievements,
             media,
             voices,
             strings,
@@ -1470,6 +1517,57 @@ impl Disk {
                     is_wiki_title(title),
                     "{id}: knowledge {} has an invalid Wikipedia title {title}",
                     card.id
+                );
+            }
+        }
+        let mut achievements = HashSet::new();
+        for achievement in &self.achievements {
+            ensure!(
+                is_achievement_id(&achievement.id),
+                "{id}: invalid achievement id {}",
+                achievement.id
+            );
+            ensure!(
+                achievements.insert(achievement.id.as_str()),
+                "{id}: duplicate achievement {}",
+                achievement.id
+            );
+            key_ok(&achievement.title_key)?;
+            key_ok(&achievement.description_key)?;
+            ensure!(
+                is_id(&achievement.icon, 48),
+                "{id}: achievement {} has an invalid icon {}",
+                achievement.id,
+                achievement.icon
+            );
+            ensure!(
+                crate::achievements::CATEGORIES.contains(&achievement.category.as_str()),
+                "{id}: achievement {} has an unknown category {}",
+                achievement.id,
+                achievement.category
+            );
+        }
+        for place in &self.places {
+            let Some(structure) = &place.structure else {
+                continue;
+            };
+            if let Some(about) = &structure.about {
+                ensure!(
+                    !local(about) || cards.contains(about.as_str()),
+                    "{id}: place {} has unknown knowledge card {about}",
+                    place.id
+                );
+            }
+            if let Some(achievement) = &structure.achievement {
+                ensure!(
+                    structure.about.is_some(),
+                    "{id}: place {} grants an achievement without anything to read",
+                    place.id
+                );
+                ensure!(
+                    !local(achievement) || achievements.contains(achievement.as_str()),
+                    "{id}: place {} has unknown achievement {achievement}",
+                    place.id
                 );
             }
         }

@@ -86,6 +86,8 @@ pub struct Story {
     pub easter_eggs: Vec<disk::EasterEgg>,
     /// Knowledge cards by qualified id; `image` is the media key (`<disk>/media/knowledge/…`).
     pub knowledge: BTreeMap<String, disk::KnowledgeCard>,
+    /// Achievements of the disks in application order, ids and text keys qualified (`<disk>:<id>`).
+    pub achievements: Vec<disk::DiskAchievement>,
     /// The real planet one of the disks defines, when any.
     pub world: Option<WorldPlan>,
     /// Items granted once at character creation (`item_id`, quantity), from every disk.
@@ -266,7 +268,16 @@ impl Story {
             for near in &place.requires.near {
                 foreign_ok(&near.place)?;
             }
+            if let Some(structure) = &place.structure {
+                for reference in structure.about.iter().chain(structure.achievement.iter()) {
+                    foreign_ok(reference)?;
+                }
+            }
             let mut place = place;
+            if let Some(structure) = &mut place.structure {
+                structure.about = structure.about.take().map(|k| qualify(&id, &k));
+                structure.achievement = structure.achievement.take().map(|a| qualify(&id, &a));
+            }
             if let Some(locate) = &mut place.locate {
                 locate.from = qualify(&id, &locate.from);
             }
@@ -402,6 +413,17 @@ impl Story {
             card.image = format!("{id}/{}", card.image);
             story.knowledge.insert(card.id.clone(), card);
         }
+        for mut achievement in disk.achievements {
+            achievement.id = qualify(&id, &achievement.id);
+            achievement.title_key = qualify(&id, &achievement.title_key);
+            achievement.description_key = qualify(&id, &achievement.description_key);
+            ensure!(
+                achievement.id.len() <= crate::achievements::MAX_ID_LEN,
+                "{id}: achievement id {} is too long",
+                achievement.id
+            );
+            story.achievements.push(achievement);
+        }
         for mut egg in disk.easter_eggs {
             egg.id = format!("{id}:{}", egg.id);
             egg.npc = qualify(&id, &egg.npc);
@@ -454,6 +476,25 @@ impl Story {
                     self.knowledge.contains_key(about),
                     "{}: unknown knowledge card {about}",
                     npc.id
+                );
+            }
+        }
+        for anchor in &self.anchors {
+            let Some(structure) = &anchor.place.structure else {
+                continue;
+            };
+            if let Some(about) = &structure.about {
+                ensure!(
+                    self.knowledge.contains_key(about),
+                    "{}: unknown knowledge card {about}",
+                    anchor.id
+                );
+            }
+            if let Some(achievement) = &structure.achievement {
+                ensure!(
+                    self.achievements.iter().any(|a| a.id == *achievement),
+                    "{}: unknown achievement {achievement}",
+                    anchor.id
                 );
             }
         }

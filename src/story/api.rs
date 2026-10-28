@@ -19,6 +19,8 @@ use players::Error;
 
 /// How far a walking character may have gone from a player it is talking to.
 const ONGOING_RANGE_M: f64 = 25.0;
+/// How close to a readable structure (a tablet in its box) a player stands to read it.
+const READ_RANGE_M: f64 = 3.0;
 /// Synthetic dialogue choice: apologize and pay gold to clear lasting NPC hostility.
 const APOLOGY_CHOICE: usize = 65_000;
 const APOLOGY_TEXT_KEY: &str = "Apologize (50 gold)";
@@ -39,6 +41,7 @@ pub fn routes() -> Router<AppState> {
         .route("/story/dialogue/choose", post(choose))
         .route("/story/dialogue", delete(leave))
         .route("/story/npcs/{npc_id}/about", get(about))
+        .route("/story/places/{place_id}/read", post(read_place))
         .route("/story/quests", get(quests))
         .route("/story/markers", get(markers))
         .layer(DefaultBodyLimit::max(1024))
@@ -675,6 +678,63 @@ async fn about(
         .and_then(|found| found.about.as_ref())
         .and_then(|id| story.story.knowledge.get(id))
         .ok_or_else(|| status(StatusCode::NOT_FOUND, "this character has nothing to tell"))?;
+    Ok(Json(About {
+        title_key: card.title_key.clone(),
+        text_key: card.text_key.clone(),
+        image: world::media_url(&card.image),
+        credit_key: card.credit_key.clone(),
+        wikipedia: card.wikipedia.clone(),
+    }))
+}
+
+/// The player reads what a structure of a place carries (an inscription): the place's knowledge card, as
+/// [`about`] answers it. Reading where the disk grants an achievement earns it in the same transaction, so it is
+/// only earned by a player who stands there.
+async fn read_place(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(place_id): Path<String>,
+) -> Result<Json<About>, Error> {
+    let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
+    let story = story_of(&state).await?;
+    let structure = story
+        .story
+        .anchors
+        .iter()
+        .find(|anchor| anchor.id == place_id)
+        .and_then(|anchor| anchor.place.structure.as_ref())
+        .filter(|structure| structure.about.is_some())
+        .ok_or_else(|| status(StatusCode::NOT_FOUND, "nothing to read here"))?;
+    let card = structure
+        .about
+        .as_ref()
+        .and_then(|id| story.story.knowledge.get(id))
+        .ok_or_else(|| status(StatusCode::NOT_FOUND, "nothing to read here"))?;
+    // The structure as it was built: a place whose model could not be loaded has nothing to read.
+    let at = story
+        .props
+        .iter()
+        .find(|prop| prop.id == place_id && prop.readable)
+        .map(|prop| prop.position)
+        .ok_or_else(|| status(StatusCode::NOT_FOUND, "nothing to read here"))?;
+    let mut tx = state.pool.begin().await?;
+    let position: Option<(Option<f64>, Option<f64>, Option<f64>)> = sqlx::query_as(
+        "SELECT position_x, position_y, position_z FROM players WHERE id = $1 FOR UPDATE",
+    )
+    .bind(player_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((Some(x), Some(y), Some(z))) = position else {
+        return Err(status(StatusCode::CONFLICT, "player position unavailable"));
+    };
+    let distance = ((x - at[0]).powi(2) + (y - at[1]).powi(2) + (z - at[2]).powi(2)).sqrt();
+    if distance > READ_RANGE_M {
+        return Err(status(StatusCode::FORBIDDEN, "too far away to read"));
+    }
+    if let Some(achievement) = &structure.achievement {
+        crate::achievements::unlock_disk(&mut tx, &story.story, player_id, achievement).await?;
+    }
+    tx.commit().await?;
     Ok(Json(About {
         title_key: card.title_key.clone(),
         text_key: card.text_key.clone(),

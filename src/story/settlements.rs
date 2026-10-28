@@ -75,6 +75,9 @@ pub struct WorldProp {
     /// (the buildings of datadisks are seen from afar).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visible_m: Option<f64>,
+    /// A structure the player can read standing at it (`POST /story/places/{id}/read`; the id is the place's).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub readable: bool,
 }
 
 fn manifest(id: &str, name: &str) -> Manifest {
@@ -114,6 +117,7 @@ fn empty_disk(manifest: Manifest) -> Disk {
         music: Vec::new(),
         easter_eggs: Vec::new(),
         knowledge: Vec::new(),
+        achievements: Vec::new(),
         media: BTreeMap::new(),
         voices: BTreeMap::new(),
         strings: BTreeMap::from([
@@ -503,6 +507,7 @@ fn to_props(
             yaw: prop.yaw,
             scale_m: prop.scale,
             visible_m: None,
+            readable: false,
         });
     }
 }
@@ -588,6 +593,7 @@ fn build_structure(
         yaw,
         scale_m: scale,
         visible_m: Some(structure.visible_m.unwrap_or(600.0)),
+        readable: structure.about.is_some(),
     });
     // Harbour ships skip mesh colliders (same as generated at-sea props); docks on land keep them.
     if !structure.at_sea {
@@ -755,6 +761,7 @@ fn lay_bridges(
             yaw: (span.to.0 - span.from.0).atan2(span.to.1 - span.from.1),
             scale_m: scale,
             visible_m: Some(120.0),
+            readable: false,
         });
         built.bridges.push(crate::movement::BridgeDeck {
             from,
@@ -934,6 +941,7 @@ fn lay_trails(
                 yaw,
                 scale_m: scenery::MODULE_M,
                 visible_m: None,
+                readable: false,
             });
         }
     }

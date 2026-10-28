@@ -288,6 +288,7 @@ mod tests {
             yaw: 0.0,
             scale_m: 3.0,
             visible_m: None,
+            readable: false,
         }
     }
 

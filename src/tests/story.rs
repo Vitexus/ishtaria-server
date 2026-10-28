@@ -456,3 +456,147 @@ async fn a_conversation_keeps_a_character_standing_and_the_time_it_stood_adds_up
     let (_, from, to) = stop().await;
     assert!(to >= from, "a stop never ends before it began");
 }
+
+/// A disk `read` whose place carries a readable tablet that grants the disk's hidden achievement.
+fn install_reading_disk() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("ishtaria-story-read-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let root = dir.join("read");
+    write(&root, "datadisk.yaml", "id: read\nversion: 1.0.0\nname: Test\nrequires_ruleset: \"1\"\nlicense: CC0-1.0\nattribution: Test\nlanguages: [en]\n");
+    write(&root, "i18n/en.yaml", "place.shrine: Shrine\nk.t: Tablet\nk.x: For the goddess.\nk.c: Our own render.\na.t: Reader\na.d: Read the tablet.\n");
+    write(&root, "places/p.yaml", "- {id: shrine, kind: building, name_key: place.shrine, spawn: true, structure: {model: media/models/architecture/box.glb, about: tablet, achievement: reader}}\n");
+    write(&root, "knowledge.yaml", "- {id: tablet, title_key: k.t, text_key: k.x, image: media/knowledge/tablet.jpg, credit_key: k.c, wikipedia: {en: Foundation_deposit}}\n");
+    write(&root, "achievements.yaml", "- {id: reader, title_key: a.t, description_key: a.d, icon: foundation_tablet, hidden: true}\n");
+    fs::create_dir_all(root.join("media/knowledge")).unwrap();
+    fs::write(
+        root.join("media/knowledge/tablet.jpg"),
+        b"\xff\xd8not a picture",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("media/models/architecture")).unwrap();
+    fs::write(
+        root.join("media/models/architecture/box.glb"),
+        crate::glb::tests::sample(5125),
+    )
+    .unwrap();
+    dir
+}
+
+#[sqlx::test]
+#[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
+async fn reading_a_tablet_earns_the_disks_hidden_achievement_once(pool: PgPool) {
+    let _auth_test = AUTH_TESTS.acquire().await.unwrap();
+    let dir = install_reading_disk();
+    std::env::set_var("ISHTARIA_DATADISK_DIR", &dir);
+    world::reset_cache().await;
+    let world_id = initialize_spawn_world(&pool).await;
+    let state = AppState {
+        pool: pool.clone(),
+        world_id,
+    };
+    let router = app(state.clone());
+    let token = create_session(&router, "reader").await;
+    let player_id: i64 = sqlx::query_scalar("SELECT id FROM players")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO world_datadisks (world_id, disk_id, version, position) VALUES ($1, 'read', '1.0.0', 0)")
+        .bind(world_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    world::reset_cache().await;
+    let story = world::world(&state).await.unwrap().expect("disk applied");
+    let tablet = story
+        .props
+        .iter()
+        .find(|prop| prop.id == "read:shrine")
+        .expect("the structure is built");
+    assert!(tablet.readable, "clients learn that it can be read");
+    let at = tablet.position;
+
+    // The disk's achievement follows the engine's, hidden and named for Steam.
+    let response = player_request(&router, "GET", "/achievements", "", &token).await;
+    let catalog = response_json(response).await;
+    let entries = catalog["achievements"].as_array().unwrap();
+    assert_eq!(entries[0]["steam"], "FIRST_HARVEST");
+    let entry = entries.last().unwrap();
+    assert_eq!(entry["id"], "read:reader");
+    assert_eq!(entry["steam"], "READ__READER");
+    assert_eq!(entry["story"], true);
+    assert_eq!(entry["category"], "story");
+    assert_eq!(entry["title"], "", "a hidden achievement keeps its secret");
+
+    let read = |router: Router, token: String| async move {
+        player_request(
+            &router,
+            "POST",
+            "/story/places/read:shrine/read",
+            "",
+            &token,
+        )
+        .await
+    };
+    teleport(&pool, player_id, [at[0] + 40.0, at[1], at[2]]).await;
+    let response = read(router.clone(), token.clone()).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN, "too far to read");
+    let response = player_request(
+        &router,
+        "POST",
+        "/story/places/read:nowhere/read",
+        "",
+        &token,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let earned: i64 = sqlx::query_scalar("SELECT count(*) FROM player_achievements")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(earned, 0, "nothing is earned from afar");
+
+    teleport(&pool, player_id, at).await;
+    for _ in 0..2 {
+        let response = read(router.clone(), token.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let card = response_json(response).await;
+        assert_eq!(card["text_key"], "read:k.x");
+        assert_eq!(
+            card["image"],
+            "/story/media/read/media/knowledge/tablet.jpg"
+        );
+        assert_eq!(card["wikipedia"]["en"], "Foundation_deposit");
+    }
+    let events: Vec<String> = sqlx::query_scalar(
+        "SELECT subject FROM player_events WHERE recipient_id = $1 AND kind = 'achievement'",
+    )
+    .bind(player_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        events,
+        ["read:reader"],
+        "announced once, however often it is read"
+    );
+
+    let response = player_request(&router, "GET", "/players/me/achievements", "", &token).await;
+    let mine = response_json(response).await;
+    assert_eq!(mine["earned"][0]["id"], "read:reader");
+    let shown = mine["achievements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "read:reader")
+        .unwrap();
+    assert_eq!(
+        shown["title"], "read:a.t",
+        "earned: the disk's key is shown"
+    );
+    assert_eq!(shown["description"], "read:a.d");
+
+    // The cached story would otherwise follow the next test into its world.
+    std::env::remove_var("ISHTARIA_DATADISK_DIR");
+    world::reset_cache().await;
+    let _ = fs::remove_dir_all(dir);
+}

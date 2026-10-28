@@ -233,6 +233,13 @@ async fn trees_and_rocks_are_harvested_by_the_server(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    // The first tree may have been of the same kind: count the logs already in the pack.
+    let logs_before: Option<i64> =
+        sqlx::query_scalar("SELECT quantity FROM player_inventory WHERE item_id = $1")
+            .bind(&other_resource.log)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
     cooldown_reset(&pool).await;
     let overflow = response_json(harvest_request(&router, &token, &other.id).await).await;
     assert_eq!(overflow["state"], "depleted");
@@ -250,8 +257,9 @@ async fn trees_and_rocks_are_harvested_by_the_server(pool: PgPool) {
             .fetch_optional(&pool)
             .await
             .unwrap();
-    assert!(
-        logs_in_pack.is_none() || logs_in_pack == Some(0),
+    assert_eq!(
+        logs_in_pack.unwrap_or(0),
+        logs_before.unwrap_or(0),
         "a full pack takes none of the logs"
     );
     let on_ground: i64 = sqlx::query_scalar(

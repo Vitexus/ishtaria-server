@@ -7,6 +7,12 @@
 //! character and achievement, and only a new row tells the owner (an `achievement` event, the
 //! subject being the id). Nothing a client sends can unlock one. Titles and descriptions are
 //! English keys that the client translates; the server knows no language.
+//!
+//! A datadisk adds its own achievements (`achievements.yaml`, ids `<disk>:<id>`) after the engine's;
+//! their texts are string keys of the disk (`story: true`), translated by the client from
+//! `/story/strings`. Ids are permanent once released. Every entry also carries its Steam API name
+//! ([`steam_api_name`]), so that a client built for Steam can mirror the server's `achievement`
+//! events to `SetAchievement`: the server stays the only one that decides.
 
 use super::players::{self, Error};
 use super::AppState;
@@ -19,6 +25,9 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/achievements", get(catalog_route))
         .route("/players/me/achievements", get(earned))
 }
+
+/// The longest achievement id, `<disk>:<id>` included; `player_events.subject` holds 64 characters.
+pub(crate) const MAX_ID_LEN: usize = 64;
 
 #[derive(Deserialize)]
 struct Catalog {
@@ -38,7 +47,7 @@ struct Achievement {
     hidden: bool,
 }
 
-const CATEGORIES: [&str; 5] = ["progress", "gathering", "magic", "social", "story"];
+pub(crate) const CATEGORIES: [&str; 5] = ["progress", "gathering", "magic", "social", "story"];
 /// The levels that earn `level_<n>` when reached.
 const LEVELS: [i32; 4] = [5, 10, 20, 30];
 
@@ -78,12 +87,21 @@ fn catalog() -> &'static Catalog {
     })
 }
 
-/// The same shape the migration's check constraint allows.
+/// An engine achievement id: the shape the migrations' check constraint allows, without a double
+/// underscore, which [`steam_api_name`] keeps for the disk separator.
 fn valid_id(id: &str) -> bool {
     (1..=48).contains(&id.len())
+        && !id.contains("__")
         && id
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// The name of an achievement in Steamworks: the id in capitals, a disk's `:` written as `__`
+/// (`first_harvest` -> `FIRST_HARVEST`, `gilgamesh:foundation_reader` -> `GILGAMESH__FOUNDATION_READER`).
+/// Ids never contain `__`, so two ids never share a name.
+pub(crate) fn steam_api_name(id: &str) -> String {
+    id.replace(':', "__").to_ascii_uppercase()
 }
 
 fn known(id: &str) -> bool {
@@ -105,6 +123,32 @@ pub(super) async fn unlock(
     if !known(id) {
         return Ok(false);
     }
+    record(transaction, player_id, id).await
+}
+
+/// [`unlock`] for an achievement of the world's datadisks (`<disk>:<id>`).
+pub(crate) async fn unlock_disk(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    story: &crate::story::Story,
+    player_id: i64,
+    id: &str,
+) -> Result<bool, Error> {
+    let known = story
+        .achievements
+        .iter()
+        .any(|achievement| achievement.id == id);
+    debug_assert!(known, "unknown disk achievement {id}");
+    if !known {
+        return Ok(false);
+    }
+    record(transaction, player_id, id).await
+}
+
+async fn record(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    player_id: i64,
+    id: &str,
+) -> Result<bool, Error> {
     let inserted = sqlx::query(
         "INSERT INTO player_achievements (player_id, achievement) VALUES ($1, $2) ON CONFLICT DO NOTHING",
     )
@@ -145,19 +189,74 @@ fn level_thresholds(old_level: i32, level: i32) -> impl Iterator<Item = i32> {
         .filter(move |threshold| old_level < *threshold && *threshold <= level)
 }
 
-#[derive(Serialize)]
-struct CatalogReply {
-    achievements: Vec<Achievement>,
+/// An achievement as clients see it.
+#[derive(Serialize, Clone)]
+struct Shown {
+    id: String,
+    category: String,
+    icon: String,
+    /// An English key, or a string key of a datadisk when `story` is set; empty while hidden.
+    title: String,
+    description: String,
+    hidden: bool,
+    /// The texts are keys of `/story/strings` (an achievement of a datadisk).
+    story: bool,
+    /// The achievement's name in Steamworks.
+    steam: String,
 }
 
-async fn catalog_route() -> Json<CatalogReply> {
-    Json(CatalogReply {
-        achievements: catalog().achievements.iter().map(masked).collect(),
-    })
+/// The engine's achievements, then those of the world's datadisks.
+fn entries(story: Option<&crate::story::Story>) -> Vec<Shown> {
+    let engine = catalog().achievements.iter().map(|achievement| Shown {
+        id: achievement.id.clone(),
+        category: achievement.category.clone(),
+        icon: achievement.icon.clone(),
+        title: achievement.title.clone(),
+        description: achievement.description.clone(),
+        hidden: achievement.hidden,
+        story: false,
+        steam: steam_api_name(&achievement.id),
+    });
+    let disks = story
+        .into_iter()
+        .flat_map(|story| story.achievements.iter())
+        .map(|achievement| Shown {
+            id: achievement.id.clone(),
+            category: achievement.category.clone(),
+            icon: achievement.icon.clone(),
+            title: achievement.title_key.clone(),
+            description: achievement.description_key.clone(),
+            hidden: achievement.hidden,
+            story: true,
+            steam: steam_api_name(&achievement.id),
+        });
+    engine.chain(disks).collect()
+}
+
+/// The datadisks of the world, when it has a story.
+async fn story(
+    state: &AppState,
+) -> Result<Option<std::sync::Arc<crate::story::world::StoryWorld>>, Error> {
+    crate::story::world::world(state).await
+}
+
+#[derive(Serialize)]
+struct CatalogReply {
+    achievements: Vec<Shown>,
+}
+
+async fn catalog_route(State(state): State<AppState>) -> Result<Json<CatalogReply>, Error> {
+    let story = story(&state).await?;
+    Ok(Json(CatalogReply {
+        achievements: entries(story.as_deref().map(|world| &world.story))
+            .iter()
+            .map(masked)
+            .collect(),
+    }))
 }
 
 /// A hidden achievement without its title and description.
-fn masked(achievement: &Achievement) -> Achievement {
+fn masked(achievement: &Shown) -> Shown {
     let mut shown = achievement.clone();
     if shown.hidden {
         shown.title.clear();
@@ -176,7 +275,7 @@ struct Earned {
 #[derive(Serialize)]
 struct EarnedReply {
     /// The whole catalog, hidden entries masked unless earned.
-    achievements: Vec<Achievement>,
+    achievements: Vec<Shown>,
     earned: Vec<Earned>,
 }
 
@@ -191,8 +290,9 @@ async fn earned(
     .bind(player_id)
     .fetch_all(&state.pool)
     .await?;
-    let achievements = catalog()
-        .achievements
+    let story = story(&state).await?;
+    let all = entries(story.as_deref().map(|world| &world.story));
+    let achievements = all
         .iter()
         .map(|achievement| {
             if rows.iter().any(|(id, _)| *id == achievement.id) {
@@ -202,10 +302,10 @@ async fn earned(
             }
         })
         .collect();
-    // Rows of achievements later removed from the catalog are not shown.
+    // Rows of achievements later removed from the catalog (or of a disk no longer applied) are not shown.
     let earned = rows
         .into_iter()
-        .filter(|(id, _)| known(id))
+        .filter(|(id, _)| all.iter().any(|achievement| achievement.id == *id))
         .map(|(id, unlocked_at)| Earned { id, unlocked_at })
         .collect();
     Ok(Json(EarnedReply {
@@ -244,9 +344,25 @@ mod unit {
     }
 
     #[test]
-    fn hidden_achievements_are_masked() {
-        let hidden = catalog()
+    fn steam_names_are_unique_and_upper_case() {
+        assert_eq!(steam_api_name("first_harvest"), "FIRST_HARVEST");
+        assert_eq!(
+            steam_api_name("gilgamesh:foundation_reader"),
+            "GILGAMESH__FOUNDATION_READER"
+        );
+        assert!(!valid_id("a__b"));
+        let names: std::collections::HashSet<String> = catalog()
             .achievements
+            .iter()
+            .map(|achievement| steam_api_name(&achievement.id))
+            .collect();
+        assert_eq!(names.len(), catalog().achievements.len());
+    }
+
+    #[test]
+    fn hidden_achievements_are_masked() {
+        let all = entries(None);
+        let hidden = all
             .iter()
             .find(|achievement| achievement.hidden)
             .expect("a hidden achievement");

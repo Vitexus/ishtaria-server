@@ -1401,6 +1401,71 @@ fn a_structure_is_shipped_validated_and_excludes_generated_scenery() {
 }
 
 #[test]
+fn a_readable_structure_names_a_card_and_an_achievement_of_the_disk() {
+    let a = scratch("reading");
+    base(&a, "zeta", "1.0.0", "");
+    write(&a, "media/models/architecture/hut.glb", "glTF");
+    write(&a, "media/knowledge/tablet.jpg", "jpeg");
+    write(
+        &a,
+        "knowledge.yaml",
+        "- {id: tablet, title_key: hi, text_key: hi, image: media/knowledge/tablet.jpg, credit_key: hi, wikipedia: {en: Tablet}}\n",
+    );
+    let with = |structure: &str, achievements: &str| {
+        write(
+            &a,
+            "places/p.yaml",
+            &format!("- {{id: hut, kind: building, name_key: place.hut, structure: {{model: media/models/architecture/hut.glb{structure}}}}}\n"),
+        );
+        write(&a, "achievements.yaml", achievements);
+        Story::load(std::slice::from_ref(&a), false)
+    };
+    let reader = "- {id: reader, title_key: hi, description_key: bye, icon: foundation_tablet, hidden: true}\n";
+    let story = with(", about: tablet, achievement: reader", reader).unwrap();
+    let structure = story.anchors[0].place.structure.as_ref().unwrap();
+    assert_eq!(structure.about.as_deref(), Some("zeta:tablet"));
+    assert_eq!(structure.achievement.as_deref(), Some("zeta:reader"));
+    let achievement = &story.achievements[0];
+    assert_eq!(achievement.id, "zeta:reader");
+    assert_eq!(achievement.title_key, "zeta:hi");
+    assert_eq!(achievement.category, "story");
+    assert!(achievement.hidden);
+    for (bad_structure, bad_achievements, why) in [
+        (", about: nothing", reader, "an unknown card"),
+        (
+            ", about: tablet, achievement: writer",
+            reader,
+            "an unknown achievement",
+        ),
+        (
+            ", achievement: reader",
+            reader,
+            "an achievement without anything to read",
+        ),
+        (
+            "",
+            "- {id: read__er, title_key: hi, description_key: hi, icon: x}\n",
+            "a double underscore",
+        ),
+        (
+            "",
+            "- {id: reader, title_key: hi, description_key: hi, icon: x, category: fame}\n",
+            "an unknown category",
+        ),
+        (
+            "",
+            "- {id: reader, title_key: nope, description_key: hi, icon: x}\n",
+            "an untranslated title",
+        ),
+    ] {
+        assert!(
+            with(bad_structure, bad_achievements).is_err(),
+            "{why} must be rejected"
+        );
+    }
+}
+
+#[test]
 fn a_disk_may_define_the_worlds_planet() {
     let a = scratch("world-a");
     base(&a, "worlda", "1.0.0", "");
