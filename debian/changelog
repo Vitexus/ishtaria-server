@@ -1,3 +1,18 @@
+ishtaria-server (0.4.2) unstable; urgency=medium
+
+  * Walking matches the client's water: ground below sea level in a dry
+    cell is land, so there is no invisible water to drown in (on the
+    road to Uruk).
+  * A trapper sets as many snares as he carries; each one Enkidu ruins
+    moves the quest on, and a replacement comes only when none is left
+    (migration 0059).
+  * Places a quest sent the player to stay on the map and compass as
+    known places (migration 0060).
+  * Herbivores struck by a hunter run off 45 m, rest and walk back;
+    predators always bite back.
+
+ -- Vítězslav Dvořák <cybervitexus@gmail.com>  Wed, 28 Oct 2026 03:11:15 +0100
+
 ishtaria-server (0.4.1) unstable; urgency=medium
 
   * A datadisk NPC tagged look_<role> lends its look to the generated
