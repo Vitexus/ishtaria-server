@@ -1845,8 +1845,8 @@ impl Disk {
                 );
             }
             ensure!(
-                achievement.read_all.len() <= 16,
-                "{id}: achievement {} lists too many places to read",
+                achievement.read_all.len() <= 64,
+                "{id}: achievement {} lists too many places to read (at most 64)",
                 achievement.id
             );
             ensure!(
