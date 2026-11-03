@@ -734,6 +734,32 @@ async fn read_place(
     if let Some(achievement) = &structure.achievement {
         crate::achievements::unlock_disk(&mut tx, &story.story, player_id, achievement).await?;
     }
+    sqlx::query(
+        "INSERT INTO player_place_reads (player_id, place_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(player_id)
+    .bind(&place_id)
+    .execute(&mut *tx)
+    .await?;
+    // A set of readings (every tablet of a legend) is complete with the last place read.
+    for achievement in story
+        .story
+        .achievements
+        .iter()
+        .filter(|a| a.read_all.contains(&place_id))
+    {
+        let read: Vec<String> = sqlx::query_scalar(
+            "SELECT place_id FROM player_place_reads WHERE player_id = $1 AND place_id = ANY($2)",
+        )
+        .bind(player_id)
+        .bind(&achievement.read_all)
+        .fetch_all(&mut *tx)
+        .await?;
+        if achievement.read_all.iter().all(|p| read.contains(p)) {
+            crate::achievements::unlock_disk(&mut tx, &story.story, player_id, &achievement.id)
+                .await?;
+        }
+    }
     tx.commit().await?;
     Ok(Json(About {
         title_key: card.title_key.clone(),

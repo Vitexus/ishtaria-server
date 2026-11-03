@@ -1581,7 +1581,16 @@ fn a_readable_structure_names_a_card_and_an_achievement_of_the_disk() {
     assert_eq!(achievement.title_key, "zeta:hi");
     assert_eq!(achievement.category, "story");
     assert!(achievement.hidden);
+    let set = "- {id: all, title_key: hi, description_key: bye, icon: foundation_tablet, read_all: [hut]}\n";
+    let story = with(", about: tablet", set).unwrap();
+    assert_eq!(story.achievements[0].read_all, ["zeta:hut"]);
     for (bad_structure, bad_achievements, why) in [
+        ("", set, "a set naming a place with nothing to read"),
+        (
+            ", about: tablet",
+            "- {id: all, title_key: hi, description_key: bye, icon: x, read_all: [nowhere]}\n",
+            "a set naming an unknown place",
+        ),
         (", about: nothing", reader, "an unknown card"),
         (
             ", about: tablet, achievement: writer",

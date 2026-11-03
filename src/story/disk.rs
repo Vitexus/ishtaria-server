@@ -675,6 +675,10 @@ pub struct DiskAchievement {
     /// A hidden achievement shows neither title nor description until it is earned.
     #[serde(default)]
     pub hidden: bool,
+    /// Places of the disk with a readable structure (`about`) that the character must all have read: the
+    /// achievement is earned with the last of them. Empty when something else earns it.
+    #[serde(default)]
+    pub read_all: Vec<String>,
 }
 
 fn story_category() -> String {
@@ -1832,6 +1836,18 @@ impl Disk {
                 "{id}: achievement {} has an invalid icon {}",
                 achievement.id,
                 achievement.icon
+            );
+            for place in &achievement.read_all {
+                ensure!(
+                    is_id(place, 48),
+                    "{id}: achievement {} has an invalid place {place} to read",
+                    achievement.id
+                );
+            }
+            ensure!(
+                achievement.read_all.len() <= 16,
+                "{id}: achievement {} lists too many places to read",
+                achievement.id
             );
             ensure!(
                 crate::achievements::CATEGORIES.contains(&achievement.category.as_str()),

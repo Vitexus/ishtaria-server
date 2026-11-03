@@ -463,6 +463,9 @@ impl Story {
             achievement.id = qualify(&id, &achievement.id);
             achievement.title_key = qualify(&id, &achievement.title_key);
             achievement.description_key = qualify(&id, &achievement.description_key);
+            for place in &mut achievement.read_all {
+                *place = qualify(&id, place);
+            }
             ensure!(
                 achievement.id.len() <= crate::achievements::MAX_ID_LEN,
                 "{id}: achievement id {} is too long",
@@ -542,6 +545,17 @@ impl Story {
                     "{}: unknown achievement {achievement}",
                     anchor.id
                 );
+            }
+        }
+        for achievement in &self.achievements {
+            for place in &achievement.read_all {
+                let readable = self
+                    .anchors
+                    .iter()
+                    .find(|anchor| anchor.id == *place)
+                    .and_then(|anchor| anchor.place.structure.as_ref())
+                    .is_some_and(|structure| structure.about.is_some());
+                ensure!(readable, "{}: {place} has nothing to read", achievement.id);
             }
         }
         for egg in &self.easter_eggs {
