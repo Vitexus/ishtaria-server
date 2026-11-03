@@ -520,6 +520,22 @@
       "xp": 6
     },
     {
+      "id": "make_waterskin",
+      "inputs": [
+        {
+          "item": "hide",
+          "quantity": 2
+        }
+      ],
+      "outputs": [
+        {
+          "item": "waterskin",
+          "quantity": 1
+        }
+      ],
+      "xp": 4
+    },
+    {
       "id": "make_snare",
       "inputs": [
         {

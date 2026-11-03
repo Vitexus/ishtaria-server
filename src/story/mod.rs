@@ -25,6 +25,10 @@ use std::{
     path::PathBuf,
 };
 
+/// A trail of a disk as the story keeps it: the qualified ids of its places, the clearances at both ends, its model and its
+/// name.
+pub type TrailEntry = (Vec<String>, f64, f64, Option<String>, Option<String>);
+
 /// A place that world generation must find a spot for.
 #[derive(Clone, Debug)]
 pub struct Anchor {
@@ -53,6 +57,12 @@ pub struct DiskInfo {
     pub player_model: Option<String>,
     /// How tall and tough that character is, when the disk says.
     pub player_body: Option<disk::PlayerBody>,
+    /// The ground set clients draw the land with, when the disk says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ground: Option<String>,
+    /// The sky of the disk's world; the server applies it to the sun and moon, clients get it with `GET /world` `solar`.
+    #[serde(skip)]
+    pub astronomy: Option<disk::Astronomy>,
 }
 
 /// A music track announced with a disk (cover jingle or ambient).
@@ -88,6 +98,12 @@ pub struct Story {
     pub knowledge: BTreeMap<String, disk::KnowledgeCard>,
     /// Achievements of the disks in application order, ids and text keys qualified (`<disk>:<id>`).
     pub achievements: Vec<disk::DiskAchievement>,
+    /// The buildings of the disks around the anchor of a place: (qualified place id, disk id, buildings).
+    pub buildings: Vec<(String, String, Vec<disk::Building>)>,
+    /// The footpaths of the disks: the qualified ids of the places they pass, and the clearances at both ends.
+    pub trails: Vec<TrailEntry>,
+    /// The houses of the generated settlements one of the disks defines: (disk id, styles).
+    pub settlement_houses: Option<(String, Vec<disk::HouseStyle>)>,
     /// The real planet one of the disks defines, when any.
     pub world: Option<WorldPlan>,
     /// Items granted once at character creation (`item_id`, quantity), from every disk.
@@ -237,6 +253,8 @@ impl Story {
             ambient_music: track_ref(&disk.manifest.ambient_music),
             player_character: disk.manifest.player_character.clone(),
             player_body: disk.manifest.player_body,
+            ground: disk.manifest.ground.clone(),
+            astronomy: disk.manifest.astronomy,
             player_model: disk
                 .manifest
                 .player_model
@@ -304,6 +322,9 @@ impl Story {
             npc.portrait = npc.portrait.map(|p| format!("{id}/{p}"));
             // A model below `media/models/` is served like a portrait: under the id of its disk.
             npc.character.model = npc.character.model.map(|m| format!("{id}/{m}"));
+            if let Some(movement) = npc.movement.as_mut() {
+                movement.follow = movement.follow.take().map(|trail| qualify(&id, &trail));
+            }
             npc.id = qualified.clone();
             story.npcs.insert(qualified, npc);
         }
@@ -365,6 +386,10 @@ impl Story {
                 foreign_ok(place)?;
                 quest.start_place = Some(qualify(&id, place));
             }
+            for place in &mut quest.known_places {
+                foreign_ok(place)?;
+                *place = qualify(&id, place);
+            }
             if let Some(excerpt) = &mut quest.excerpt {
                 excerpt.paraphrase_key = qualify(&id, &excerpt.paraphrase_key);
                 if let Some(akkadian) = &mut excerpt.akkadian_key {
@@ -412,6 +437,27 @@ impl Story {
             card.credit_key = qualify(&id, &card.credit_key);
             card.image = format!("{id}/{}", card.image);
             story.knowledge.insert(card.id.clone(), card);
+        }
+        for file in disk.buildings {
+            story
+                .buildings
+                .push((qualify(&id, &file.place), id.clone(), file.items));
+        }
+        if !disk.manifest.settlement_houses.is_empty() && story.settlement_houses.is_none() {
+            story.settlement_houses = Some((id.clone(), disk.manifest.settlement_houses.clone()));
+        }
+        for trail in disk.trails {
+            story.trails.push((
+                trail
+                    .places
+                    .iter()
+                    .map(|place| qualify(&id, place))
+                    .collect(),
+                trail.start_clearance_m.unwrap_or(12.0),
+                trail.end_clearance_m.unwrap_or(8.0),
+                trail.model.as_ref().map(|model| format!("{id}:{model}")),
+                trail.id.as_ref().map(|name| qualify(&id, name)),
+            ));
         }
         for mut achievement in disk.achievements {
             achievement.id = qualify(&id, &achievement.id);
@@ -511,7 +557,12 @@ impl Story {
                 .stages
                 .values()
                 .filter_map(|stage| stage.guide.as_ref());
-            for place in quest.start_place.iter().chain(guides) {
+            for place in quest
+                .start_place
+                .iter()
+                .chain(quest.known_places.iter())
+                .chain(guides)
+            {
                 ensure!(
                     places.contains(&place.as_str()),
                     "{}: unknown place {place}",

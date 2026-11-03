@@ -742,6 +742,7 @@ mod tests {
                 pause_s: 0.0,
                 waypoints: vec![[0.0, 0.0], [100.0, 0.0], [200.0, 0.0]],
                 phase_s: 0.0,
+                follow: None,
             }),
             site: [1.0, 0.0, 0.0],
             wander: None,

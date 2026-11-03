@@ -81,8 +81,30 @@ pub fn route(
     from: (f64, f64),
     to: (f64, f64),
 ) -> Option<Route> {
+    route_with(ground, origin, from, to, false)
+}
+
+/// [`route`] for a road a disk lays by hand: it also goes round walls, houses and fences where there is room, instead of
+/// leaving the stones out where they would stand in one.
+pub fn route_avoiding(
+    ground: &dyn Ground,
+    origin: [f64; 3],
+    from: (f64, f64),
+    to: (f64, f64),
+) -> Option<Route> {
+    route_with(ground, origin, from, to, true)
+}
+
+fn route_with(
+    ground: &dyn Ground,
+    origin: [f64; 3],
+    from: (f64, f64),
+    to: (f64, f64),
+    avoid: bool,
+) -> Option<Route> {
     // Dry feet first: a bridge is built only where there is no way round and no ford.
-    search(ground, origin, from, to, false).or_else(|| search(ground, origin, from, to, true))
+    search(ground, origin, from, to, false, avoid)
+        .or_else(|| search(ground, origin, from, to, true, avoid))
 }
 
 fn search(
@@ -91,6 +113,7 @@ fn search(
     from: (f64, f64),
     to: (f64, f64),
     bridges: bool,
+    avoid: bool,
 ) -> Option<Route> {
     let distance = (to.0 - from.0).hypot(to.1 - from.1);
     if !(STONE_SPACING_M..=MAX_TRAIL_M).contains(&distance) {
@@ -114,11 +137,14 @@ fn search(
         )
     };
     let mut cells = vec![Cell::Unknown; side_x * side_z];
-    let mut look = |column: usize, row: usize| -> Cell {
+    // Cells with a fixed obstacle (wall, house, fence) in them, for a road that goes round them.
+    let mut obstacles = vec![false; side_x * side_z];
+    let mut look = |column: usize, row: usize| -> (Cell, bool) {
         let index = row * side_x + column;
         if let Cell::Unknown = cells[index] {
             let (x, z) = centre(column, row);
             let (direction, _) = world_from_local(origin, x, z, |_| 0.0, crate::movement::RADIUS);
+            obstacles[index] = avoid && ground.near_fixed_obstacle(direction, cell_m * 0.5 + 3.0);
             cells[index] = match ground.land_site(direction) {
                 Some(_) => Cell::Land(ground.height(direction)),
                 None if ground.wade_level(direction).is_some() => {
@@ -128,7 +154,7 @@ fn search(
                 None => Cell::Water,
             };
         }
-        cells[index]
+        (cells[index], obstacles[index])
     };
     let (start, goal) = (cell_of(from), cell_of(to));
     // Ends may stand on a wet or odd cell (a harbour landing): the first and last step are free of the check.
@@ -156,7 +182,7 @@ fn search(
             found = true;
             break;
         }
-        let here = look(column, row);
+        let (here, _) = look(column, row);
         for (dx, dz) in NEIGHBOURS {
             let (next_column, next_row) = (column as isize + dx, row as isize + dz);
             if next_column < 0
@@ -168,7 +194,7 @@ fn search(
             }
             let (next_column, next_row) = (next_column as usize, next_row as usize);
             let run = cell_m * ((dx * dx + dz * dz) as f64).sqrt();
-            let there = look(next_column, next_row);
+            let (there, fixed_there) = look(next_column, next_row);
             let rise = match (here, there) {
                 (Cell::Land(a) | Cell::Ford(a), Cell::Land(b) | Cell::Ford(b)) => (b - a).abs(),
                 _ if (next_column, next_row) == goal || (column, row) == start => 0.0,
@@ -187,7 +213,9 @@ fn search(
                 Cell::Water => 12.0,
                 _ => 1.0,
             };
-            let cost = (run * (1.0 + 8.0 * slope * slope) * wet * 100.0) as i64;
+            // A cell with a wall or house in it is crossed only where there is no way round.
+            let fixed = if fixed_there { 30.0 } else { 1.0 };
+            let cost = (run * (1.0 + 8.0 * slope * slope) * wet * fixed * 100.0) as i64;
             let total = spent + cost;
             let index = key(next_column, next_row);
             if total < best[index] {

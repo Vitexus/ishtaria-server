@@ -62,6 +62,13 @@ pub struct Manifest {
     /// `player_character`.
     #[serde(default)]
     pub player_body: Option<PlayerBody>,
+    /// The ground set clients draw the land with, one of `GROUND_SETS` (the default ground when absent).
+    #[serde(default)]
+    pub ground: Option<String>,
+    /// When and on which kind of planet the story happens: the tilt of the axis, the turn of the planet and the
+    /// precession of the stars. Absent, the sky of today's Earth.
+    #[serde(default)]
+    pub astronomy: Option<Astronomy>,
     /// Granted once when a new player is created on a world that uses this disk.
     #[serde(default)]
     pub starting_items: Vec<ItemQty>,
@@ -78,7 +85,107 @@ pub struct Manifest {
     /// disk may define it; `ishtaria-worldgen --earth` strips it onto the cube-sphere.
     #[serde(default)]
     pub world: Option<World>,
+    /// The houses of the towns and villages the generator builds in a world using this disk, instead of its low-poly
+    /// kit houses (the disk's own models, laid out round the plaza). Plaza, roads, trees and walls stay as they are.
+    #[serde(default)]
+    pub settlement_houses: Vec<HouseStyle>,
 }
+
+/// A house model of the disk for the generated settlements (`settlement_houses` of the manifest). The model is scaled
+/// to a plot drawn from the ranges, its front towards the plaza, and sunk like the houses of `buildings/*.yaml`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HouseStyle {
+    /// A `.glb` below `media/models/` in metres, +Y up, front +Z.
+    pub model: String,
+    /// Width, height and depth of the model in its own units.
+    pub native_m: [f64; 3],
+    /// Smallest and largest width and depth of the plot in metres, and the height of the house.
+    pub width_m: [f64; 2],
+    pub depth_m: [f64; 2],
+    pub height_m: [f64; 2],
+    /// Metres the house is sunk below the lowest ground of its plot (default: the engine's).
+    #[serde(default)]
+    pub sink_m: Option<f64>,
+}
+
+/// Most house styles a manifest may list.
+pub const MAX_HOUSE_STYLES: usize = 16;
+
+/// The ground sets the client has textures for (`ground` of the manifest).
+pub const GROUND_SETS: [&str; 1] = ["alluvial"];
+
+/// The sky of a disk's world (manifest `astronomy`). Every field is optional and defaults to today's Earth.
+#[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Astronomy {
+    /// The astronomical year the story is set in (2700 BCE is -2699): the axial tilt (Laskar 2004) and the precession
+    /// of the star field are those of that year. Valid from -9000 to 11000.
+    pub year: Option<f64>,
+    /// The tilt of the axis in degrees, instead of the one the year gives (another planet, or a chosen sky).
+    pub obliquity_deg: Option<f64>,
+    /// One turn of the planet against the stars in seconds (today's Earth 86164.0905).
+    pub sidereal_day_seconds: Option<f64>,
+}
+
+/// Many buildings of a disk around the anchor of one of its places (`buildings/<name>.yaml`, a city's houses). Each stands
+/// on the lowest ground under its plot and blocks walking over its footprint.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Buildings {
+    /// The place (local id) whose anchor the positions are measured from.
+    pub place: String,
+    pub items: Vec<Building>,
+}
+
+/// Most buildings one file may list.
+pub const MAX_BUILDINGS: usize = 6000;
+
+/// One building of [`Buildings`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Building {
+    /// A `.glb` below `media/models/` in metres, +Y up, its origin the middle of its footprint on the ground, front +Z.
+    pub model: String,
+    /// Metres east and south (the client's local x and z) of the anchor of the place.
+    pub x: f64,
+    pub z: f64,
+    /// Compass bearing the model's front points to: 0 north, 90 east.
+    pub yaw_deg: f64,
+    /// Metres per model unit along the model's x (width), y (height) and z (depth).
+    pub scale: [f64; 3],
+    /// Width and depth of the plot in metres.
+    pub footprint: [f64; 2],
+    /// Metres the model is sunk below the lowest ground of its plot, instead of the engine's default. The models of
+    /// 0 A.D. do not share one floor level, so a disk sets it for each model it lists.
+    #[serde(default)]
+    pub sink_m: Option<f64>,
+}
+
+/// A footpath a disk lays between its places (`trails/<name>.yaml`): the server routes it over the ground leg by leg, from
+/// each place to the next (a leg is at most `trails::MAX_TRAIL_M` long, so a long road lists waypoint places), and draws
+/// it as the stepping stones of the generated towns' footpaths.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Trail {
+    /// The name patrols refer to (`follow` of a movement).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Local ids of the places the path passes, in order (two to `MAX_TRAIL_PLACES`).
+    pub places: Vec<String>,
+    /// Metres around the first place and around the last that are left without stones (a village square, a quay).
+    #[serde(default)]
+    pub start_clearance_m: Option<f64>,
+    #[serde(default)]
+    pub end_clearance_m: Option<f64>,
+    /// A `.glb` below `media/models/` of a 4 m stretch of the trail, lying along its +Z on the ground (a worn cart track),
+    /// laid every 4 m instead of the engine's stepping stones.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Most places one trail may pass.
+pub const MAX_TRAIL_PLACES: usize = 12;
 
 /// The real planet of a datadisk: equirectangular relief and water mask that
 /// replace the procedural noise when a world is generated with the disk.
@@ -304,10 +411,31 @@ pub struct Structure {
     /// Stand at mean sea level (ships, floating docks) instead of on the terrain.
     #[serde(default)]
     pub at_sea: bool,
+    /// Float on the water of a landscape patch (a river, a pond) at its surface instead of standing on the bed; on dry
+    /// ground it stands on the terrain. Boats and floating docks of a river; they get no collider, like `at_sea`.
+    #[serde(default)]
+    pub on_water: bool,
+    /// A vehicle the structure is: a player boards it at the place (E), then moves with it over the water at its
+    /// speed, and leaves it at a shore. A boat, a raft; other media may follow.
+    #[serde(default)]
+    pub vehicle: Option<Vehicle>,
     /// A knowledge card (`knowledge.yaml`) a player standing at the structure can read: an inscription, a tablet.
     pub about: Option<String>,
     /// An achievement of the disk (`achievements.yaml`) the player earns by reading `about` there.
     pub achievement: Option<String>,
+}
+
+/// What makes a structure a vehicle (`vehicle` of a structure). Vehicles differ only in how fast they go and in the clip
+/// the rider plays; the engine moves every one of them the same way.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Vehicle {
+    /// Metres per second over the water at full speed (a rowed fishing boat 2 to 3).
+    pub speed_m_s: f64,
+    /// The clip of the rider's model played while the vehicle moves (`Row`); without it, or when the model has none,
+    /// the rider keeps the idle clip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<String>,
 }
 
 /// A landscape patch of a datadisk place (ADR 0013): real-world relief around the site, with the
@@ -403,6 +531,10 @@ pub struct Movement {
     /// How far into its cycle a shepherd's flock is at time zero (seconds); a herd only.
     #[serde(default)]
     pub phase_s: f64,
+    /// A patrol that follows a trail of the disk (`id` of a `trails/*.yaml`) there and back again, instead of listing
+    /// its waypoints: the server takes them from the road once it is laid.
+    #[serde(default)]
+    pub follow: Option<String>,
 }
 
 fn default_radius() -> f64 {
@@ -686,6 +818,10 @@ pub struct QuestFile {
     pub start_stage: String,
     /// Place where the quest begins: shown as the next story point until the quest is started.
     pub start_place: Option<String>,
+    /// Places that go on the map and the compass as soon as the quest is begun and stay there: a village the story
+    /// sends the player through, say, before any stage points at it.
+    #[serde(default)]
+    pub known_places: Vec<String>,
     pub excerpt: Option<QuestExcerpt>,
     pub stages: BTreeMap<String, StageFile>,
 }
@@ -696,6 +832,7 @@ pub struct Quest {
     pub title_key: String,
     pub start_stage: String,
     pub start_place: Option<String>,
+    pub known_places: Vec<String>,
     pub excerpt: Option<QuestExcerpt>,
     pub stages: BTreeMap<String, Stage>,
 }
@@ -863,6 +1000,10 @@ pub struct Disk {
     pub knowledge: Vec<KnowledgeCard>,
     /// Achievements of the disk (`achievements.yaml` at the disk root).
     pub achievements: Vec<DiskAchievement>,
+    /// Houses and the like around the anchor of a place (`buildings/*.yaml`).
+    pub buildings: Vec<Buildings>,
+    /// Footpaths between the places of the disk (`trails/*.yaml`).
+    pub trails: Vec<Trail>,
     /// Media files (path below the disk -> absolute file) with their sha256.
     pub media: BTreeMap<String, (PathBuf, String)>,
     /// Spoken lines: (language, local text key) -> media path, from `media/voice/<language>/<key>.ogg`.
@@ -977,6 +1118,7 @@ impl Disk {
                 title_key: file.title_key,
                 start_stage: file.start_stage,
                 start_place: file.start_place,
+                known_places: file.known_places,
                 excerpt: file.excerpt,
                 stages: file
                     .stages
@@ -1044,6 +1186,54 @@ impl Disk {
                 Vec::new()
             }
         };
+        let buildings = {
+            let folder = dir.join("buildings");
+            let mut files: Vec<PathBuf> = Vec::new();
+            if folder.is_dir() {
+                for entry in fs::read_dir(&folder)? {
+                    let path = entry?.path();
+                    if path
+                        .extension()
+                        .is_some_and(|extension| extension == "yaml")
+                    {
+                        files.push(path);
+                    }
+                }
+                files.sort();
+            }
+            let mut all = Vec::new();
+            for path in files {
+                count += 1;
+                ensure!(count <= MAX_FILES, "too many files in the datadisk");
+                let text = read_limited(&path, &mut hasher, dir)?;
+                all.push(parse::<Buildings>(&path, &text)?);
+            }
+            all
+        };
+        let trails = {
+            let folder = dir.join("trails");
+            let mut files: Vec<PathBuf> = Vec::new();
+            if folder.is_dir() {
+                for entry in fs::read_dir(&folder)? {
+                    let path = entry?.path();
+                    if path
+                        .extension()
+                        .is_some_and(|extension| extension == "yaml")
+                    {
+                        files.push(path);
+                    }
+                }
+                files.sort();
+            }
+            let mut all = Vec::new();
+            for path in files {
+                count += 1;
+                ensure!(count <= MAX_FILES, "too many files in the datadisk");
+                let text = read_limited(&path, &mut hasher, dir)?;
+                all.push(parse::<Trail>(&path, &text)?);
+            }
+            all
+        };
         let mut strings = BTreeMap::new();
         for language in &manifest.languages {
             ensure!(
@@ -1070,6 +1260,16 @@ impl Disk {
             wanted.push(structure.model.as_str());
             wanted.extend(structure.collision.as_deref());
         }
+        for building in buildings.iter().flat_map(|file| file.items.iter()) {
+            wanted.push(building.model.as_str());
+        }
+        wanted.extend(
+            manifest
+                .settlement_houses
+                .iter()
+                .map(|style| style.model.as_str()),
+        );
+        wanted.extend(trails.iter().filter_map(|trail| trail.model.as_deref()));
         for terrain in places.iter().filter_map(|place| place.terrain.as_ref()) {
             wanted.push(terrain.heightmap.as_str());
             wanted.extend(terrain.water.as_deref());
@@ -1174,6 +1374,8 @@ impl Disk {
             easter_eggs,
             knowledge,
             achievements,
+            buildings,
+            trails,
             media,
             voices,
             strings,
@@ -1340,7 +1542,10 @@ impl Disk {
             }
             if let Some(scenery) = &place.scenery {
                 ensure!(
-                    matches!(scenery.preset.as_str(), "town" | "graveyard" | "fortress"),
+                    matches!(
+                        scenery.preset.as_str(),
+                        "town" | "graveyard" | "fortress" | "pasture"
+                    ),
                     "{id}: unknown scenery preset {}",
                     scenery.preset
                 );
@@ -1363,6 +1568,26 @@ impl Disk {
                         path.starts_with("media/models/") && path.ends_with(".glb"),
                         "{id}: structure model {path} must be a .glb below media/models/"
                     );
+                }
+                if let Some(vehicle) = &structure.vehicle {
+                    ensure!(
+                        structure.on_water || structure.at_sea,
+                        "{id}: the vehicle {} must float (on_water or at_sea)",
+                        place.id
+                    );
+                    ensure!(
+                        vehicle.speed_m_s.is_finite() && (0.2..=30.0).contains(&vehicle.speed_m_s),
+                        "{id}: the vehicle {} has a speed out of range",
+                        place.id
+                    );
+                    if let Some(clip) = &vehicle.clip {
+                        ensure!(
+                            !clip.is_empty()
+                                && clip.len() <= 32
+                                && clip.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                            "{id}: invalid vehicle clip {clip}"
+                        );
+                    }
                 }
                 let in_range = |value: Option<f64>, low: f64, high: f64| {
                     value.map_or(true, |value| {
@@ -1520,6 +1745,74 @@ impl Disk {
                 );
             }
         }
+        let mut buildings_of = HashSet::new();
+        for file in &self.buildings {
+            ensure!(
+                self.places.iter().any(|place| place.id == file.place),
+                "{id}: buildings of unknown place {}",
+                file.place
+            );
+            ensure!(
+                buildings_of.insert(file.place.as_str()),
+                "{id}: a second buildings file for place {}",
+                file.place
+            );
+            ensure!(
+                file.items.len() <= MAX_BUILDINGS,
+                "{id}: more than {MAX_BUILDINGS} buildings at {}",
+                file.place
+            );
+            let finite = |value: f64, low: f64, high: f64| {
+                value.is_finite() && (low..=high).contains(&value)
+            };
+            for item in &file.items {
+                ensure!(
+                    item.model.starts_with("media/models/") && item.model.ends_with(".glb"),
+                    "{id}: building model {} must be a .glb below media/models/",
+                    item.model
+                );
+                ensure!(
+                    finite(item.x, -4000.0, 4000.0)
+                        && finite(item.z, -4000.0, 4000.0)
+                        && finite(item.yaw_deg, 0.0, 360.0)
+                        && item.scale.iter().all(|value| finite(*value, 0.05, 20.0))
+                        && item
+                            .footprint
+                            .iter()
+                            .all(|value| finite(*value, 1.0, 100.0))
+                        && item.sink_m.map_or(true, |sink| finite(sink, -2.0, 10.0)),
+                    "{id}: a building at {} has a value out of range",
+                    file.place
+                );
+            }
+        }
+        for trail in &self.trails {
+            ensure!(
+                (2..=MAX_TRAIL_PLACES).contains(&trail.places.len()),
+                "{id}: a trail passes two to {MAX_TRAIL_PLACES} places"
+            );
+            for place in &trail.places {
+                ensure!(
+                    self.places.iter().any(|known| &known.id == place),
+                    "{id}: trail through unknown place {place}"
+                );
+            }
+            if let Some(model) = &trail.model {
+                ensure!(
+                    model.starts_with("media/models/") && model.ends_with(".glb"),
+                    "{id}: trail model {model} must be a .glb below media/models/"
+                );
+            }
+            for clearance in [trail.start_clearance_m, trail.end_clearance_m]
+                .into_iter()
+                .flatten()
+            {
+                ensure!(
+                    clearance.is_finite() && (0.0..=200.0).contains(&clearance),
+                    "{id}: a trail clearance is out of range"
+                );
+            }
+        }
         let mut achievements = HashSet::new();
         for achievement in &self.achievements {
             ensure!(
@@ -1660,8 +1953,8 @@ impl Disk {
                 }
                 if let Some(density) = wildlife.density {
                     ensure!(
-                        (0.0..=8.0).contains(&density) && density > 0.0,
-                        "{id}: place {} wildlife density must be > 0 and <= 8",
+                        (0.0..=16.0).contains(&density) && density > 0.0,
+                        "{id}: place {} wildlife density must be > 0 and <= 16",
                         place.id
                     );
                 }
@@ -1671,6 +1964,60 @@ impl Disk {
             ensure!(
                 crate::players::valid_character(character),
                 "{id}: player_character {character} is not a character of the creator"
+            );
+        }
+        ensure!(
+            self.manifest.settlement_houses.len() <= MAX_HOUSE_STYLES,
+            "{id}: more than {MAX_HOUSE_STYLES} settlement house styles"
+        );
+        for style in &self.manifest.settlement_houses {
+            ensure!(
+                style.model.starts_with("media/models/") && style.model.ends_with(".glb"),
+                "{id}: settlement house model {} must be a .glb below media/models/",
+                style.model
+            );
+            let ok = |range: [f64; 2], low: f64, high: f64| {
+                range
+                    .iter()
+                    .all(|v| v.is_finite() && (low..=high).contains(v))
+                    && range[0] <= range[1]
+            };
+            ensure!(
+                style
+                    .native_m
+                    .iter()
+                    .all(|v| v.is_finite() && *v > 0.01 && *v < 500.0)
+                    && ok(style.width_m, 3.0, 40.0)
+                    && ok(style.depth_m, 3.0, 40.0)
+                    && ok(style.height_m, 2.0, 30.0)
+                    && style
+                        .sink_m
+                        .map_or(true, |v| v.is_finite() && (-2.0..=10.0).contains(&v)),
+                "{id}: a settlement house style {} has a value out of range",
+                style.model
+            );
+        }
+        if let Some(ground) = &self.manifest.ground {
+            ensure!(
+                GROUND_SETS.contains(&ground.as_str()),
+                "{id}: ground {ground} is not a ground set of the client (one of {GROUND_SETS:?})"
+            );
+        }
+        if let Some(sky) = &self.manifest.astronomy {
+            ensure!(
+                sky.year
+                    .map_or(true, |year| (-9000.0..=11000.0).contains(&year)),
+                "{id}: astronomy year must be -9000..11000"
+            );
+            ensure!(
+                sky.obliquity_deg
+                    .map_or(true, |tilt| (0.0..=60.0).contains(&tilt)),
+                "{id}: astronomy obliquity_deg must be 0..60"
+            );
+            ensure!(
+                sky.sidereal_day_seconds
+                    .map_or(true, |day| (3600.0..=400_000.0).contains(&day)),
+                "{id}: astronomy sidereal_day_seconds must be 3600..400000"
             );
         }
         if let Some(body) = &self.manifest.player_body {
@@ -1703,6 +2050,15 @@ impl Disk {
                     npc.id
                 );
                 match movement.kind {
+                    MovementKind::Patrol if movement.follow.is_some() => ensure!(
+                        movement.waypoints.is_empty()
+                            && self
+                                .trails
+                                .iter()
+                                .any(|trail| trail.id.as_deref() == movement.follow.as_deref()),
+                        "{id}: npc {} follows a trail the disk does not have",
+                        npc.id
+                    ),
                     MovementKind::Patrol => ensure!(
                         (2..=16).contains(&movement.waypoints.len())
                             && movement
@@ -1778,7 +2134,7 @@ impl Disk {
                 "{id}: quest {} has an unknown start stage",
                 quest.id
             );
-            for place in quest.start_place.iter() {
+            for place in quest.start_place.iter().chain(quest.known_places.iter()) {
                 ensure!(
                     !local(place) || places.contains(place.as_str()),
                     "{id}: quest {} starts at unknown place {place}",

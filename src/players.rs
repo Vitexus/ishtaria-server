@@ -157,6 +157,7 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/players/me/flag", put(set_flag))
         .route("/players/session", delete(logout))
         .merge(super::survival::routes())
+        .merge(super::vehicles::routes())
         .layer(DefaultBodyLimit::max(2048))
         .layer(axum::middleware::map_response(
             |mut response: Response| async move {

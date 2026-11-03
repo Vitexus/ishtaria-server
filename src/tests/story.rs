@@ -33,7 +33,8 @@ fn install_disk() -> PathBuf {
         "music/m.yaml",
         "- {id: t, file: media/music/t.ogg, title_key: music.t, loop: true}\n",
     );
-    write(&root, "quests/q.yaml", "id: q\ntitle_key: q\nstart_stage: s1\nstages:\n  s1: {text_key: q.s1}\n  s2: {text_key: q.s2, final: true}\n");
+    write(&root, "quests/q.yaml", "id: q\ntitle_key: q\nstart_stage: s1\nstart_place: hut\nstages:\n  s1: {text_key: q.s1}\n  s2: {text_key: q.s2, final: true}\n");
+    write(&root, "quests/p.yaml", "id: p\ntitle_key: q\nstart_stage: a\nstart_place: hut\nstages:\n  a: {text_key: q.s1}\n  b: {text_key: q.s1}\n  c: {text_key: q.s2, final: true}\n");
     write(&root, "quests/r.yaml", "id: r\ntitle_key: r\nstart_stage: a\nstages:\n  a: {text_key: r.a, reach: {place: hut, radius_m: 30, goto: b}}\n  b: {text_key: r.b, final: true}\n");
     write(&root, "dialogues/hermit.yaml", "id: hermit\nmusic: t\nstart: hi\nnodes:\n  hi:\n    text_key: hi\n    choices:\n      - {text_key: bye, if: {gold_at_least: 5}, effects: [{gold: -5}, {once: {key: reward, effects: [{gold: 20}, {set_stage: {quest: q, stage: s2}}]}}, {set_flag: met}, {set_stage: {quest: r, stage: a}}]}\n");
     fs::create_dir_all(root.join("media/portraits")).unwrap();
@@ -596,6 +597,165 @@ async fn reading_a_tablet_earns_the_disks_hidden_achievement_once(pool: PgPool) 
     assert_eq!(shown["description"], "read:a.d");
 
     // The cached story would otherwise follow the next test into its world.
+    std::env::remove_var("ISHTARIA_DATADISK_DIR");
+    world::reset_cache().await;
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// Puts the player's health at 1 and lets them drown for a quarter second; whether they died for good.
+async fn drown_once(state: &AppState, player_id: i64) -> bool {
+    sqlx::query("UPDATE players SET health = 1, health_fraction = 0 WHERE id = $1")
+        .bind(player_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    let mut transaction = state.pool.begin().await.unwrap();
+    let died = crate::survival::drown(state, &mut transaction, player_id, 0.25)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    died
+}
+
+async fn inventory(pool: &PgPool, player_id: i64) -> Vec<(String, i64)> {
+    sqlx::query_as(
+        "SELECT item_id, quantity FROM player_inventory WHERE player_id = $1 ORDER BY item_id",
+    )
+    .bind(player_id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn set_item(pool: &PgPool, player_id: i64, item: &str, quantity: i64) {
+    sqlx::query("INSERT INTO player_inventory (player_id, item_id, quantity) VALUES ($1, $2, $3) ON CONFLICT (player_id, item_id) DO UPDATE SET quantity = EXCLUDED.quantity")
+        .bind(player_id)
+        .bind(item)
+        .bind(quantity)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+#[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
+async fn a_story_death_returns_to_where_the_quest_last_changed(pool: PgPool) {
+    let _auth_test = AUTH_TESTS.acquire().await.unwrap();
+    let dir = install_disk();
+    std::env::set_var("ISHTARIA_DATADISK_DIR", &dir);
+    let world_id = initialize_spawn_world(&pool).await;
+    apply_disk(&pool, world_id).await;
+    world::reset_cache().await;
+    let state = AppState {
+        pool: pool.clone(),
+        world_id,
+    };
+    let router = app(state.clone());
+    let _token = create_session(&router, "hunter").await;
+    let (player_id, x, y, z): (i64, f64, f64, f64) =
+        sqlx::query_as("SELECT id, position_x, position_y, position_z FROM players")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let reached = [x, y, z];
+    // The quest has moved past its first stage here: the trigger keeps this spot and the inventory.
+    sqlx::query(
+        "INSERT INTO player_quests (player_id, quest_id, stage) VALUES ($1, 'play:p', 'b')",
+    )
+    .bind(player_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let carried = inventory(&pool, player_id).await;
+    let (apple, apples) = carried
+        .iter()
+        .find(|(item, _)| item == "apple")
+        .cloned()
+        .expect("a starter apple");
+    // Since then: found gold and stones, ate an apple.
+    let gold = carried
+        .iter()
+        .find(|(item, _)| item == "gold")
+        .map_or(0, |(_, quantity)| *quantity);
+    set_item(&pool, player_id, "gold", gold + 40).await;
+    set_item(&pool, player_id, "stone", 5).await;
+    set_item(&pool, player_id, &apple, apples - 1).await;
+    let length = (x * x + y * y + z * z).sqrt();
+    let away = [x + 150.0, y, z]
+        .map(|value| value * length / ((x + 150.0).powi(2) + y * y + z * z).sqrt());
+    teleport(&pool, player_id, away).await;
+    assert!(
+        !drown_once(&state, player_id).await,
+        "past the first stage a story death restarts the quest instead of a memorial"
+    );
+    let (stage, health, died, px, py, pz): (String, i32, bool, f64, f64, f64) = sqlx::query_as(
+        "SELECT q.stage, p.health, p.died_at IS NOT NULL, p.position_x, p.position_y, p.position_z
+         FROM players p JOIN player_quests q ON q.player_id = p.id WHERE p.id = $1",
+    )
+    .bind(player_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stage, "b", "the stage is kept");
+    assert_eq!(health, 100);
+    assert!(!died);
+    assert_eq!([px, py, pz], reached, "back where the stage was reached");
+    let mut expected = carried.clone();
+    for entry in &mut expected {
+        if entry.0 == apple {
+            entry.1 = apples - 1;
+        }
+    }
+    assert_eq!(
+        inventory(&pool, player_id).await,
+        expected,
+        "what was gained since the checkpoint is gone, what was used stays used"
+    );
+    let graves: i64 = sqlx::query_scalar("SELECT count(*) FROM graves")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(graves, 0);
+
+    // A quest row from before the checkpoints falls back to the quest's start place and keeps the inventory.
+    sqlx::query("UPDATE player_quests SET checkpoint_x = NULL, checkpoint_y = NULL, checkpoint_z = NULL, checkpoint_at = NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    set_item(&pool, player_id, "stone", 2).await;
+    teleport(&pool, player_id, away).await;
+    assert!(!drown_once(&state, player_id).await);
+    let story = world::world(&state).await.unwrap().expect("disk applied");
+    let start = story.story.quests["play:p"].start_place.clone().unwrap();
+    let hut = world::site_position(&story.sites[&start]);
+    let back: (f64, f64, f64) =
+        sqlx::query_as("SELECT position_x, position_y, position_z FROM players WHERE id = $1")
+            .bind(player_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!([back.0, back.1, back.2], hut);
+    assert!(inventory(&pool, player_id)
+        .await
+        .contains(&("stone".to_owned(), 2)));
+
+    // Back on the first stage the death is the engine's: a memorial that keeps the inventory.
+    sqlx::query("UPDATE player_quests SET stage = 'a'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = inventory(&pool, player_id).await;
+    assert!(
+        drown_once(&state, player_id).await,
+        "a death on the first stage is permanent"
+    );
+    let kept: Vec<(String, i64)> =
+        sqlx::query_as("SELECT item_id, quantity FROM grave_inventory ORDER BY item_id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kept, before, "the memorial keeps the inventory");
+
     std::env::remove_var("ISHTARIA_DATADISK_DIR");
     world::reset_cache().await;
     let _ = fs::remove_dir_all(dir);

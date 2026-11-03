@@ -1,0 +1,60 @@
+# The people of every home of a generated town: a man, a woman, an old man, an old woman and two children at each house.
+# They wander about the doorstep and talk a little; their looks may be lent by a datadisk (tags look_villager_man ...).
+dialogue:
+  id: villager
+  status: reviewed
+  start: greet
+  nodes:
+    greet:
+      text_key: villager.greet
+      choices:
+        - {text_key: villager.ask_home, goto: home}
+        - {text_key: villager.leave}
+    home:
+      text_key: villager.home
+      choices:
+        - {text_key: villager.more, goto: greet}
+        - {text_key: villager.leave}
+strings:
+  en:
+    villager.greet: "Peace on your road, traveller."
+    villager.ask_home: Is this your house?
+    villager.home: "It is. Four walls, a roof and the whole family under it. What more would anyone want?"
+    villager.more: Something else...
+    villager.leave: Walk well.
+    villager.man.name: Villager
+    villager.man.bio: A man of the town on his way between the house and his work.
+    villager.woman.name: Villager
+    villager.woman.bio: A woman of the town, busy about her house.
+    villager.pregnant_woman.name: Villager
+    villager.pregnant_woman.bio: A woman of the town, expecting a child, busy about her house.
+    villager.old_man.name: Old man
+    villager.old_man.bio: An old man resting in the shade of his house.
+    villager.old_woman.name: Old woman
+    villager.old_woman.bio: An old woman keeping an eye on the children.
+    villager.boy.name: Boy
+    villager.boy.bio: A boy running about the doorstep.
+    villager.girl.name: Girl
+    villager.girl.bio: A girl playing before the house.
+    home.name: Home
+  cs:
+    villager.greet: "Pokoj na tvé cestě, pocestný."
+    villager.ask_home: Je to váš dům?
+    villager.home: "Je. Čtyři zdi, střecha a pod ní celá rodina. Co víc by kdo chtěl?"
+    villager.more: Ještě něco...
+    villager.leave: Šťastnou cestu.
+    villager.man.name: Obyvatel
+    villager.man.bio: Muž z města na cestě mezi domem a prací.
+    villager.woman.name: Obyvatelka
+    villager.woman.bio: Žena z města, zaměstnaná kolem domu.
+    villager.pregnant_woman.name: Obyvatelka
+    villager.pregnant_woman.bio: Těhotná žena z města, zaměstnaná kolem domu.
+    villager.old_man.name: Stařec
+    villager.old_man.bio: Starý muž odpočívá ve stínu svého domu.
+    villager.old_woman.name: Stařena
+    villager.old_woman.bio: Stará žena, která dohlíží na děti.
+    villager.boy.name: Chlapec
+    villager.boy.bio: Chlapec, který pobíhá před domem.
+    villager.girl.name: Dívka
+    villager.girl.bio: Dívka, která si hraje před domem.
+    home.name: Domov

@@ -206,12 +206,65 @@ fn house(rng: &mut Rng, cx: f64, cz: f64, yaw: f64, width: usize, props: &mut Ve
 /// A settlement: plaza with fountain and stalls, crossing roads, houses facing the plaza,
 /// trees, and for a town a wall with gates and towers. `sea` is the horizontal unit direction to
 /// the nearest sea and its distance in metres when the settlement is by the coast.
+#[cfg(test)]
 pub fn settlement(
     seed: &str,
     id: &str,
     size: Size,
     sea: Option<((f64, f64), f64)>,
 ) -> Vec<LocalProp> {
+    settlement_with_houses(seed, id, size, sea, &[]).0
+}
+
+/// A house of a datadisk's own model for a settlement: scaled to a plot drawn from the style's ranges, its front
+/// towards the plaza at the origin. Positions are the client's local metres (x east, z south).
+fn styled_house(
+    rng: &mut Rng,
+    styles: &[crate::story::disk::HouseStyle],
+    x: f64,
+    z: f64,
+) -> crate::story::disk::Building {
+    let style = rng.pick(styles);
+    let width = rng.between(style.width_m[0], style.width_m[1]);
+    let depth = rng.between(style.depth_m[0], style.depth_m[1]);
+    let height = rng.between(style.height_m[0], style.height_m[1]);
+    let [native_w, native_h, native_d] = style.native_m;
+    let (scale_w, scale_d) = (width / native_w, depth / native_d);
+    // The height follows the plot a little, as the houses of the old father's village do.
+    let mean = (scale_w * scale_d).sqrt();
+    let scale_h = (height / native_h).clamp(0.85 * mean, 1.15 * mean);
+    crate::story::disk::Building {
+        model: style.model.clone(),
+        x,
+        z,
+        yaw_deg: (f64::atan2(-x, z).to_degrees() + rng.between(-8.0, 8.0)).rem_euclid(360.0),
+        scale: [scale_w, scale_h, scale_d],
+        footprint: [width, depth],
+        sink_m: style.sink_m,
+    }
+}
+
+/// [`settlement`] whose houses are the disk's own models when `styles` lists any: they come back as buildings of the
+/// plaza's local frame instead of the kit walls and roofs among the props.
+pub fn settlement_with_houses(
+    seed: &str,
+    id: &str,
+    size: Size,
+    sea: Option<((f64, f64), f64)>,
+    styles: &[crate::story::disk::HouseStyle],
+) -> (
+    Vec<LocalProp>,
+    Vec<crate::story::disk::Building>,
+    Vec<(f64, f64)>,
+) {
+    let mut buildings = Vec::new();
+    // The doorstep of every house, towards the plaza: where the people of the house stand.
+    let mut doorsteps: Vec<(f64, f64)> = Vec::new();
+    let mut doorstep = |x: f64, z: f64, depth: f64| {
+        let length = x.hypot(z).max(1.0);
+        let step = depth / 2.0 + 2.5;
+        doorsteps.push((x - x / length * step, z - z / length * step));
+    };
     let mut rng = Rng::new(seed, id);
     let radius = size.radius_m();
     let mut props = Vec::new();
@@ -274,6 +327,26 @@ pub fn settlement(
     let wanted = size.houses();
     let mut centers: Vec<(f64, f64)> = vec![(0.0, 0.0)];
     centers.extend(town_spot(size, "alley"));
+    // Every settlement draws its water from the fountain of the plaza; a village has a second one in a quarter and a
+    // town one in each quarter, so nobody walks across a town to fill a skin. The houses keep clear of them.
+    let quarters = match size {
+        Size::Hamlet => 0,
+        Size::Village => 1,
+        Size::Town => 4,
+    };
+    for k in 0..quarters {
+        let angle = f64::from(k) * FRAC_PI_2 + FRAC_PI_2 / 2.0 + 0.35;
+        let distance = radius * 0.55;
+        let (x, z) = (distance * angle.cos(), distance * angle.sin());
+        props.push(LocalProp::new(
+            "town.fountain-round",
+            x,
+            z,
+            0.0,
+            MODULE_M * 1.2,
+        ));
+        centers.push((x, z));
+    }
     let mut tries = 0;
     while centers.len() <= wanted && tries < 4000 {
         tries += 1;
@@ -288,7 +361,14 @@ pub fn settlement(
         }
         centers.push((x, z));
         let width = 2 + (rng.next() * 2.0) as usize;
-        house(&mut rng, x, z, facing(-x, -z), width, &mut props);
+        if styles.is_empty() {
+            house(&mut rng, x, z, facing(-x, -z), width, &mut props);
+            doorstep(x, z, 2.0 * HOUSE_M);
+        } else {
+            let styled = styled_house(&mut rng, styles, x, z);
+            doorstep(x, z, styled.footprint[1]);
+            buildings.push(styled);
+        }
     }
     // Trees in the gaps.
     for _ in 0..wanted {
@@ -318,7 +398,10 @@ pub fn settlement(
         ));
     }
 
-    landmarks(seed, id, size, &mut props);
+    // The kit's temples and towers are of the medieval look the disk's own houses replace.
+    if styles.is_empty() {
+        landmarks(seed, id, size, &mut props);
+    }
     if size == Size::Town {
         wall(
             &mut props,
@@ -329,7 +412,7 @@ pub fn settlement(
     if let Some((direction, distance)) = sea {
         harbour(&mut rng, &mut props, direction, distance.min(300.0));
     }
-    props
+    (props, buildings, doorsteps)
 }
 
 /// Radius of the corners of a walled town's wall.

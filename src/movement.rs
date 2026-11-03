@@ -45,6 +45,8 @@ pub(super) const OBJECT_GRID: i32 = 600_000;
 /// Animals live on a coarser grid: about one cell per 170 metres.
 const FAUNA_GRID: i32 = 60_000;
 const FAUNA_PRESENCE: f64 = 0.35;
+/// Further animals a fauna cell at a water-hole may hold: the hinds and the rest of the herd that come to drink.
+const HERD_EXTRA: u32 = 5;
 /// How far from a patch's water (metres) a wildlife overlay still gathers game and lush growth.
 const WATERSIDE_REACH_M: f64 = 80.0;
 /// Land animals this close to patch water join the drink/graze cycle instead of milling in place.
@@ -55,8 +57,8 @@ const WATERHOLE_GRAZE_MAX_M: f64 = 78.0;
 /// Walking speed of a waterhole drink cycle, metres per second.
 const WATERHOLE_SPEED_M_S: f64 = 1.4;
 /// How long it stands at the bank drinking, and how long it grazes before the next walk to water.
-const WATERHOLE_DRINK_MS: i64 = 22_000;
-const WATERHOLE_GRAZE_MS: i64 = 95_000;
+const WATERHOLE_DRINK_MS: i64 = 70_000;
+const WATERHOLE_GRAZE_MS: i64 = 50_000;
 /// Waypoints of a waterhole route: one every step, covering about a minute and a half.
 const WATERHOLE_STEP_MS: i64 = 6_000;
 const WATERHOLE_POINTS: i64 = 16;
@@ -73,6 +75,15 @@ const FAUNA_RADIUS_M: f64 = 280.0;
 /// 30 seconds, the first 21 of which are spent walking to the next waypoint.
 const WANDER_SLOT_MS: i64 = 30_000;
 const WANDER_MOVE_MS: i64 = 21_000;
+
+/// How much faster than the standard pace an animal of a model goes, so that the feet of its walk clip meet the ground
+/// instead of sliding over it: the walk clip of the 0 A.D. camel is made for a pace 10 % above the usual one.
+fn pace_factor(model: &str) -> f64 {
+    match model {
+        "zeroad.camel" => 1.1,
+        _ => 1.0,
+    }
+}
 const WANDER_PARTS: i64 = 3;
 /// Slots of the route sent to clients; they ask again before it runs out.
 const WANDER_SLOTS: i64 = 3;
@@ -357,8 +368,18 @@ fn patch_height(direction: [f64; 3], base: f64) -> Option<f64> {
     })
 }
 
+/// Whether a landscape patch's rectangle covers a direction (its ground replaces the strip there).
+fn patch_covers(direction: [f64; 3]) -> bool {
+    PATCHES.read().is_ok_and(|stored| {
+        stored
+            .1
+            .iter()
+            .any(|patch| patch.project(direction).is_some())
+    })
+}
+
 /// The water surface of a patch in a direction (absolute metres), when its mask says water.
-fn patch_water(direction: [f64; 3]) -> Option<f64> {
+pub(crate) fn patch_water(direction: [f64; 3]) -> Option<f64> {
     let stored = PATCHES.read().ok()?;
     stored.1.iter().find_map(|patch| {
         let (x, z, _) = patch.project(direction)?;
@@ -380,8 +401,13 @@ fn nearest_water_bank(direction: [f64; 3], reach_m: f64) -> Option<(f64, [f64; 3
     let stored = PATCHES.read().ok()?;
     let mut best: Option<(f64, [f64; 3])> = None;
     for patch in &stored.1 {
-        patch.water.as_ref()?;
-        let (x, z, _) = patch.project(direction)?;
+        // A patch without water, or one the animal stands outside of, says nothing about the others.
+        if patch.water.is_none() {
+            continue;
+        }
+        let Some((x, z, _)) = patch.project(direction) else {
+            continue;
+        };
         if patch.surface(x, z).is_some() {
             continue;
         }
@@ -486,12 +512,19 @@ pub(super) fn set_wildlife(key: String, zones: Vec<WildlifeZone>) {
 /// The wildlife overlay covering a direction, if any (nearest / first match).
 fn wildlife_at(direction: [f64; 3]) -> Option<WildlifeZone> {
     let stored = WILDLIFE.read().ok()?;
-    stored.1.iter().find_map(|zone| {
-        let distance = length(std::array::from_fn(|axis| {
-            (zone.direction[axis] - direction[axis]) * RADIUS
-        }));
-        (distance <= zone.radius_m).then(|| zone.clone())
-    })
+    // The smallest zone that covers the point wins, so that a river bank or a water hole inside a wide overlay (a whole
+    // floodplain) keeps its own plants and animals, whatever the order of the places.
+    stored
+        .1
+        .iter()
+        .filter(|zone| {
+            let distance = length(std::array::from_fn(|axis| {
+                (zone.direction[axis] - direction[axis]) * RADIUS
+            }));
+            distance <= zone.radius_m
+        })
+        .min_by(|first, second| first.radius_m.total_cmp(&second.radius_m))
+        .cloned()
 }
 
 pub(super) fn set_farms(key: String, sites: Vec<FarmSite>) {
@@ -546,6 +579,80 @@ fn bridge_height(direction: [f64; 3]) -> Option<f64> {
                 - deck.sag_m * 4.0 * t * (1.0 - t),
         )
     })
+}
+
+/// The roads and footpaths of the world: points along them in metres, hashed to cells of `TRAIL_CELL_M`. No tree, rock or
+/// plant of the generator stands within `TRAIL_CLEAR_M` of one.
+type TrailCells = HashMap<(i64, i64, i64), Vec<[f64; 3]>>;
+static TRAILS: std::sync::LazyLock<std::sync::RwLock<(String, TrailCells)>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new((String::new(), TrailCells::new())));
+const TRAIL_CELL_M: f64 = 20.0;
+pub(super) const TRAIL_CLEAR_M: f64 = 3.2;
+
+fn trail_cell(point: [f64; 3]) -> (i64, i64, i64) {
+    (
+        (point[0] / TRAIL_CELL_M).floor() as i64,
+        (point[1] / TRAIL_CELL_M).floor() as i64,
+        (point[2] / TRAIL_CELL_M).floor() as i64,
+    )
+}
+
+pub(super) fn set_trails(key: String, points: Vec<[f64; 3]>) {
+    let mut cells = TrailCells::new();
+    for point in points {
+        cells.entry(trail_cell(point)).or_default().push(point);
+    }
+    if let Ok(mut stored) = TRAILS.write() {
+        *stored = (key, cells);
+        TRAIL_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Whether a point (metres from the planet's centre, on the ground) lies within `reach` metres of a road or footpath.
+fn near_trail(point: [f64; 3], reach: f64) -> bool {
+    let Ok(stored) = TRAILS.read() else {
+        return false;
+    };
+    if stored.1.is_empty() {
+        return false;
+    }
+    let (cx, cy, cz) = trail_cell(point);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                if let Some(points) = stored.1.get(&(cx + dx, cy + dy, cz + dz)) {
+                    if points.iter().any(|spot| {
+                        length(std::array::from_fn(|axis| spot[axis] - point[axis])) <= reach
+                    }) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Whether a point lies where a tree, rock or plant must not stand: on a road or footpath.
+fn trail_cleared(point: [f64; 3]) -> bool {
+    near_trail(point, TRAIL_CLEAR_M)
+}
+
+/// How far from the stones (or stretches of a track, 4 m apart) a character is still on the road: the middle of a
+/// stretch is 2 m from the nearest of its points.
+const ON_TRAIL_M: f64 = 2.6;
+/// The share of the pace the road adds: whoever moves along a road goes this much faster than across the country.
+pub(super) const ROAD_PACE: f64 = 1.5;
+/// Bumped when the roads change, so that cached walks of characters are not read for the old ones.
+static TRAIL_GENERATION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether a position (metres, on the ground) is on a road or footpath.
+pub(super) fn on_trail(point: [f64; 3]) -> bool {
+    near_trail(point, ON_TRAIL_M)
+}
+
+pub(super) fn trail_generation() -> usize {
+    TRAIL_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub(super) fn set_statics(key: String, obstacles: Vec<WorldObject>) {
@@ -911,6 +1018,8 @@ pub(super) struct Reply {
     sitting: bool,
     /// True while the character is in water, swimming and losing health until a dry shore.
     swimming: bool,
+    /// The vehicle the character is aboard (a place id), when they are.
+    vehicle: Option<String>,
 }
 
 pub(super) struct WalkingTerrain {
@@ -919,6 +1028,145 @@ pub(super) struct WalkingTerrain {
     environment: environment::Environment,
     catalog: Vec<ObjectKind>,
     removed: Removed,
+    /// The coarse rivers as water channels, built from `environment` on first use.
+    rivers: std::sync::OnceLock<Rivers>,
+}
+
+/// Rivers of the coarse map (biome 2 cells) as channels the character walks and swims in. Each runs on the great
+/// circle from the centre of its cell to the centre of the cell downstream, the line the client draws, and is carved
+/// into the ground: `RIVER_BED_M` deep on that line, easing to nothing `reach` metres from it. The water stands
+/// `RIVER_LEVEL_M` below the uncarved ground, so a river is about 1.4 m deep in the middle (wadeable at the edges,
+/// a few metres of swimming in the middle). The client mirrors this in `surface_environment.gd` `_river_carve_m`.
+const RIVER_BED_M: f64 = 2.0;
+const RIVER_LEVEL_M: f64 = 0.6;
+/// Coarse cells this wet are rivers (the threshold of `environment::generate_with`).
+const RIVER_MIN_FLOW: u32 = 18;
+/// Carved half-width: `RIVER_REACH_PER_FLOW_M * sqrt(flow)` within these bounds.
+const RIVER_REACH_PER_FLOW_M: f64 = 10.0;
+const RIVER_REACH_MIN_M: f64 = 12.0;
+const RIVER_REACH_MAX_M: f64 = 90.0;
+/// Spacing of the samples that file a river under the cells it crosses.
+const RIVER_INDEX_STEP_M: f64 = 5_000.0;
+
+struct RiverSegment {
+    from: [f64; 3],
+    to: [f64; 3],
+    reach_m: f64,
+}
+
+#[derive(Default)]
+struct Rivers {
+    segments: Vec<RiverSegment>,
+    /// Segments by the environment cells they pass through.
+    cells: HashMap<usize, Vec<usize>>,
+}
+
+impl Rivers {
+    fn build(environment: &environment::Environment) -> Self {
+        let size = environment.face_size;
+        let centre = |index: usize| {
+            let face = index / (size * size);
+            let row = (index / size) % size;
+            let column = index % size;
+            cube_point(
+                face,
+                (column as f64 + 0.5) * 2.0 / size as f64 - 1.0,
+                1.0 - (row as f64 + 0.5) * 2.0 / size as f64,
+            )
+        };
+        let mut rivers = Rivers::default();
+        for index in 0..environment.biomes.len() {
+            let Ok(downstream) = usize::try_from(environment.downstream[index]) else {
+                continue;
+            };
+            if environment.biomes[index] != 2
+                || environment.flow[index] < RIVER_MIN_FLOW
+                || downstream >= environment.biomes.len()
+            {
+                continue;
+            }
+            let (from, to) = (centre(index), centre(downstream));
+            let reach_m = (RIVER_REACH_PER_FLOW_M * f64::from(environment.flow[index]).sqrt())
+                .clamp(RIVER_REACH_MIN_M, RIVER_REACH_MAX_M);
+            let segment = rivers.segments.len();
+            let samples = (length(std::array::from_fn(|axis| to[axis] - from[axis])) * RADIUS
+                / RIVER_INDEX_STEP_M)
+                .ceil()
+                .max(1.0) as usize;
+            for step in 0..=samples {
+                let t = step as f64 / samples as f64;
+                let point = unit(std::array::from_fn(|axis| {
+                    from[axis] + (to[axis] - from[axis]) * t
+                }));
+                let cell = environment_cell(environment, point);
+                let listed = rivers.cells.entry(cell).or_default();
+                if listed.last() != Some(&segment) {
+                    listed.push(segment);
+                }
+            }
+            rivers.segments.push(RiverSegment { from, to, reach_m });
+        }
+        rivers
+    }
+
+    /// Metres the rivers carve into the ground in a direction (0 away from every river).
+    fn carve(&self, environment: &environment::Environment, direction: [f64; 3]) -> f64 {
+        if self.segments.is_empty() {
+            return 0.0;
+        }
+        // The cell of the point and of probes a river's reach away, so a channel just over a cell edge counts.
+        let reference = if direction[1].abs() < 0.9 {
+            [0.0, 1.0, 0.0]
+        } else {
+            [1.0, 0.0, 0.0]
+        };
+        let east = unit(cross(reference, direction));
+        let north = cross(direction, east);
+        let probe = RIVER_REACH_MAX_M / RADIUS;
+        let mut cells = vec![environment_cell(environment, direction)];
+        for (axis, sign) in [(east, 1.0), (east, -1.0), (north, 1.0), (north, -1.0)] {
+            let cell = environment_cell(
+                environment,
+                unit(std::array::from_fn(|index| {
+                    direction[index] + axis[index] * probe * sign
+                })),
+            );
+            if !cells.contains(&cell) {
+                cells.push(cell);
+            }
+        }
+        let mut deepest: f64 = 0.0;
+        for cell in cells {
+            for &segment in self.cells.get(&cell).map(Vec::as_slice).unwrap_or(&[]) {
+                let segment = &self.segments[segment];
+                let along: [f64; 3] =
+                    std::array::from_fn(|axis| segment.to[axis] - segment.from[axis]);
+                let offset: [f64; 3] =
+                    std::array::from_fn(|axis| direction[axis] - segment.from[axis]);
+                let t = (dot(offset, along) / dot(along, along)).clamp(0.0, 1.0);
+                let nearest = unit(std::array::from_fn(|axis| {
+                    segment.from[axis] + along[axis] * t
+                }));
+                let distance =
+                    length(std::array::from_fn(|axis| direction[axis] - nearest[axis])) * RADIUS;
+                if distance >= segment.reach_m {
+                    continue;
+                }
+                let x = distance / segment.reach_m;
+                deepest = deepest.max(RIVER_BED_M * (1.0 - x * x * (3.0 - 2.0 * x)));
+            }
+        }
+        deepest
+    }
+}
+
+/// The index of the environment cell under a direction.
+fn environment_cell(environment: &environment::Environment, direction: [f64; 3]) -> usize {
+    let (face, horizontal, vertical) = coordinates(direction);
+    let size = environment.face_size;
+    face * size * size
+        + ((vertical * size as f64) as usize).min(size - 1) * size
+        + ((horizontal * size as f64) as usize).min(size - 1)
 }
 
 /// Objects that players have harvested, with the unix second at which they grow back.
@@ -1456,7 +1704,11 @@ impl WalkingTerrain {
         flight: &mut Flight,
         on_object: bool,
     ) -> ([f64; 3], bool) {
-        let speed = if intent.run { RUN_SPEED } else { WALK_SPEED };
+        let mut speed = if intent.run { RUN_SPEED } else { WALK_SPEED };
+        // On a road the pace is half as fast again.
+        if !flight.airborne && on_trail(point) {
+            speed *= ROAD_PACE;
+        }
         if !flight.airborne && !intent.jump && !on_object && !self.near_structure(point) {
             return (
                 self.step_scaled(point, intent.direction, seconds, speed, intent.scale())
@@ -1607,30 +1859,57 @@ impl WalkingTerrain {
         if let Some(level) = patch_water(direction) {
             return (level - height).max(0.0);
         }
-        // A dry patch is dry even over a coarse sea or river cell, down to sea level.
+        let index = self.cell_index(direction);
+        // A dry patch is dry land even over a coarse river or lake cell and even below 0 m (Uruk's floodplain
+        // lies at -3 m on dry steppe); only over the coarse sea is its ground below sea level under water.
+        // The client's `_detail_water_km` keeps the same rule, so there is no water the player cannot see.
         if patch_dry(direction) {
-            return (-height).max(0.0);
+            return if self.environment.biomes[index] == 0 {
+                (-height).max(0.0)
+            } else {
+                0.0
+            };
         }
-        // The same rule as the client's `_detail_water_km`, so there is no water the player cannot see:
-        // ground below sea level is not sea by itself (the strip is interpolated between its samples, and
+        // A coarse river runs in its carved channel; where it meets a lake or the sea the deeper water counts.
+        let river = self
+            .river_level(direction)
+            .map_or(0.0, |level| (level - height).max(0.0));
+        // Ground below sea level is not sea by itself (the strip is interpolated between its samples, and
         // land next to a water sample dips below zero far from any coast), only the water of its cell is.
-        let (face, horizontal, vertical) = coordinates(direction);
-        let size = self.environment.face_size;
-        let index = face * size * size
-            + ((vertical * size as f64) as usize).min(size - 1) * size
-            + ((horizontal * size as f64) as usize).min(size - 1);
         let water = self.environment.water_m[index];
         if water == environment::DRY {
-            return 0.0;
+            return river;
         }
         let depth = f64::from(water) - height;
         if environment::is_open_water(self.environment.biomes[index]) {
-            return depth.max(0.0);
+            return river.max(depth);
         }
         if water > self.environment.elevation_m[index] && depth >= 0.5 {
-            return depth;
+            return river.max(depth);
         }
-        0.0
+        river
+    }
+
+    /// The surface of a coarse river's water in a direction, when its channel is carved here (not under a
+    /// patch or a bridge): `RIVER_LEVEL_M` below the uncarved ground.
+    fn river_level(&self, direction: [f64; 3]) -> Option<f64> {
+        if bridge_height(direction).is_some() || patch_covers(direction) {
+            return None;
+        }
+        let carve = self.river_carve(direction);
+        (carve > RIVER_LEVEL_M).then(|| self.strip_height(direction) - RIVER_LEVEL_M)
+    }
+
+    /// The index of the environment cell under a direction.
+    fn cell_index(&self, direction: [f64; 3]) -> usize {
+        environment_cell(&self.environment, direction)
+    }
+
+    /// Metres a coarse river carves into the ground here; patches and bridges are not carved.
+    fn river_carve(&self, direction: [f64; 3]) -> f64 {
+        self.rivers
+            .get_or_init(|| Rivers::build(&self.environment))
+            .carve(&self.environment, direction)
     }
 
     /// The ground height where a character can stand or wade: dry land and water up to their chest.
@@ -1646,9 +1925,11 @@ impl WalkingTerrain {
         // Dry patch land is walkable even when the coarse planet cell is sea or river (Uruk on
         // the Early Dynastic Gulf). Without this, near a city wall the capsule walker zeroes
         // every horizontal step and only jumping still moves the character.
+        // Below 0 m it is still land unless the coarse cell is the sea (the rule of `water_depth`).
         if patch_dry(direction) {
             let height = self.height(direction);
-            return (height > 0.0).then_some(height);
+            let sea = self.environment.biomes[self.cell_index(direction)] == 0;
+            return (height > 0.0 || !sea).then_some(height);
         }
         let (face, horizontal, vertical) = coordinates(direction);
         let size = self.environment.face_size;
@@ -1660,6 +1941,13 @@ impl WalkingTerrain {
         // even when the coarse 150 km cell is ocean or river (Uruk / hunter water-hole on the
         // Early Dynastic strip). Coarse biomes alone would leave the character only able to jump.
         if height <= 0.0 {
+            return None;
+        }
+        // Nor does scenery stand in the water of a coarse river's channel.
+        if self
+            .river_level(direction)
+            .is_some_and(|level| level > height)
+        {
             return None;
         }
         let water = self.environment.water_m[index];
@@ -1674,6 +1962,14 @@ impl WalkingTerrain {
     }
 
     fn height(&self, direction: [f64; 3]) -> f64 {
+        let base = self.strip_height(direction);
+        bridge_height(direction).unwrap_or_else(|| {
+            patch_height(direction, base).unwrap_or_else(|| base - self.river_carve(direction))
+        })
+    }
+
+    /// The height strip alone, interpolated between its samples: no patch, bridge or river channel.
+    fn strip_height(&self, direction: [f64; 3]) -> f64 {
         let (face, horizontal, vertical) = coordinates(direction);
         let horizontal = (horizontal * self.size as f64 - 0.5).clamp(0.0, (self.size - 1) as f64);
         let vertical = (vertical * self.size as f64 - 0.5).clamp(0.0, (self.size - 1) as f64);
@@ -1697,8 +1993,7 @@ impl WalkingTerrain {
             ),
             horizontal.fract(),
         );
-        let base = interpolate(upper, lower, vertical.fract());
-        bridge_height(direction).unwrap_or_else(|| patch_height(direction, base).unwrap_or(base))
+        interpolate(upper, lower, vertical.fract())
     }
 
     fn object_cell(&self, face: usize, column: i32, row: i32) -> Option<WorldObject> {
@@ -1706,9 +2001,23 @@ impl WalkingTerrain {
         self.place(id, face, column, row, OBJECT_GRID, false)
     }
 
-    fn fauna_cell(&self, face: usize, column: i32, row: i32) -> Option<WorldObject> {
-        let id = format!("{}:fauna:{face}:{column}:{row}", self.environment.seed);
+    /// The animal of a fauna cell; `herd` 0 is the one every cell may hold, 1.. are the others of a herd at a water-hole.
+    fn fauna_cell(&self, face: usize, column: i32, row: i32, herd: u32) -> Option<WorldObject> {
+        let id = if herd == 0 {
+            format!("{}:fauna:{face}:{column}:{row}", self.environment.seed)
+        } else {
+            format!(
+                "{}:fauna:{face}:{column}:{row}:{herd}",
+                self.environment.seed
+            )
+        };
         let animal = self.place(id, face, column, row, FAUNA_GRID, true)?;
+        // The rest of a herd gathers only at a water-hole of a wildlife overlay: elsewhere a cell holds one animal.
+        if herd > 0 {
+            let anchor = unit(animal.position);
+            wildlife_at(anchor)?;
+            nearest_water_bank(anchor, WATERHOLE_REACH_M)?;
+        }
         // Wild land animals keep away from settlements, including where they stray to.
         (!is_land_animal(&animal.model) || !self.near_settlement(animal.position)).then_some(animal)
     }
@@ -1891,6 +2200,10 @@ impl WalkingTerrain {
             return self.place_reed_bed(id, point, biome, &sample);
         }
         let height = self.surface(point)?;
+        // No tree, rock or plant stands on a road or footpath.
+        if !fauna && trail_cleared(point.map(|value| value * (RADIUS + height))) {
+            return None;
+        }
         let overlay = wildlife_at(point);
         let reference = if point[1].abs() < 0.9 {
             [0.0, 1.0, 0.0]
@@ -2046,9 +2359,12 @@ impl WalkingTerrain {
     /// Animals near a point. They are passable scenery for now: they stand where the
     /// seed puts them and do not move or collide.
     pub(super) fn fauna(&self, point: [f64; 3]) -> Vec<WorldObject> {
-        let mut animals = self.collect(point, 2, FAUNA_GRID, |face, column, row| {
-            self.fauna_cell(face, column, row)
-        });
+        let mut animals = Vec::new();
+        for herd in 0..=HERD_EXTRA {
+            animals.extend(self.collect(point, 2, FAUNA_GRID, |face, column, row| {
+                self.fauna_cell(face, column, row, herd)
+            }));
+        }
         animals.retain(|animal| {
             length(std::array::from_fn(|axis| {
                 animal.position[axis] - point[axis]
@@ -2339,7 +2655,8 @@ impl WalkingTerrain {
             (drink[axis] - graze[axis]) * RADIUS
         }))
         .clamp(8.0, WATERHOLE_GRAZE_MAX_M + 10.0);
-        let walk_ms = ((walk_m / WATERHOLE_SPEED_M_S) * 1000.0).round() as i64;
+        let walk_ms =
+            ((walk_m / (WATERHOLE_SPEED_M_S * pace_factor(&animal.model))) * 1000.0).round() as i64;
         let cycle_ms = WATERHOLE_GRAZE_MS + walk_ms + WATERHOLE_DRINK_MS + walk_ms;
         let hash = Sha256::digest(format!("{}:waterhole-phase", animal.id).as_bytes());
         let phase_ms = (f64::from(u32::from_le_bytes(hash[0..4].try_into().unwrap()))
@@ -2475,6 +2792,8 @@ impl WalkingTerrain {
         };
         let anchor = unit(animal.position);
         let first = now_ms.div_euclid(WANDER_SLOT_MS);
+        // The walk of a slot takes less time for a faster pace (the same distance, the rest of the slot standing).
+        let move_ms = WANDER_MOVE_MS as f64 / pace_factor(&animal.model);
         let entry = |time: i64, direction: [f64; 3], slot: i64| {
             let ground = self.height(direction).max(0.0);
             let clearance = if flying {
@@ -2497,7 +2816,7 @@ impl WalkingTerrain {
                     from[axis] + (to[axis] - from[axis]) * fraction
                 }));
                 route.push(entry(
-                    slot * WANDER_SLOT_MS + (WANDER_MOVE_MS as f64 * fraction) as i64,
+                    slot * WANDER_SLOT_MS + (move_ms * fraction) as i64,
                     direction,
                     slot,
                 ));
@@ -2552,14 +2871,19 @@ impl WalkingTerrain {
             let face: usize = parts.next()?.parse().ok()?;
             let column: i32 = parts.next()?.parse().ok()?;
             let row: i32 = parts.next()?.parse().ok()?;
+            let herd: u32 = match parts.next() {
+                Some(number) => number.parse().ok()?,
+                None => 0,
+            };
             if parts.next().is_some()
+                || herd > HERD_EXTRA
                 || face > 5
                 || !(0..FAUNA_GRID).contains(&column)
                 || !(0..FAUNA_GRID).contains(&row)
             {
                 return None;
             }
-            self.fauna_cell(face, column, row)?
+            self.fauna_cell(face, column, row, herd)?
         } else if let Some(rest) = id.strip_prefix(&format!("{seed}:farm:")) {
             let (number, site) = rest.split_once(':')?;
             let number: usize = number.parse().ok()?;
@@ -2607,6 +2931,33 @@ impl WalkingTerrain {
             }
         }
         objects
+    }
+
+    /// Whether a wall, house or other fixed obstacle of the world (a registered static, not a natural tree or rock) stands
+    /// within `reach` metres of the ground at a direction.
+    pub(super) fn near_fixed_obstacle(&self, direction: [f64; 3], reach: f64) -> bool {
+        let key = format!(
+            "{}:{}",
+            self.environment.seed, self.environment.heightmap_sha256
+        );
+        let Ok(statics) = STATICS.read() else {
+            return false;
+        };
+        if statics.0 != key {
+            return false;
+        }
+        let point =
+            unit(direction).map(|value| value * (RADIUS + self.height(unit(direction)).max(0.0)));
+        statics.1.iter().any(|obstacle| {
+            obstacle.collision_radius_m >= 0.5
+                && (0..3).all(|axis| {
+                    (obstacle.position[axis] - point[axis]).abs()
+                        < reach + obstacle.collision_radius_m
+                })
+                && length(std::array::from_fn(|axis| {
+                    obstacle.position[axis] - point[axis]
+                })) < reach + obstacle.collision_radius_m
+        })
     }
 
     pub(super) fn objects(&self, point: [f64; 3], span: i32) -> Vec<WorldObject> {
@@ -2691,6 +3042,77 @@ impl WalkingTerrain {
         speed: f64,
     ) -> Option<[f64; 3]> {
         self.step_scaled(point, intent, seconds, speed, 1.0)
+    }
+
+    /// A step of a vehicle over the water (`vehicles`): `speed` metres a second along the tangent of the intent, kept
+    /// on the water's surface. A boat does not go where the water is shallower than `vehicles::MIN_DEPTH_M`, and the
+    /// objects of the world stop it like a walker; whoever steers it into a shore stays where they are.
+    pub(super) fn step_vehicle(
+        &self,
+        point: [f64; 3],
+        intent: [f64; 3],
+        seconds: f64,
+        speed: f64,
+    ) -> Option<[f64; 3]> {
+        let radius = length(point);
+        if !(RADIUS - 8000.0..=RADIUS + 8012.0).contains(&radius) {
+            return None;
+        }
+        let up = point.map(|value| value / radius);
+        let radial: f64 = intent
+            .iter()
+            .zip(up)
+            .map(|(value, axis)| value * axis)
+            .sum();
+        let tangent: [f64; 3] = std::array::from_fn(|axis| intent[axis] - up[axis] * radial);
+        let seconds = seconds.clamp(0.0, 0.25);
+        if length(tangent) * speed * seconds < 0.000001 {
+            return None;
+        }
+        let moved: [f64; 3] =
+            std::array::from_fn(|axis| point[axis] + tangent[axis] * speed * seconds);
+        let unit = moved.map(|value| value / length(moved));
+        let depth = self.water_depth(unit);
+        if depth < super::vehicles::MIN_DEPTH_M {
+            return None;
+        }
+        let destination = unit.map(|value| value * (RADIUS + self.height(unit) + depth));
+        clear_path(point, destination, &self.walking_objects(point, 2)).then_some(destination)
+    }
+
+    /// The nearest place within `reach` metres of a point on the water where a character can stand on foot: dry
+    /// ground or a ford they can wade. Searched in rings round the point; `None` when the boat is out in the river.
+    pub(super) fn landing_near(&self, point: [f64; 3], reach: f64) -> Option<[f64; 3]> {
+        let up = unit(point);
+        let across = if up[1].abs() > 0.999 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [up[2], 0.0, -up[0]]
+        };
+        let first = across.map(|value| value / length(across));
+        let second = [
+            up[1] * first[2] - up[2] * first[1],
+            up[2] * first[0] - up[0] * first[2],
+            up[0] * first[1] - up[1] * first[0],
+        ];
+        let mut ring = 2.0;
+        while ring <= reach {
+            for step in 0..24 {
+                let angle = f64::from(step) * std::f64::consts::TAU / 24.0;
+                let candidate = unit(std::array::from_fn(|axis| {
+                    up[axis]
+                        + (first[axis] * angle.cos() + second[axis] * angle.sin()) * ring / RADIUS
+                }));
+                if self.water_depth(candidate) > WADE_DEPTH_M * 0.75 {
+                    continue;
+                }
+                if let Some(height) = self.walkable(candidate, 1.0) {
+                    return Some(candidate.map(|value| value * (RADIUS + height)));
+                }
+            }
+            ring += 1.5;
+        }
+        None
     }
 
     /// A step of a character `scale` times the height of a man (see [`Self::in_water_for`]).
@@ -2812,6 +3234,7 @@ pub(super) async fn terrain(state: &AppState) -> Result<Arc<WalkingTerrain>, pla
                     environment,
                     catalog,
                     removed: Removed::default(),
+                    rivers: Default::default(),
                 })
             },
         )
@@ -2865,9 +3288,11 @@ pub(super) async fn world_objects(
     .map_err(|_| {
         players::Error::Status(StatusCode::SERVICE_UNAVAILABLE, "object region unavailable")
     })?;
+    let memorials = super::survival::memorials(&state, unit(point)).await?;
+    let npcs = super::story::world::npcs_near(&state, point, player_id).await;
     Ok(Json(ObjectRegion {
-        memorials: super::survival::memorials(&state, unit(point)).await?,
-        npcs: super::story::world::npcs_near(&state, point, player_id).await,
+        memorials,
+        npcs,
         areas: super::story::world::areas_near(&state, point).await,
         props: super::story::world::props_near(&state, point).await,
         terrains: super::story::world::terrains_near(&state, point).await,
@@ -2941,14 +3366,17 @@ pub(super) async fn walk(
             .bind(player_id)
             .fetch_one(&mut *transaction)
             .await?;
-        intent.run &= stamina > 0;
+        let vehicle = super::vehicles::speed_of(&state, &mut transaction, player_id).await?;
+        intent.run &= stamina > 0 && vehicle.is_none();
         let here = unit([position.x, position.y, position.z]);
         intent.body_scale = body_scale(&state, &mut transaction, player_id).await?;
         let swimming = terrain.in_water_for(here, intent.scale());
         intent.run &= terrain.water_depth(here) <= RUN_DEPTH_M * intent.scale();
         // A jump costs stamina up front and is refused when too little is left.
-        intent.jump &=
-            !position.airborne && !swimming && f64::from(stamina) >= super::survival::JUMP_STAMINA;
+        intent.jump &= !position.airborne
+            && !swimming
+            && vehicle.is_none()
+            && f64::from(stamina) >= super::survival::JUMP_STAMINA;
         let wants_motion = intent.jump || length(intent.direction) > 0.000001;
         if wants_motion {
             // Standing up from a rock before walking or jumping.
@@ -2973,8 +3401,13 @@ pub(super) async fn walk(
             impact: 0.0,
         };
         let previous = [position.x, position.y, position.z];
-        let (point, on_object) =
-            terrain.advance(previous, &intent, seconds, &mut flight, position.on_object);
+        let (point, on_object) = if let Some((_, speed)) = &vehicle {
+            // Aboard: the vehicle's speed over the water, no running, jumping or swimming.
+            let step = terrain.step_vehicle(previous, intent.direction, seconds, *speed);
+            (step.unwrap_or(previous), false)
+        } else {
+            terrain.advance(previous, &intent, seconds, &mut flight, position.on_object)
+        };
         [position.x, position.y, position.z] = point;
         position.airborne = flight.airborne;
         position.on_object = on_object;
@@ -3022,7 +3455,20 @@ pub(super) async fn walk(
             return Err(players::Error::Obituary(Box::new(notice)));
         }
         // Whoever is in water, moving or not, is drowning until they reach a dry shore.
-        if !position.airborne
+        if let Some((id, _)) = &vehicle {
+            if moving {
+                super::vehicles::remember(
+                    &mut transaction,
+                    state.world_id,
+                    id,
+                    [position.x, position.y, position.z],
+                    0.0,
+                )
+                .await?;
+            }
+        }
+        if vehicle.is_none()
+            && !position.airborne
             && terrain.in_water_for(unit([position.x, position.y, position.z]), intent.scale())
             && super::survival::drown(&state, &mut transaction, player_id, seconds).await?
         {
@@ -3031,6 +3477,7 @@ pub(super) async fn walk(
             return Err(players::Error::Obituary(Box::new(notice)));
         }
         if moving
+            && vehicle.is_none()
             && !super::survival::activity(&state, &mut transaction, player_id, seconds, intent.run)
                 .await?
         {
@@ -3046,7 +3493,14 @@ pub(super) async fn walk(
             .fetch_one(&mut *transaction)
             .await?;
     transaction.commit().await?;
-    let swimming = !position.airborne
+    let vehicle: Option<String> =
+        sqlx::query_scalar("SELECT vehicle_id FROM players WHERE id = $1")
+            .bind(player_id)
+            .fetch_one(&state.pool)
+            .await?;
+    // Aboard, the character floats on the vehicle and neither swims nor drowns.
+    let swimming = vehicle.is_none()
+        && !position.airborne
         && terrain.in_water_for(unit([position.x, position.y, position.z]), intent.scale());
     Ok(Json(Reply {
         position,
@@ -3054,6 +3508,7 @@ pub(super) async fn walk(
         stats,
         sitting,
         swimming,
+        vehicle,
     }))
 }
 
@@ -3140,6 +3595,7 @@ mod tests {
             pixels,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.water_m.fill(environment::DRY);
         terrain.environment.biomes.fill(4);
@@ -3193,6 +3649,7 @@ mod tests {
             pixels,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.water_m.fill(environment::DRY);
         terrain.environment.biomes.fill(4);
@@ -3405,6 +3862,7 @@ mod tests {
             pixels,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.water_m.fill(environment::DRY);
         terrain.environment.biomes.fill(4);
@@ -3498,6 +3956,7 @@ mod tests {
             pixels,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.water_m.fill(environment::DRY);
         terrain.environment.biomes.fill(4);
@@ -3540,6 +3999,7 @@ mod tests {
             pixels,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.water_m.fill(environment::DRY);
         terrain.environment.biomes.fill(4);
@@ -3589,6 +4049,7 @@ mod tests {
             pixels,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.water_m.fill(environment::DRY);
         terrain.environment.biomes.fill(4);
@@ -3658,6 +4119,7 @@ mod tests {
             pixels,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.water_m.fill(environment::DRY);
         terrain.environment.biomes.fill(4);
@@ -3761,6 +4223,7 @@ mod tests {
             pixels,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.water_m.fill(environment::DRY);
         terrain.environment.biomes.fill(4);
@@ -3854,6 +4317,7 @@ mod tests {
             environment,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         let site = [0.6, 0.0, 0.8];
         let at = |x: f64, z: f64| crate::scenery::world_from_local(site, x, z, |_| 0.0, RADIUS).0;
@@ -3928,6 +4392,7 @@ mod tests {
             environment,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.water_m.fill(environment::DRY);
         terrain.environment.biomes.fill(4);
@@ -3952,6 +4417,7 @@ mod tests {
             environment,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.water_m.fill(environment::DRY);
         terrain.environment.biomes.fill(4);
@@ -3985,6 +4451,7 @@ mod tests {
             environment,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         let ground = RADIUS + terrain.height([1.0, 0.0, 0.0]);
         let animal = WorldObject {
@@ -4034,6 +4501,7 @@ mod tests {
             environment,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         // The strip dips below zero between a water sample and land: the client draws no water there.
         terrain.pixels.fill(31_996); // -1 m
@@ -4063,6 +4531,7 @@ mod tests {
             environment,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.biomes.fill(4);
         terrain.environment.water_m.fill(environment::DRY);
@@ -4155,6 +4624,7 @@ mod tests {
             environment,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         let height = terrain.height([1.0, 0.0, 0.0]);
         let origin = [RADIUS + height, 0.0, 0.0];
@@ -4205,6 +4675,7 @@ mod tests {
             environment,
             catalog: object_catalog().unwrap(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         let height = terrain.height([1.0, 0.0, 0.0]);
         let point = [RADIUS + height, 0.0, 0.0];
@@ -4277,6 +4748,7 @@ mod tests {
             pixels,
             catalog: object_catalog().unwrap(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         terrain.environment.water_m.fill(environment::DRY);
         let mut selected = HashSet::new();
@@ -4354,6 +4826,7 @@ mod tests {
             environment,
             catalog,
             removed: Default::default(),
+            rivers: Default::default(),
         }
     }
 
@@ -5063,6 +5536,221 @@ mod tests {
         assert_eq!(terrain.water_near(here, 6.0), WaterNear::None);
     }
 
+    /// A dry 800 m patch around `[1, 0, 0]` whose ground lies `height_m` from sea level.
+    fn sunken_patch(height_m: f64) {
+        set_patches(
+            "42:sunken".to_owned(),
+            vec![TerrainPatch {
+                anchor: [1.0, 0.0, 0.0],
+                anchor_height_m: height_m,
+                extent_m: [800.0, 800.0],
+                offset_m: [0.0, 0.0],
+                feather_m: 50.0,
+                width: 16,
+                height: 16,
+                elevation: vec![0; 16 * 16],
+                water: Some(vec![i16::MIN; 16 * 16]),
+                clear: None,
+            }],
+        );
+    }
+
+    #[test]
+    fn a_walker_on_a_road_goes_half_as_fast_again() {
+        let _serial = serial();
+        set_patches(String::new(), Vec::new());
+        let terrain = terrain_with(144, 3, Vec::new());
+        let height = terrain.height([1.0, 0.0, 0.0]).max(0.0);
+        let at = |z: f64| unit([RADIUS + height, 0.0, z]).map(|value| value * (RADIUS + height));
+        let intent = Intent {
+            direction: [0.0, 0.0, 1.0],
+            sequence: "1".to_owned(),
+            ..Intent::default()
+        };
+        let walk = |start: [f64; 3]| {
+            let mut flight = Flight {
+                impact: 0.0,
+                airborne: false,
+                vertical_speed: 0.0,
+                horizontal: [0.0; 3],
+            };
+            let (end, _) = terrain.advance(start, &intent, 0.25, &mut flight, false);
+            length(std::array::from_fn(|axis| end[axis] - start[axis]))
+        };
+        set_trails(String::new(), Vec::new());
+        let country = walk(at(0.0));
+        assert!(country > 0.1, "walked {country}");
+        // A road of points every 4 m along the way.
+        set_trails(
+            "test:road".to_owned(),
+            (-5..=5).map(|k| at(f64::from(k) * 4.0)).collect(),
+        );
+        assert!(on_trail(at(0.0)) && on_trail(at(2.0)));
+        let road = walk(at(0.0));
+        assert!(
+            (road / country - ROAD_PACE).abs() < 0.05,
+            "{road} against {country}"
+        );
+        // Off the road nothing changes.
+        assert!(!on_trail(at(100.0)));
+        set_trails(String::new(), Vec::new());
+    }
+
+    /// A pond of 400 m across in the middle of a dry 800 m patch around `[1, 0, 0]`: 2 m deep, its ground at sea level.
+    fn pond_patch() {
+        let mut water = vec![i16::MIN; 16 * 16];
+        for row in 4..12 {
+            for column in 4..12 {
+                water[row * 16 + column] = 20;
+            }
+        }
+        set_patches(
+            "42:pond".to_owned(),
+            vec![TerrainPatch {
+                anchor: [1.0, 0.0, 0.0],
+                anchor_height_m: 0.0,
+                extent_m: [800.0, 800.0],
+                offset_m: [0.0, 0.0],
+                feather_m: 50.0,
+                width: 16,
+                height: 16,
+                elevation: vec![0; 16 * 16],
+                water: Some(water),
+                clear: None,
+            }],
+        );
+    }
+
+    #[test]
+    fn a_vehicle_moves_over_deep_water_only_and_lets_its_rider_off_at_a_shore() {
+        let _serial = serial();
+        pond_patch();
+        let terrain = terrain_with(144, 3, Vec::new());
+        // The pond's surface 2 m over its bed; a point `z` metres along the patch, on the surface.
+        let on_water = |z: f64| {
+            let direction = unit([RADIUS, 0.0, z]);
+            assert!(terrain.water_depth(direction) > 1.0, "not water at {z}");
+            direction.map(|value| {
+                value * (RADIUS + terrain.height(direction) + terrain.water_depth(direction))
+            })
+        };
+        let middle = on_water(0.0);
+        // In the middle it goes at the speed it is given: 3 m/s for a tenth of a second.
+        let step = terrain
+            .step_vehicle(middle, [0.0, 0.0, 1.0], 0.1, 3.0)
+            .expect("a boat moves on deep water");
+        let moved = length(std::array::from_fn(|axis| step[axis] - middle[axis]));
+        assert!((moved - 0.3).abs() < 0.02, "moved {moved}");
+        // Not at all without a push.
+        assert!(terrain.step_vehicle(middle, [0.0; 3], 0.1, 3.0).is_none());
+        // Steered into the bank it stays where it is: past the edge at 200 m there is no water to float in.
+        let edge = on_water(198.0);
+        assert!(terrain
+            .step_vehicle(edge, [0.0, 0.0, 1.0], 0.25, 20.0)
+            .is_none());
+        // The rider gets off on the bank within a dozen metres, and not in the middle of the pond.
+        let shore = terrain
+            .landing_near(edge, 12.0)
+            .expect("the bank is within reach");
+        assert!(terrain.water_depth(unit(shore)) <= WADE_DEPTH_M * 0.75);
+        assert!(terrain.landing_near(middle, 12.0).is_none());
+        // The patches are global: leave none behind for the tests that walk without any.
+        set_patches(String::new(), Vec::new());
+    }
+
+    /// Dry steppe with one coarse river from the cell at `[1, 0, 0]` to its eastern neighbour, and the centre of
+    /// the first cell.
+    fn terrain_with_river() -> (WalkingTerrain, [f64; 3]) {
+        let mut terrain = terrain_with(144, 3, Vec::new());
+        let index = terrain.cell_index([1.0, 0.0, 0.0]);
+        terrain.environment.biomes[index] = 2;
+        terrain.environment.flow[index] = 49;
+        terrain.environment.downstream[index] = (index + 1) as i32;
+        let size = terrain.environment.face_size;
+        let (row, column) = ((index / size) % size, index % size);
+        let centre = cube_point(
+            index / (size * size),
+            (column as f64 + 0.5) * 2.0 / size as f64 - 1.0,
+            1.0 - (row as f64 + 0.5) * 2.0 / size as f64,
+        );
+        (terrain, centre)
+    }
+
+    #[test]
+    fn a_coarse_river_is_a_carved_channel_of_water_the_client_draws() {
+        let _serial = serial();
+        set_patches(String::new(), Vec::new());
+        let (terrain, centre) = terrain_with_river();
+        // 10 m * sqrt(49) = 70 m carved reach, 2 m deep on the line, the water 0.6 m below the bank.
+        assert!(
+            (terrain.strip_height(centre) - terrain.height(centre) - RIVER_BED_M).abs() < 1.0e-6
+        );
+        assert!((terrain.water_depth(centre) - (RIVER_BED_M - RIVER_LEVEL_M)).abs() < 1.0e-6);
+        assert!(
+            terrain.in_water(centre),
+            "the middle of a river is deeper than the chest"
+        );
+        assert!(terrain.surface(centre).is_none(), "no scenery in the river");
+        let (aside, _) = crate::scenery::world_from_local(centre, 0.0, 100.0, |_| 0.0, RADIUS);
+        let aside = unit(aside);
+        assert_eq!(
+            terrain.water_depth(aside),
+            0.0,
+            "beyond its reach the steppe is dry"
+        );
+        assert_eq!(terrain.height(aside), terrain.strip_height(aside));
+        // A landscape patch replaces the ground and its water: no coarse river under it.
+        set_patches(
+            "42:over-river".to_owned(),
+            vec![TerrainPatch {
+                anchor: centre,
+                anchor_height_m: terrain.strip_height(centre),
+                extent_m: [400.0, 400.0],
+                offset_m: [0.0, 0.0],
+                feather_m: 50.0,
+                width: 16,
+                height: 16,
+                elevation: vec![0; 16 * 16],
+                water: Some(vec![i16::MIN; 16 * 16]),
+                clear: None,
+            }],
+        );
+        assert_eq!(terrain.water_depth(centre), 0.0);
+        set_patches(String::new(), Vec::new());
+    }
+
+    #[test]
+    fn dry_patch_below_sea_level_over_dry_land_is_not_water() {
+        let _serial = serial();
+        // Uruk: the floodplain of the patch lies at -3 m, the coarse cell is dry steppe. The client draws no
+        // water there, so the server must not let the character swim or drown in it.
+        let terrain = terrain_with(144, 3, Vec::new());
+        sunken_patch(-3.0);
+        let anchor = [1.0, 0.0, 0.0];
+        assert_eq!(terrain.water_depth(anchor), 0.0);
+        assert!(!terrain.in_water(anchor));
+        assert_eq!(terrain.surface(anchor), Some(terrain.height(anchor)));
+        let here = anchor.map(|value| value * (RADIUS - 3.0));
+        let step = terrain
+            .step_at_speed(here, [0.0, 0.0, 1.0], 0.1, 4.0)
+            .expect("walk on a dry floodplain below sea level");
+        assert!(length(std::array::from_fn(|axis| step[axis] - here[axis])) > 0.1);
+        set_patches(String::new(), Vec::new());
+    }
+
+    #[test]
+    fn dry_patch_below_sea_level_over_the_sea_is_sea() {
+        let _serial = serial();
+        // A coastal patch: over the coarse sea its ground below 0 m stays under the water the client draws.
+        let terrain = terrain_with(144, 0, Vec::new());
+        sunken_patch(-3.0);
+        let anchor = [1.0, 0.0, 0.0];
+        assert!((terrain.water_depth(anchor) - 3.0).abs() < 1.0e-9);
+        assert!(terrain.in_water(anchor));
+        assert!(terrain.surface(anchor).is_none());
+        set_patches(String::new(), Vec::new());
+    }
+
     #[test]
     fn dry_landscape_patch_over_coarse_water_is_walkable_and_not_a_drink() {
         let _serial = serial();
@@ -5163,6 +5851,7 @@ mod tests {
             environment,
             catalog: Vec::new(),
             removed: Default::default(),
+            rivers: Default::default(),
         };
         let pos = [3800062.780581708, 3322231.004257387, 3887458.1523896814];
         let anchor = unit(pos);

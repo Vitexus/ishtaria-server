@@ -843,13 +843,14 @@ async fn markers(
         .map(|marker| (marker.id.clone(), marker.quest.clone()))
         .collect();
     for (quest, _) in &rows {
-        if let Some(place) = story
-            .story
-            .quests
-            .get(quest)
-            .and_then(|q| q.start_place.clone())
-        {
-            learned.push((place, quest.clone()));
+        if let Some(definition) = story.story.quests.get(quest) {
+            for place in definition
+                .start_place
+                .iter()
+                .chain(definition.known_places.iter())
+            {
+                learned.push((place.clone(), quest.clone()));
+            }
         }
     }
     for (place, quest) in &learned {

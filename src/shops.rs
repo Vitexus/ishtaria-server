@@ -422,11 +422,32 @@ async fn buy(
         .iter()
         .find(|price| price.item == deal.item_id)
         .ok_or_else(|| status(StatusCode::NOT_FOUND, "the merchant does not sell this"))?;
+    // Filling a waterskin is paid once, whatever the quantity asked.
+    let quantity = if price.item == REFILL { 1 } else { quantity };
     let cost = price
         .price
         .checked_mul(quantity)
         .ok_or_else(|| status(StatusCode::BAD_REQUEST, "invalid quantity"))?;
     take(&mut transaction, player_id, "gold", cost).await?;
+    if price.item == REFILL {
+        // Water, not a thing: the buyer's waterskin is filled to the brim, whatever the quantity asked.
+        let has_skin: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM player_inventory WHERE player_id = $1 AND item_id = 'waterskin')",
+        )
+        .bind(player_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !has_skin {
+            return Err(status(StatusCode::CONFLICT, "no waterskin"));
+        }
+        sqlx::query("INSERT INTO player_waterskin (player_id, water_ml) VALUES ($1, $2) ON CONFLICT (player_id) DO UPDATE SET water_ml = EXCLUDED.water_ml")
+            .bind(player_id)
+            .bind(super::survival::WATERSKIN_ML)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        return Ok(Json(players::profile(&state, player_id).await?));
+    }
     add_items(
         &mut transaction,
         player_id,
@@ -436,6 +457,9 @@ async fn buy(
     transaction.commit().await?;
     Ok(Json(players::profile(&state, player_id).await?))
 }
+
+/// The pseudo-item a water seller sells: a full waterskin for the price, nothing for the inventory.
+const REFILL: &str = "water_refill";
 
 async fn sell(
     State(state): State<AppState>,

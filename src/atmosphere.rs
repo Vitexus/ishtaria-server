@@ -4,6 +4,73 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
+/// The sky of the world: the tilt of the axis, the precession of the stars (how far the star field has turned about
+/// the pole of the ecliptic since J2000) and the planet's turn. Today's Earth unless a disk says otherwise.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sky {
+    /// Degrees. `None` keeps today's slowly changing tilt.
+    pub obliquity_degrees: Option<f64>,
+    pub precession_degrees: f64,
+    pub sidereal_day_seconds: f64,
+}
+
+pub const EARTH_SIDEREAL_DAY_SECONDS: f64 = 86164.0905;
+
+impl Sky {
+    pub const TODAY: Sky = Sky {
+        obliquity_degrees: None,
+        precession_degrees: 0.0,
+        sidereal_day_seconds: EARTH_SIDEREAL_DAY_SECONDS,
+    };
+
+    /// The sky a datadisk asks for.
+    pub fn of(astronomy: &super::story::disk::Astronomy) -> Sky {
+        let centuries = astronomy.year.map(|year| (year - 2000.0) / 100.0);
+        Sky {
+            obliquity_degrees: astronomy.obliquity_deg.or(centuries.map(obliquity_of_year)),
+            precession_degrees: centuries.map_or(0.0, precession_since),
+            sidereal_day_seconds: astronomy
+                .sidereal_day_seconds
+                .unwrap_or(EARTH_SIDEREAL_DAY_SECONDS),
+        }
+    }
+}
+
+/// Mean obliquity of the ecliptic in degrees `centuries` after J2000 (Laskar 1986/2004, a tenth-order polynomial in
+/// ten-thousand-year units; good to a few arc seconds over a thousand years and well within a hundredth of a degree
+/// over the millennia of recorded history).
+pub fn obliquity_of_year(centuries: f64) -> f64 {
+    let u = centuries / 100.0;
+    let arcseconds = 84381.448
+        + u * (-4680.93
+            + u * (-1.55
+                + u * (1999.25
+                    + u * (-51.38
+                        + u * (-249.67
+                            + u * (-39.05 + u * (7.12 + u * (27.87 + u * (5.79 + u * 2.45)))))))));
+    arcseconds / 3600.0
+}
+
+/// How far, in degrees, the star field of J2000 has turned about the ecliptic pole from the equinox of a year
+/// `centuries` from J2000: positive for the past (the equinox then lay behind the stars it lies at today). General
+/// precession in longitude, p_A = 5028.796195 T + 1.1054348 T^2 arc seconds (Capitaine et al. 2003).
+pub fn precession_since(centuries: f64) -> f64 {
+    -(5028.796195 * centuries + 1.1054348 * centuries * centuries) / 3600.0
+}
+
+static SKY: std::sync::RwLock<Sky> = std::sync::RwLock::new(Sky::TODAY);
+
+/// Sets the sky of the world the server runs (its disks' `astronomy`); `None` is today's Earth.
+pub fn set_astronomy(astronomy: Option<super::story::disk::Astronomy>) {
+    if let Ok(mut sky) = SKY.write() {
+        *sky = astronomy.as_ref().map_or(Sky::TODAY, Sky::of);
+    }
+}
+
+fn sky() -> Sky {
+    SKY.read().map_or(Sky::TODAY, |sky| *sky)
+}
+
 #[derive(Default, Serialize)]
 pub struct Solar {
     pub version: u32,
@@ -16,6 +83,10 @@ pub struct Solar {
     pub moon_angular_radius_degrees: f64,
     /// Lit fraction of the lunar disc as seen from the planet (0 = new, 1 = full).
     pub moon_illumination: f64,
+    /// The tilt of the planet's axis in degrees, and how far the star field has turned about the ecliptic pole since
+    /// J2000 (0 for today's sky). Clients draw the sun, the moon and the stars with them.
+    pub obliquity_degrees: f64,
+    pub precession_degrees: f64,
 }
 
 impl Solar {
@@ -34,10 +105,14 @@ impl Solar {
             (280.460 + 0.9856474 * days + 1.915 * anomaly.sin() + 0.020 * (2.0 * anomaly).sin())
                 .rem_euclid(360.0)
                 .to_radians();
-        let obliquity = (23.439 - 0.0000004 * days).to_radians();
+        let world = sky();
+        let obliquity_degrees = world.obliquity_degrees.unwrap_or(23.439 - 0.0000004 * days);
+        let obliquity = obliquity_degrees.to_radians();
         let right_ascension = (obliquity.cos() * longitude.sin()).atan2(longitude.cos());
         let declination = (obliquity.sin() * longitude.sin()).asin();
-        let sidereal = (280.46061837 + 360.98564736629 * days)
+        // The planet turns once against the stars in `sidereal_day_seconds` (86164.0905 s on Earth).
+        let sidereal = (280.46061837
+            + 360.98564736629 * days * EARTH_SIDEREAL_DAY_SECONDS / world.sidereal_day_seconds)
             .rem_euclid(360.0)
             .to_radians();
         let local_longitude = right_ascension - sidereal;
@@ -59,11 +134,13 @@ impl Solar {
             version: 1,
             unix_seconds,
             direction,
-            sidereal_day_seconds: 86164.0905,
+            sidereal_day_seconds: world.sidereal_day_seconds,
             angular_radius_degrees: 0.2666 / distance_au,
             moon_direction,
             moon_angular_radius_degrees,
             moon_illumination,
+            obliquity_degrees,
+            precession_degrees: world.precession_degrees,
         }
     }
 }
@@ -146,7 +223,43 @@ pub fn next_horizon_crossing(observer: [f64; 3], after: f64, rising: bool) -> f6
 
 #[cfg(test)]
 mod solar_tests {
-    use super::{next_horizon_crossing, Solar, HORIZON_ELEVATION_DEGREES};
+    use super::{
+        next_horizon_crossing, obliquity_of_year, precession_since, Sky, Solar,
+        HORIZON_ELEVATION_DEGREES,
+    };
+
+    #[test]
+    fn the_sky_of_a_past_year_has_its_own_tilt_and_precession() {
+        // Laskar: 24.0 degrees around 2700 BCE and 23.8 around 700 BCE; today 23.44.
+        let bronze_age = obliquity_of_year((-2699.0 - 2000.0) / 100.0);
+        assert!((bronze_age - 24.0).abs() < 0.1, "{bronze_age}");
+        let iron_age = obliquity_of_year((-699.0 - 2000.0) / 100.0);
+        assert!((iron_age - 23.79).abs() < 0.05, "{iron_age}");
+        assert!((obliquity_of_year(0.0) - 23.4393).abs() < 0.001);
+        // The star field has turned 65-66 degrees since 2700 BCE (4700 years of 50.3 arc seconds), none at J2000.
+        let turned = precession_since((-2699.0 - 2000.0) / 100.0);
+        assert!((turned - 65.5).abs() < 1.0, "{turned}");
+        assert!(precession_since(0.0).abs() < 1e-12);
+        let sky = Sky::of(&crate::story::disk::Astronomy {
+            year: Some(-2699.0),
+            obliquity_deg: None,
+            sidereal_day_seconds: None,
+        });
+        assert!((sky.obliquity_degrees.unwrap() - bronze_age).abs() < 1e-9);
+        // A disk may name the tilt and the turn itself (another planet).
+        let other = Sky::of(&crate::story::disk::Astronomy {
+            year: None,
+            obliquity_deg: Some(25.2),
+            sidereal_day_seconds: Some(88_642.7),
+        });
+        assert_eq!(other.obliquity_degrees, Some(25.2));
+        assert_eq!(other.sidereal_day_seconds, 88_642.7);
+        assert_eq!(other.precession_degrees, 0.0);
+        // Without `astronomy` the announced sky is today's.
+        let today = Solar::at(946_728_000.0);
+        assert!((today.obliquity_degrees - 23.439).abs() < 0.001);
+        assert_eq!(today.precession_degrees, 0.0);
+    }
 
     #[test]
     fn noon_midnight_and_unit_direction() {

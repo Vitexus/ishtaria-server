@@ -192,6 +192,120 @@ fn a_disk_may_decide_the_character_of_new_players() {
 }
 
 #[test]
+fn a_disk_lists_buildings_around_a_place_and_they_stand_and_block() {
+    use super::placement::place_anchors;
+    use super::settlements;
+    let a = scratch("buildings");
+    base(&a, "zeta", "1.0.0", "");
+    write(&a, "media/models/architecture/house.glb", "glTF");
+    let list = |items: &str, place: &str| {
+        write(
+            &a,
+            "buildings/h.yaml",
+            &format!("place: {place}\nitems:\n{items}"),
+        );
+    };
+    let house = "  - {model: media/models/architecture/house.glb, x: 10.0, z: -20.0, yaw_deg: 90.0, scale: [0.5, 0.3, 0.4], footprint: [8.0, 4.0]}\n  - {model: media/models/architecture/house.glb, x: 30.0, z: -20.0, yaw_deg: 0.0, scale: [0.5, 0.3, 0.4], footprint: [6.0, 6.0]}\n";
+    list(house, "hut");
+    let mut story = Story::load(std::slice::from_ref(&a), false).unwrap();
+    assert_eq!(story.buildings.len(), 1);
+    assert_eq!(story.buildings[0].0, "zeta:hut");
+    assert!(story
+        .media
+        .contains_key("zeta/media/models/architecture/house.glb"));
+    let mut sites: std::collections::HashMap<_, _> = place_anchors(&story, &Flat, "42", &[])
+        .unwrap()
+        .into_iter()
+        .map(|site| (site.id.clone(), site))
+        .collect();
+    let built = settlements::finish(&mut story, &mut sites, &Flat, "42").unwrap();
+    let houses: Vec<_> = built
+        .props
+        .iter()
+        .filter(|prop| prop.model == "disk:zeta:media/models/architecture/house.glb")
+        .collect();
+    assert_eq!(houses.len(), 2);
+    // Bearing 90 (east): the front +Z points east, so the model is turned a quarter turn; bearing 0 faces north.
+    assert!((houses[0].yaw - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+    assert!((houses[1].yaw - std::f64::consts::PI).abs() < 1e-9);
+    assert!(houses
+        .iter()
+        .all(|house| (0.0..std::f64::consts::TAU).contains(&house.yaw)));
+    assert_eq!(houses[0].scale_xyz, Some([0.5, 0.3, 0.4]));
+    assert!((houses[0].scale_m - 0.5).abs() < 1e-9);
+    // The 8 x 4 plot is two round colliders of 2 m, the 6 x 6 plot one of 3 m.
+    let blocks: Vec<_> = built
+        .colliders
+        .iter()
+        .filter(|object| object.id.contains("#building"))
+        .collect();
+    assert_eq!(blocks.len(), 3);
+    assert!(blocks
+        .iter()
+        .all(|object| object.model.is_empty() && object.collision_radius_m >= 2.0 - 1e-9));
+    let reach = |a: &crate::movement::WorldObject, b: &crate::movement::WorldObject| {
+        (0..3)
+            .map(|k| (a.position[k] - b.position[k]).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    };
+    assert!((reach(blocks[0], blocks[1]) - 4.0).abs() < 0.05);
+    // Rejected: an unknown place, a bearing off the compass, a model the disk does not ship.
+    list(house, "nowhere");
+    assert!(Story::load(std::slice::from_ref(&a), false).is_err());
+    list(&house.replace("yaw_deg: 90.0", "yaw_deg: 400.0"), "hut");
+    assert!(Story::load(std::slice::from_ref(&a), false).is_err());
+    list(&house.replace("house.glb", "gone.glb"), "hut");
+    assert!(Story::load(std::slice::from_ref(&a), false).is_err());
+}
+
+#[test]
+fn a_disk_names_the_ground_set_clients_draw() {
+    let a = scratch("ground1");
+    base(&a, "dusty", "1.0.0", "ground: alluvial\n");
+    assert_eq!(
+        Story::load(&[a], false).unwrap().infos[0].ground.as_deref(),
+        Some("alluvial")
+    );
+    let b = scratch("ground2");
+    base(&b, "dusty", "1.0.0", "ground: lava\n");
+    assert!(Story::load(&[b], false).is_err(), "an unknown ground set");
+    let c = scratch("ground3");
+    base(&c, "plain", "1.0.0", "");
+    assert_eq!(Story::load(&[c], false).unwrap().infos[0].ground, None);
+}
+
+#[test]
+fn a_disk_may_set_the_sky_of_its_world() {
+    let a = scratch("sky1");
+    base(
+        &a,
+        "ancient",
+        "1.0.0",
+        "astronomy: {year: -2699, sidereal_day_seconds: 86164.0}\n",
+    );
+    let story = Story::load(&[a], false).unwrap();
+    let sky = story.infos[0].astronomy.expect("the sky is kept");
+    assert_eq!(sky.year, Some(-2699.0));
+    assert_eq!(sky.obliquity_deg, None);
+    for (name, bad) in [
+        ("sky2", "astronomy: {year: -20000}\n"),
+        ("sky3", "astronomy: {obliquity_deg: 75}\n"),
+        ("sky4", "astronomy: {sidereal_day_seconds: 10}\n"),
+        ("sky5", "astronomy: {epoch: 3}\n"),
+    ] {
+        let dir = scratch(name);
+        base(&dir, "ancient", "1.0.0", bad);
+        assert!(Story::load(&[dir], false).is_err(), "{bad}");
+    }
+    let plain = scratch("sky6");
+    base(&plain, "plain", "1.0.0", "");
+    assert!(Story::load(&[plain], false).unwrap().infos[0]
+        .astronomy
+        .is_none());
+}
+
+#[test]
 fn a_character_may_walk_and_the_movement_is_validated() {
     let a = scratch("walk");
     base(&a, "walker", "1.0.0", "");
@@ -510,6 +624,32 @@ fn unaffordable_effects_change_nothing() {
     );
     assert_eq!(state.items["gold"], 3);
     assert!(ops.is_empty());
+}
+
+#[test]
+fn the_gilgamesh_disk_lists_the_houses_of_uruk() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ishtaria-datadisk-gilgamesh");
+    if !path.join("buildings/uruk.yaml").is_file() {
+        return;
+    }
+    let story = Story::load(&[path], true).unwrap();
+    let (place, disk, items) = story
+        .buildings
+        .iter()
+        .find(|(place, _, _)| place == "gilgamesh:uruk")
+        .expect("Uruk lists its houses");
+    assert!(story
+        .buildings
+        .iter()
+        .any(|(place, _, items)| place == "gilgamesh:hunter_village" && !items.is_empty()));
+    assert_eq!(
+        (place.as_str(), disk.as_str()),
+        ("gilgamesh:uruk", "gilgamesh")
+    );
+    assert!(items.len() > 1000);
+    assert!(items.iter().all(|item| story
+        .media
+        .contains_key(&format!("gilgamesh/{}", item.model))));
 }
 
 #[test]
@@ -1367,6 +1507,17 @@ fn a_structure_is_shipped_validated_and_excludes_generated_scenery() {
     with_structure(", at_sea: true");
     let afloat = Story::load(std::slice::from_ref(&a), false).unwrap();
     assert!(afloat.anchors[0].place.structure.as_ref().unwrap().at_sea);
+    assert!(!afloat.anchors[0].place.structure.as_ref().unwrap().on_water);
+    with_structure(", on_water: true");
+    let on_river = Story::load(std::slice::from_ref(&a), false).unwrap();
+    assert!(
+        on_river.anchors[0]
+            .place
+            .structure
+            .as_ref()
+            .unwrap()
+            .on_water
+    );
     for bad in [
         ", scale_m: 0",
         ", scale_m: 500",

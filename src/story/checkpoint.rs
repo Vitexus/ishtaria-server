@@ -1,5 +1,9 @@
-//! Quest checkpoints: on death or companion fail, restart the active quest instead of
-//! permanent memorial death (Gilgamesh finite narrative).
+//! Quest checkpoints: what a death means for a character on a quest (and what a companion's fail does).
+//!
+//! * No active quest, or still on its first stage: the engine's permanent death, a memorial keeping the inventory.
+//! * Past the first stage: no death. The character returns, with the stage kept, to where the quest last changed
+//!   its stage (`player_quests.checkpoint_*`, migration 0063), or where the stage's own `fail_restart` says, and
+//!   loses what they gained since that change: every item (gold too) is cut back to what was carried then.
 
 use super::world::{self, site_position, StoryWorld};
 use super::Story;
@@ -16,10 +20,14 @@ fn status(code: StatusCode, message: &'static str) -> Error {
 pub struct Restart {
     pub quest_id: String,
     pub stage: String,
+    /// The place to return to, or (with `checkpoint`) the fallback when no checkpoint is usable.
     pub place: Option<String>,
+    /// Return to where the stage was reached, keeping it.
+    pub checkpoint: bool,
 }
 
-/// Resolves fail_restart on the current stage, else the quest start.
+/// Resolves fail_restart on the current stage, else the current stage at its checkpoint (falling back
+/// to the quest's start place).
 pub fn resolve(story: &Story, quest_id: &str, stage_id: &str) -> Option<Restart> {
     let quest = story.quests.get(quest_id)?;
     let stage = quest.stages.get(stage_id)?;
@@ -31,12 +39,14 @@ pub fn resolve(story: &Story, quest_id: &str, stage_id: &str) -> Option<Restart>
             quest_id: quest_id.to_owned(),
             stage: restart.stage.clone(),
             place: Some(restart.place.clone()),
+            checkpoint: false,
         });
     }
     Some(Restart {
         quest_id: quest_id.to_owned(),
-        stage: quest.start_stage.clone(),
+        stage: stage_id.to_owned(),
         place: quest.start_place.clone(),
+        checkpoint: true,
     })
 }
 
@@ -75,7 +85,15 @@ pub async fn teleport_to_place(
         .sites
         .get(place_id)
         .ok_or_else(|| status(StatusCode::CONFLICT, "teleport place unavailable"))?;
-    let position = site_position(site);
+    teleport_to_position(tx, player_id, site_position(site)).await
+}
+
+/// Puts the player at a position (metres from the planet centre) and bumps the movement sequence.
+async fn teleport_to_position(
+    tx: &mut Transaction<'_, Postgres>,
+    player_id: i64,
+    position: [f64; 3],
+) -> Result<(), Error> {
     sqlx::query(
         "UPDATE players SET position_x = $2, position_y = $3, position_z = $4,
          movement_sequence = movement_sequence + 1, movement_airborne = false,
@@ -108,9 +126,27 @@ pub async fn restart_active_quest(
     let Some((quest_id, stage_id)) = active_quest(tx, player_id, &world).await? else {
         return Ok(false);
     };
+    // Dying on the first stage of a quest is the engine's death: nothing has been achieved to return to.
+    if death_cause.is_some() && on_first_stage(&world.story, &quest_id, &stage_id) {
+        return Ok(false);
+    }
     let Some(restart) = resolve(&world.story, &quest_id, &stage_id) else {
         return Ok(false);
     };
+    if death_cause.is_some() {
+        give_back_since_checkpoint(tx, player_id, &quest_id).await?;
+    }
+    let checkpoint = if restart.checkpoint {
+        usable_checkpoint(state, tx, player_id, &restart.quest_id).await?
+    } else {
+        None
+    };
+    match (checkpoint, &restart.place) {
+        (Some(position), _) => teleport_to_position(tx, player_id, position).await?,
+        (None, Some(place)) => teleport_to_place(tx, &world, player_id, place).await?,
+        (None, None) => {}
+    }
+    // After the teleport, so a changed stage records the place it restarts from as its checkpoint.
     sqlx::query(
         "UPDATE player_quests SET stage = $3, updated_at = now()
          WHERE player_id = $1 AND quest_id = $2",
@@ -120,9 +156,6 @@ pub async fn restart_active_quest(
     .bind(&restart.stage)
     .execute(&mut **tx)
     .await?;
-    if let Some(place) = &restart.place {
-        teleport_to_place(tx, &world, player_id, place).await?;
-    }
     // Full reserves: thirst/exhaustion/hunger soft-restart must not kill the character again.
     sqlx::query(
         "UPDATE players SET health = 100, health_fraction = 0, stamina = 100.0, stamina_fraction = 0,
@@ -155,6 +188,93 @@ pub async fn restart_active_quest(
     .execute(&mut **tx)
     .await?;
     Ok(true)
+}
+
+/// Whether a quest is still on the stage it starts with.
+pub fn on_first_stage(story: &Story, quest_id: &str, stage_id: &str) -> bool {
+    story
+        .quests
+        .get(quest_id)
+        .is_some_and(|quest| quest.start_stage == stage_id)
+}
+
+/// Takes back what the character gained since the quest's checkpoint: every item (gold too) is cut back to what
+/// they carried when the stage last changed; what they used up meanwhile stays used. Worn and held things that are
+/// gone are put down. Rows from before the checkpoints were recorded keep everything.
+async fn give_back_since_checkpoint(
+    tx: &mut Transaction<'_, Postgres>,
+    player_id: i64,
+    quest_id: &str,
+) -> Result<(), Error> {
+    let recorded: Option<bool> = sqlx::query_scalar(
+        "SELECT checkpoint_at IS NOT NULL FROM player_quests WHERE player_id = $1 AND quest_id = $2",
+    )
+    .bind(player_id)
+    .bind(quest_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if recorded != Some(true) {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE player_inventory AS i SET quantity = c.quantity
+         FROM player_quest_checkpoint_items AS c
+         WHERE i.player_id = $1 AND c.player_id = $1 AND c.quest_id = $2 AND c.item_id = i.item_id
+           AND i.quantity > c.quantity",
+    )
+    .bind(player_id)
+    .bind(quest_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM player_inventory AS i WHERE i.player_id = $1 AND NOT EXISTS (
+             SELECT 1 FROM player_quest_checkpoint_items AS c
+             WHERE c.player_id = $1 AND c.quest_id = $2 AND c.item_id = i.item_id)",
+    )
+    .bind(player_id)
+    .bind(quest_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE player_equipment AS e SET
+             hand = CASE WHEN EXISTS (SELECT 1 FROM player_inventory WHERE player_id = $1 AND item_id = e.hand) THEN e.hand END,
+             offhand = CASE WHEN EXISTS (SELECT 1 FROM player_inventory WHERE player_id = $1 AND item_id = e.offhand) THEN e.offhand END,
+             body = CASE WHEN EXISTS (SELECT 1 FROM player_inventory WHERE player_id = $1 AND item_id = e.body) THEN e.body END,
+             hands = CASE WHEN EXISTS (SELECT 1 FROM player_inventory WHERE player_id = $1 AND item_id = e.hands) THEN e.hands END
+         WHERE e.player_id = $1",
+    )
+    .bind(player_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Where the quest last changed its stage, when that spot is dry ground (a checkpoint taken while
+/// swimming would drown the character again).
+async fn usable_checkpoint(
+    state: &AppState,
+    tx: &mut Transaction<'_, Postgres>,
+    player_id: i64,
+    quest_id: &str,
+) -> Result<Option<[f64; 3]>, Error> {
+    let stored: Option<(Option<f64>, Option<f64>, Option<f64>)> = sqlx::query_as(
+        "SELECT checkpoint_x, checkpoint_y, checkpoint_z FROM player_quests WHERE player_id = $1 AND quest_id = $2",
+    )
+    .bind(player_id)
+    .bind(quest_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((Some(x), Some(y), Some(z))) = stored else {
+        return Ok(None);
+    };
+    let position = [x, y, z];
+    let distance = (x * x + y * y + z * z).sqrt();
+    if !position.iter().all(|value| value.is_finite()) || distance < 1.0 {
+        return Ok(None);
+    }
+    let terrain = crate::movement::terrain(state).await?;
+    let direction = position.map(|value| value / distance);
+    Ok((terrain.water_depth(direction) <= 0.0).then_some(position))
 }
 
 #[cfg(test)]
@@ -197,6 +317,7 @@ mod tests {
                 title_key: "t".to_owned(),
                 start_stage: "start".to_owned(),
                 start_place: Some("d:town".to_owned()),
+                known_places: Vec::new(),
                 excerpt: None,
                 stages,
             },
@@ -204,6 +325,13 @@ mod tests {
         let restart = resolve(&story, "d:q", "road").unwrap();
         assert_eq!(restart.stage, "start");
         assert_eq!(restart.place.as_deref(), Some("d:temple"));
+        assert!(!restart.checkpoint);
+        // Without its own fail_restart a stage is kept: the character returns to where it was reached,
+        // with the start place only as the fallback.
+        let restart = resolve(&story, "d:q", "start").unwrap();
+        assert_eq!(restart.stage, "start");
+        assert_eq!(restart.place.as_deref(), Some("d:town"));
+        assert!(restart.checkpoint);
     }
 
     #[test]

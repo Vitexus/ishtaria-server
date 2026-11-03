@@ -40,9 +40,35 @@ pub trait Ground {
     fn wade_level(&self, _direction: [f64; 3]) -> Option<f64> {
         None
     }
+    /// Whether a wall, house, fence or other fixed obstacle of the world stands within `reach` metres of a direction
+    /// (natural trees and rocks do not count: a road is cleared of those).
+    fn near_fixed_obstacle(&self, _direction: [f64; 3], _reach: f64) -> bool {
+        false
+    }
+    /// Whether the ground at a direction is a road or footpath: whoever walks along it goes faster.
+    fn on_trail(&self, _direction: [f64; 3]) -> bool {
+        false
+    }
+    /// Names this ground for the cache of walks (zero: the ground is not cached).
+    fn cache_id(&self) -> usize {
+        0
+    }
 }
 
 impl Ground for WalkingTerrain {
+    fn near_fixed_obstacle(&self, direction: [f64; 3], reach: f64) -> bool {
+        WalkingTerrain::near_fixed_obstacle(self, direction, reach)
+    }
+    fn on_trail(&self, direction: [f64; 3]) -> bool {
+        let unit = crate::movement::unit(direction);
+        crate::movement::on_trail(
+            unit.map(|value| value * (crate::movement::RADIUS + self.ground_height(unit).max(0.0))),
+        )
+    }
+    fn cache_id(&self) -> usize {
+        // The roads are part of the identity: a world rebuilt with other roads does not read the old walks.
+        (std::ptr::from_ref(self) as usize).wrapping_add(crate::movement::trail_generation())
+    }
     fn land_site(&self, direction: [f64; 3]) -> Option<(u8, f64)> {
         WalkingTerrain::land_site(self, direction)
     }

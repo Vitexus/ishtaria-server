@@ -7,7 +7,7 @@
 //! and ships for gold.
 
 use super::{
-    disk::Structure,
+    disk::{Building, Structure},
     disk::{Dialogue, Disk, HeightRange, Manifest, Music, Near, Npc, Place, Requires, Scenery},
     placement::{self, Ground, Placed},
     Story,
@@ -26,6 +26,7 @@ const SHIPWRIGHT: &str = include_str!("../../etc/shipwright.yaml");
 const TRADER: &str = include_str!("../../etc/trader.yaml");
 const BLACKSMITH: &str = include_str!("../../etc/blacksmith.yaml");
 const SHEPHERD: &str = include_str!("../../etc/shepherd.yaml");
+const VILLAGER: &str = include_str!("../../etc/villager.yaml");
 const TRAVELER: &str = include_str!("../../etc/traveler.yaml");
 const KNOWLEDGE: &str = include_str!("../../etc/knowledge.yaml");
 const GATE_GUARD: &str = include_str!("../../etc/gate_guard.yaml");
@@ -71,6 +72,13 @@ pub struct WorldProp {
     pub yaw: f64,
     /// Metres per model unit.
     pub scale_m: f64,
+    /// Metres per model unit along the model's x, y and z when they differ (a building fitted to its plot); `scale_m`
+    /// then holds the largest of them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale_xyz: Option<[f64; 3]>,
+    /// Set when the prop is a vehicle a player can board (its speed and the rider's clip).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vehicle: Option<super::disk::Vehicle>,
     /// Distance up to which the prop is announced, when it is larger than the usual radius
     /// (the buildings of datadisks are seen from afar).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,12 +104,15 @@ fn manifest(id: &str, name: &str) -> Manifest {
         player_character: None,
         player_model: None,
         player_body: None,
+        ground: None,
+        astronomy: None,
         starting_items: Vec::new(),
         auto_start_quests: Vec::new(),
         languages: vec!["en".to_owned(), "cs".to_owned()],
         requires: Vec::new(),
         conflicts: Vec::new(),
         world: None,
+        settlement_houses: Vec::new(),
     }
 }
 
@@ -118,6 +129,8 @@ fn empty_disk(manifest: Manifest) -> Disk {
         easter_eggs: Vec::new(),
         knowledge: Vec::new(),
         achievements: Vec::new(),
+        buildings: Vec::new(),
+        trails: Vec::new(),
         media: BTreeMap::new(),
         voices: BTreeMap::new(),
         strings: BTreeMap::from([
@@ -506,6 +519,8 @@ fn to_props(
             position,
             yaw: prop.yaw,
             scale_m: prop.scale,
+            scale_xyz: None,
+            vehicle: None,
             visible_m: None,
             readable: false,
         });
@@ -566,6 +581,12 @@ fn build_structure(
     let height = |direction: [f64; 3]| {
         if structure.at_sea {
             0.0
+        } else if let Some(level) = structure
+            .on_water
+            .then(|| crate::movement::patch_water(direction))
+            .flatten()
+        {
+            level
         } else {
             ground.height(direction).max(0.0)
         }
@@ -592,11 +613,13 @@ fn build_structure(
         position,
         yaw,
         scale_m: scale,
+        scale_xyz: None,
+        vehicle: structure.vehicle.clone(),
         visible_m: Some(structure.visible_m.unwrap_or(600.0)),
         readable: structure.about.is_some(),
     });
     // Harbour ships skip mesh colliders (same as generated at-sea props); docks on land keep them.
-    if !structure.at_sea {
+    if !structure.at_sea && !structure.on_water {
         built.colliders.push(WorldObject {
             id: format!("{id}#structure"),
             model,
@@ -609,6 +632,122 @@ fn build_structure(
         });
     }
     Some((direction, reach))
+}
+
+/// Distance up to which the houses of a datadisk are announced.
+const BUILDING_VISIBLE_M: f64 = 400.0;
+
+/// How far a listed house is sunk below the lowest ground of its plot. The 0 A.D. houses are made to be raised on a
+/// slope, so their walls end at the floor and a house set exactly on level ground would hover on its posts. Three
+/// metres bring the lowest stair to the level of the ground; the part below it shows only where the plot slopes.
+pub(crate) const BUILDING_SINK_M: f64 = 3.0;
+
+/// The houses a datadisk lists around the anchor of a place (`buildings/*.yaml`): each stands on the lowest ground under
+/// its plot, is turned to face its bearing, and blocks walking with round colliders along its longer side (a box of
+/// `footprint` would not be a circle, so the plot is covered by as many circles as its sides allow). A model that is not
+/// a media file of the disk leaves its house out instead of failing the whole world.
+fn build_buildings(
+    place: &str,
+    disk: &str,
+    items: &[Building],
+    site: &Placed,
+    story: &Story,
+    ground: &dyn Ground,
+    built: &mut Built,
+) {
+    let mut missing = std::collections::BTreeSet::new();
+    for (number, item) in items.iter().enumerate() {
+        if !story.media.contains_key(&format!("{disk}/{}", item.model)) {
+            missing.insert(item.model.as_str());
+            continue;
+        }
+        // The model's front is +Z, drawn turned by `yaw` about the vertical axis (as the bridges are); a compass
+        // bearing b has the front pointing east sin b and south -cos b. Clients take 0..2 pi.
+        let yaw =
+            (std::f64::consts::PI - item.yaw_deg.to_radians()).rem_euclid(std::f64::consts::TAU);
+        let (sin, cos) = yaw.sin_cos();
+        // Local axes of the model in the client's (x, z): width along (cos, -sin), depth along (sin, cos).
+        let [width, depth] = item.footprint;
+        let corner = |a: f64, b: f64| {
+            (
+                item.x + (a * cos + b * sin) * width / 2.0,
+                item.z + (-a * sin + b * cos) * depth / 2.0,
+            )
+        };
+        let height_at = |x: f64, z: f64| {
+            let (direction, _) =
+                scenery::world_from_local(site.direction, x, z, |_| 0.0, crate::movement::RADIUS);
+            ground.height(direction).max(0.0)
+        };
+        let base = [
+            (-1.0, -1.0),
+            (1.0, -1.0),
+            (1.0, 1.0),
+            (-1.0, 1.0),
+            (0.0, 0.0),
+        ]
+        .iter()
+        .map(|(a, b)| {
+            let (x, z) = corner(*a, *b);
+            height_at(x, z)
+        })
+        .fold(f64::INFINITY, f64::min);
+        let (_, position) = scenery::world_from_local(
+            site.direction,
+            item.x,
+            item.z,
+            |_| base - item.sink_m.unwrap_or(BUILDING_SINK_M),
+            crate::movement::RADIUS,
+        );
+        let id = format!("{place}#building{number}");
+        let largest = item.scale.iter().copied().fold(0.0, f64::max);
+        built.props.push(WorldProp {
+            id: id.clone(),
+            model: format!("{}{disk}:{}", crate::movement::STRUCTURE_PREFIX, item.model),
+            position,
+            yaw,
+            scale_m: largest,
+            scale_xyz: Some(item.scale),
+            vehicle: None,
+            visible_m: Some(BUILDING_VISIBLE_M),
+            readable: false,
+        });
+        // Round colliders along the longer side of the plot.
+        let (long, short, axis) = if width >= depth {
+            (width, depth, (cos, -sin))
+        } else {
+            (depth, width, (sin, cos))
+        };
+        let radius = (short / 2.0).max(1.0);
+        let count = ((long / short).round() as usize).clamp(1, 4);
+        for k in 0..count {
+            let along = if count == 1 {
+                0.0
+            } else {
+                (k as f64 / (count - 1) as f64 - 0.5) * (long - short)
+            };
+            let (_, circle) = scenery::world_from_local(
+                site.direction,
+                item.x + axis.0 * along,
+                item.z + axis.1 * along,
+                |_| base,
+                crate::movement::RADIUS,
+            );
+            built.colliders.push(WorldObject {
+                id: format!("{id}.{k}"),
+                model: String::new(),
+                position: circle,
+                scale_m: 1.0,
+                yaw: 0.0,
+                collision_radius_m: radius,
+                biome: 4,
+                ground_offset_m: 0.0,
+            });
+        }
+    }
+    for model in missing {
+        eprintln!("buildings of {place}: {model} is not a media file of the disk");
+    }
 }
 
 /// Clearance around a building where the houses of a generated town are not built.
@@ -687,6 +826,7 @@ fn flock_pasture(
             heading.sin() * crate::herd::DRIVE_M,
         ]],
         phase_s: herd_phase_ms(seed, site_id) as f64 / 1000.0,
+        follow: None,
     };
     (Some(pasture), Some((fold, movement)))
 }
@@ -760,6 +900,8 @@ fn lay_bridges(
             // The model runs along its +Z.
             yaw: (span.to.0 - span.from.0).atan2(span.to.1 - span.from.1),
             scale_m: scale,
+            scale_xyz: None,
+            vehicle: None,
             visible_m: Some(120.0),
             readable: false,
         });
@@ -899,51 +1041,15 @@ fn lay_trails(
         if cache_hit {
             continue;
         }
-        let Some(bridged) = lay_bridges(&name, site.direction, &route.spans, ground, built) else {
-            continue;
-        };
-        let stones = super::trails::stones(
-            &route.line,
-            super::trails::STONE_SPACING_M,
-            radius + 6.0,
-            goal_clearance + 6.0,
+        lay_stones(
+            &name,
+            site.direction,
+            &route,
+            (radius + 6.0, goal_clearance + 6.0),
+            ground,
+            built,
+            None,
         );
-        let mut previous: Option<[f64; 3]> = None;
-        for (number, ((x, z), yaw)) in stones.into_iter().enumerate() {
-            // No stones on a bridge, or on the planks laid out for one.
-            if bridged.iter().any(|(from, to)| {
-                super::trails::near_segment((x, z), *from, *to, super::trails::STONE_SPACING_M)
-            }) {
-                continue;
-            }
-            let (direction, position) = scenery::world_from_local(
-                site.direction,
-                x,
-                z,
-                // Sunk a little, so that a stone on a slope does not hover.
-                |direction| match ground.wade_level(direction) {
-                    // A ford is crossed on stepping stones just above the water.
-                    Some(level) => level + 0.03,
-                    None => ground.height(direction).max(0.0) - 0.05,
-                },
-                crate::movement::RADIUS,
-            );
-            // A tree, rock or wall in the way leaves a gap in the trail: it goes round, the stones do not.
-            let blocked = previous.is_some_and(|before| ground.blocked(before, direction));
-            previous = Some(direction);
-            if blocked {
-                continue;
-            }
-            built.props.push(WorldProp {
-                id: format!("trail:{name}#{number}"),
-                model: "town.road".to_owned(),
-                position,
-                yaw,
-                scale_m: scenery::MODULE_M,
-                visible_m: None,
-                readable: false,
-            });
-        }
     }
     if !cache_hit {
         if let Ok(mut cache) = TRAILS.lock() {
@@ -955,6 +1061,208 @@ fn lay_trails(
         }
     }
     corridors
+}
+
+/// Lays a routed trail on the ground: its bridges, and the stepping stones between them.
+fn lay_stones(
+    name: &str,
+    origin: [f64; 3],
+    route: &super::trails::Route,
+    (skip_start, skip_end): (f64, f64),
+    ground: &dyn Ground,
+    built: &mut Built,
+    // A model of the disk laid in place of the road module: its prop id and how high it lies over the ground.
+    surface: Option<(&str, f64)>,
+) {
+    let Some(bridged) = lay_bridges(name, origin, &route.spans, ground, built) else {
+        return;
+    };
+    let stones = super::trails::stones(
+        &route.line,
+        super::trails::STONE_SPACING_M,
+        skip_start,
+        skip_end,
+    );
+    let mut previous: Option<[f64; 3]> = None;
+    for (number, ((x, z), yaw)) in stones.into_iter().enumerate() {
+        // No stones on a bridge, or on the planks laid out for one.
+        if bridged.iter().any(|(from, to)| {
+            super::trails::near_segment((x, z), *from, *to, super::trails::STONE_SPACING_M)
+        }) {
+            continue;
+        }
+        let (direction, position) = scenery::world_from_local(
+            origin,
+            x,
+            z,
+            // Sunk a little, so that a stone on a slope does not hover.
+            |direction| match ground.wade_level(direction) {
+                // A ford is crossed on stepping stones just above the water.
+                Some(level) => level + 0.03,
+                // A track of the disk lies on the ground, a stone is sunk a little.
+                None => ground.height(direction).max(0.0) + surface.map_or(-0.05, |(_, lift)| lift),
+            },
+            crate::movement::RADIUS,
+        );
+        // A tree, rock or wall in the way leaves a gap in the trail: it goes round, the stones do not.
+        let blocked = previous.is_some_and(|before| ground.blocked(before, direction));
+        previous = Some(direction);
+        if blocked {
+            continue;
+        }
+        built.props.push(WorldProp {
+            id: format!("trail:{name}#{number}"),
+            model: surface.map_or_else(|| "town.road".to_owned(), |(model, _)| model.to_owned()),
+            position,
+            yaw,
+            scale_m: if surface.is_some() {
+                1.0
+            } else {
+                scenery::MODULE_M
+            },
+            scale_xyz: None,
+            vehicle: None,
+            visible_m: None,
+            readable: false,
+        });
+    }
+}
+
+/// The footpaths a datadisk lays between its places (`trails/*.yaml`): each leg from one place to the next is routed
+/// over the ground like the footpaths of the generated towns. A leg that finds no way is left out (and logged).
+fn lay_disk_trails(
+    trails: &[super::TrailEntry],
+    story: &Story,
+    sites: &HashMap<String, Placed>,
+    ground: &dyn Ground,
+    built: &mut Built,
+) -> HashMap<String, Vec<[f64; 3]>> {
+    let mut lines: HashMap<String, Vec<[f64; 3]>> = HashMap::new();
+    for (number, (places, start_clearance, end_clearance, model, name)) in trails.iter().enumerate()
+    {
+        let mut line: Vec<[f64; 3]> = Vec::new();
+        // The track of the disk, when its model is a media file of it: `disk:media/models/...glb` as a building's model.
+        let track = model
+            .as_ref()
+            .filter(|model| {
+                model
+                    .split_once(':')
+                    .is_some_and(|(disk, path)| story.media.contains_key(&format!("{disk}/{path}")))
+            })
+            .map(|model| format!("{}{model}", crate::movement::STRUCTURE_PREFIX));
+        let legs = places.len().saturating_sub(1);
+        for (leg, pair) in places.windows(2).enumerate() {
+            let (Some(from), Some(to)) = (sites.get(&pair[0]), sites.get(&pair[1])) else {
+                eprintln!(
+                    "trail {}: {} or {} has no site",
+                    places[0], pair[0], pair[1]
+                );
+                continue;
+            };
+            let goal = super::trails::local_of(from.direction, to.direction);
+            let Some(route) =
+                super::trails::route_avoiding(ground, from.direction, (0.0, 0.0), goal)
+            else {
+                eprintln!(
+                    "trail {}: no way from {} to {}",
+                    places[0], pair[0], pair[1]
+                );
+                continue;
+            };
+            for (index, (x, z)) in route.line.iter().enumerate() {
+                if index == 0 && !line.is_empty() {
+                    continue;
+                }
+                let (direction, _) = scenery::world_from_local(
+                    from.direction,
+                    *x,
+                    *z,
+                    |_| 0.0,
+                    crate::movement::RADIUS,
+                );
+                line.push(direction);
+            }
+            let stones = format!("{}>{}:{number}.{leg}", pair[0], pair[1]);
+            lay_stones(
+                &stones,
+                from.direction,
+                &route,
+                (
+                    if leg == 0 { *start_clearance } else { 0.0 },
+                    if leg + 1 == legs { *end_clearance } else { 0.0 },
+                ),
+                ground,
+                built,
+                track.as_deref().map(|model| (model, 0.03)),
+            );
+        }
+        if let Some(name) = name {
+            lines.insert(name.clone(), line);
+        }
+    }
+    lines
+}
+
+/// Gives the patrols that follow a trail of their disk (`follow` of a movement) the waypoints of its road: sampled every
+/// 60 m, to the end of the road and back again, so that the loop of the patrol closes where it began.
+fn follow_trails(
+    story: &mut Story,
+    sites: &HashMap<String, Placed>,
+    lines: &HashMap<String, Vec<[f64; 3]>>,
+) {
+    const SPACING_M: f64 = 60.0;
+    for npc in story.npcs.values_mut() {
+        let Some(movement) = npc.movement.as_mut() else {
+            continue;
+        };
+        let (Some(name), Some(site)) = (movement.follow.as_ref(), sites.get(&npc.place)) else {
+            continue;
+        };
+        let Some(line) = lines.get(name).filter(|line| line.len() >= 2) else {
+            eprintln!(
+                "npc {} follows the trail {name}, which was not laid",
+                npc.id
+            );
+            continue;
+        };
+        // Resample by distance along the road.
+        let metres = |a: [f64; 3], b: [f64; 3]| {
+            crate::movement::RADIUS * crate::movement::dot(a, b).clamp(-1.0, 1.0).acos()
+        };
+        let mut spots = vec![line[0]];
+        let mut since = 0.0;
+        for pair in line.windows(2) {
+            let length = metres(pair[0], pair[1]);
+            let mut at = 0.0;
+            while since + (length - at) >= SPACING_M {
+                at += SPACING_M - since;
+                since = 0.0;
+                let t = if length > 0.0 { at / length } else { 0.0 };
+                spots.push(crate::movement::unit(std::array::from_fn(|axis| {
+                    pair[0][axis] + (pair[1][axis] - pair[0][axis]) * t
+                })));
+            }
+            since += length - at;
+        }
+        if let Some(last) = line.last() {
+            spots.push(*last);
+        }
+        let back: Vec<[f64; 3]> = spots
+            .iter()
+            .rev()
+            .skip(1)
+            .take(spots.len().saturating_sub(2))
+            .copied()
+            .collect();
+        spots.extend(back);
+        movement.waypoints = spots
+            .iter()
+            .map(|direction| {
+                let (x, z) = super::trails::local_of(site.direction, *direction);
+                [x, z]
+            })
+            .collect();
+    }
 }
 
 /// Evenly spaced samples of a polyline for a traveler's patrol (at most `TRAVELER_WAYPOINTS`).
@@ -1015,6 +1323,8 @@ pub fn finish(
     let mut forges: Vec<(usize, Placed)> = Vec::new();
     // The folds of the towns with a pasture to drive the flock to, with the shepherd's walk to it.
     let mut folds: Vec<(usize, Placed, super::disk::Movement)> = Vec::new();
+    // The doorsteps of the houses of the generated towns: (town index, house number, site).
+    let mut homes: Vec<(usize, usize, Placed)> = Vec::new();
     // The settlements, for the trails between them and the places around them: (index, anchor id, site, radius).
     let mut towns: Vec<(usize, String, Placed, f64)> = Vec::new();
     let anchors = story.anchors.clone();
@@ -1025,6 +1335,11 @@ pub fn finish(
             structures.extend(build_structure(
                 &anchor.id, structure, site, story, ground, &mut built,
             ));
+        }
+    }
+    for (place, disk, items) in &story.buildings {
+        if let Some(site) = sites.get(place) {
+            build_buildings(place, disk, items, site, story, ground, &mut built);
         }
     }
     for (index, anchor) in anchors.iter().enumerate() {
@@ -1083,17 +1398,42 @@ pub fn finish(
                     pasture,
                     phase_ms: herd_phase_ms(seed, &anchor.id),
                 });
+                let (disk_id, styles) = story
+                    .settlement_houses
+                    .as_ref()
+                    .map_or(("", &[][..]), |(disk, styles)| (disk.as_str(), &styles[..]));
+                let (local, houses, doorsteps) =
+                    scenery::settlement_with_houses(seed, &anchor.id, size, sea, styles);
+                for (number, (x, z)) in doorsteps.into_iter().enumerate() {
+                    let (direction, _) = scenery::world_from_local(
+                        site.direction,
+                        x,
+                        z,
+                        |_| 0.0,
+                        crate::movement::RADIUS,
+                    );
+                    homes.push((
+                        index,
+                        number,
+                        Placed {
+                            id: format!("households:home_{index:02}_{number:02}"),
+                            direction,
+                            height_m: ground.height(direction).max(0.0),
+                        },
+                    ));
+                }
                 to_props(
                     &anchor.id,
                     &site,
-                    clear_structures(
-                        scenery::settlement(seed, &anchor.id, size, sea),
-                        &site,
-                        &structures,
-                    ),
+                    clear_structures(local, &site, &structures),
                     ground,
                     &mut built,
                 );
+                if !houses.is_empty() {
+                    build_buildings(
+                        &anchor.id, disk_id, &houses, &site, story, ground, &mut built,
+                    );
+                }
                 if let Some(((hx, hz), distance)) = sea {
                     // The landing: a little before the water, along the heading to the sea.
                     let reach = (distance - 6.0).max(4.0);
@@ -1113,6 +1453,33 @@ pub fn finish(
                         },
                     ));
                 }
+            }
+            "pasture" => {
+                // A place the disk builds itself keeps only the flock and its shepherd of a generated village.
+                let radius = anchor.place.radius_m.unwrap_or(Size::Village.radius_m());
+                let (pasture, shepherd) =
+                    flock_pasture(ground, seed, &anchor.id, site.direction, radius);
+                if shepherd.is_none() {
+                    eprintln!("pasture of {}: no land for a fold and a pasture", anchor.id);
+                }
+                if let Some((fold, movement)) = shepherd {
+                    folds.push((
+                        index,
+                        Placed {
+                            id: format!("shepherds:fold_{index:02}"),
+                            direction: fold,
+                            height_m: ground.height(fold).max(0.0),
+                        },
+                        movement,
+                    ));
+                }
+                built.farms.push(crate::movement::FarmSite {
+                    id: anchor.id.clone(),
+                    direction: site.direction,
+                    radius_m: radius,
+                    pasture,
+                    phase_ms: herd_phase_ms(seed, &anchor.id),
+                });
             }
             "fortress" => {
                 to_props(
@@ -1146,6 +1513,8 @@ pub fn finish(
         ground,
         &mut built,
     );
+    let lines = lay_disk_trails(&story.trails, story, sites, ground, &mut built);
+    follow_trails(story, sites, &lines);
     if !markets.is_empty() {
         let file: DialogueFile = serde_yaml::from_str(TRADER)?;
         let mut disk = empty_disk(manifest("markets", "Markets"));
@@ -1264,6 +1633,7 @@ pub fn finish(
                     pause_s: 12.0,
                     waypoints,
                     phase_s: 0.0,
+                    follow: None,
                 }),
             });
             let mut placed = site.clone();
@@ -1340,6 +1710,92 @@ pub fn finish(
         disk.sha256 = format!(
             "{:x}",
             Sha256::digest(format!("shepherds:{}", folds.len()).as_bytes())
+        );
+        story.add_disk(disk)?;
+        story.check()?;
+    }
+    if !homes.is_empty() {
+        let file: DialogueFile = serde_yaml::from_str(VILLAGER)?;
+        let mut disk = empty_disk(manifest("households", "Households"));
+        disk.dialogues.push(file.dialogue);
+        for (language, table) in file.strings {
+            disk.strings.entry(language).or_default().extend(table);
+        }
+        // role, pack, skin (a datadisk lends better looks: tags `look_villager_<role>`), radius, speed, pause
+        let folk: [(&str, &str, &str, f64, f64, f64); 6] = [
+            ("man", "survivors", "survivorMaleB", 14.0, 1.0, 4.0),
+            ("woman", "retro", "humanFemaleA", 14.0, 0.95, 4.0),
+            ("old_man", "retro", "humanMaleA", 8.0, 0.48, 6.0),
+            ("old_woman", "retro", "humanFemaleA", 8.0, 0.42, 8.0),
+            ("boy", "protagonists", "criminalMaleA", 20.0, 2.2, 1.5),
+            ("girl", "retro", "humanFemaleA", 20.0, 2.0, 2.0),
+        ];
+        for (index, number, site) in &homes {
+            let local = format!("home_{index:02}_{number:02}");
+            disk.places.push(Place {
+                id: local.clone(),
+                kind: "landmark".to_owned(),
+                name_key: "home.name".to_owned(),
+                parent: None,
+                radius_m: Some(3.0),
+                spacing_m: None,
+                spawn: false,
+                terrain: None,
+                at: None,
+                locate: None,
+                geo: None,
+                music: None,
+                music_radius_m: None,
+                wildlife: None,
+                scenery: None,
+                structure: None,
+                requires: Requires::default(),
+            });
+            // About one woman in three is with child, by a hash of the house so that a world keeps its families.
+            let expecting =
+                Sha256::digest(format!("{seed}:expecting:{index}:{number}").as_bytes())[0] < 87;
+            for (role, pack, skin, radius, speed, pause) in folk {
+                let role = if role == "woman" && expecting {
+                    "pregnant_woman"
+                } else {
+                    role
+                };
+                disk.npcs.push(Npc {
+                    id: format!("villager_{role}_{index:02}_{number:02}"),
+                    name_key: format!("villager.{role}.name"),
+                    place: local.clone(),
+                    character: super::disk::Character {
+                        pack: pack.to_owned(),
+                        skin: skin.to_owned(),
+                        model: None,
+                    },
+                    dialogue: "villager".to_owned(),
+                    bio_key: Some(format!("villager.{role}.bio")),
+                    about: None,
+                    portrait: None,
+                    tags: Vec::new(),
+                    size: None,
+                    movement: Some(super::disk::Movement {
+                        kind: super::disk::MovementKind::Wander,
+                        radius_m: radius,
+                        speed_m_s: speed,
+                        pause_s: pause,
+                        waypoints: Vec::new(),
+                        phase_s: 0.0,
+                        follow: None,
+                    }),
+                });
+            }
+            sites.insert(site.id.clone(), site.clone());
+        }
+        disk.sha256 = format!(
+            "{:x}",
+            Sha256::digest(format!("households:{}", homes.len()).as_bytes())
+        );
+        eprintln!(
+            "households: {} homes with {} people",
+            homes.len(),
+            homes.len() * folk.len()
         );
         story.add_disk(disk)?;
         story.check()?;
@@ -1458,12 +1914,19 @@ pub fn finish(
 }
 
 /// The generated characters (`<disk>:<role>_NN`) by the generated disk that holds them.
-const GENERATED_ROLES: [(&str, &str); 5] = [
+const GENERATED_ROLES: [(&str, &str); 12] = [
     ("markets", "trader"),
     ("travelers", "traveler"),
     ("shepherds", "shepherd"),
     ("harbours", "shipwright"),
     ("forges", "blacksmith"),
+    ("households", "villager_man"),
+    ("households", "villager_woman"),
+    ("households", "villager_pregnant_woman"),
+    ("households", "villager_old_man"),
+    ("households", "villager_old_woman"),
+    ("households", "villager_boy"),
+    ("households", "villager_girl"),
 ];
 
 /// A datadisk NPC tagged `look_<role>` (tags are plain identifiers) lends its look (pack, skin and model) to every generated

@@ -111,6 +111,10 @@
         {
           "item": "fishing_rod",
           "price": 35
+        },
+        {
+          "item": "waterskin",
+          "price": 12
         }
       ],
       "buys": [
@@ -200,6 +204,31 @@
       "sells": [],
       "buys": [],
       "repairs": true
+    },
+    "waterseller": {
+      "sells": [
+        {
+          "item": "water_refill",
+          "price": 2
+        },
+        {
+          "item": "waterskin",
+          "price": 12
+        },
+        {
+          "item": "bread",
+          "price": 6
+        },
+        {
+          "item": "cheese",
+          "price": 8
+        },
+        {
+          "item": "apple",
+          "price": 4
+        }
+      ],
+      "buys": []
     }
   }
 }

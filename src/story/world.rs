@@ -32,6 +32,14 @@ const DEFAULT_DISK_DIR: &str = "/usr/share/ishtaria/datadisks";
 const REFRESH: Duration = Duration::from_secs(30);
 /// NPCs are sent to clients within this distance of the requested point.
 const NPC_RADIUS_M: f64 = 400.0;
+/// The most characters one answer lists (the client keeps no more than this: `MAX_NPCS` of `surface_environment.gd`).
+const MAX_NPCS_LISTED: usize = 64;
+
+/// A character of the background of a place, not of its story: the crowd of a city, the families of the houses.
+fn is_background(id: &str) -> bool {
+    let local = id.rsplit(':').next().unwrap_or(id);
+    local.starts_with("crowd_") || local.starts_with("hv_h") || local.starts_with("villager_")
+}
 /// A player may talk to an NPC within this distance.
 pub const TALK_RANGE_M: f64 = 6.0;
 
@@ -381,8 +389,18 @@ async fn build(
             .await
             .map_err(|_| anyhow::anyhow!("terrain patch loading panicked"))??;
     movement::set_patches(format!("{seed}:{heightmap}"), patches);
+    crate::atmosphere::set_astronomy(story.infos.iter().find_map(|info| info.astronomy));
     let built = super::settlements::finish(&mut story, &mut sites, terrain.as_ref(), &seed)?;
     let props = built.props;
+    // The generator puts no tree, rock or plant on a road or footpath.
+    movement::set_trails(
+        format!("{seed}:{heightmap}"),
+        props
+            .iter()
+            .filter(|prop| prop.id.starts_with("trail:"))
+            .map(|prop| prop.position)
+            .collect(),
+    );
     let colliders = built.colliders;
     let built_bridges = built.bridges;
     let farms = built.farms;
@@ -712,17 +730,36 @@ pub async fn props_near(state: &AppState, point: [f64; 3]) -> Vec<super::settlem
     const MAX_PROPS: usize = 2500;
     // Buildings of datadisks are few and large, so they are announced from farther away.
     match world(state).await {
-        Ok(Some(world)) => world
-            .props
-            .iter()
-            .filter(|prop| {
+        Ok(Some(world)) => {
+            // A vehicle lies where its last rider left it, not where its disk put it.
+            let moved = if world.props.iter().any(|prop| prop.vehicle.is_some()) {
+                crate::vehicles::positions(state).await
+            } else {
+                Vec::new()
+            };
+            let near = |prop: &super::settlements::WorldProp| {
                 length(std::array::from_fn(|axis| {
                     prop.position[axis] - point[axis]
                 })) <= prop.visible_m.unwrap_or(PROP_RADIUS_M)
-            })
-            .take(MAX_PROPS)
-            .cloned()
-            .collect(),
+            };
+            world
+                .props
+                .iter()
+                .map(|prop| {
+                    if prop.vehicle.is_none() {
+                        return std::borrow::Cow::Borrowed(prop);
+                    }
+                    let mut prop = prop.clone();
+                    if let Some((_, position, _)) = moved.iter().find(|(id, _, _)| *id == prop.id) {
+                        prop.position = *position;
+                    }
+                    std::borrow::Cow::Owned(prop)
+                })
+                .filter(|prop| near(prop))
+                .take(MAX_PROPS)
+                .map(std::borrow::Cow::into_owned)
+                .collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -814,13 +851,23 @@ pub async fn npcs_near(
                     * 2.0
             })
     };
-    let near: Vec<&NpcDescriptor> = world
+    let distance =
+        |npc: &NpcDescriptor| length(std::array::from_fn(|axis| npc.position[axis] - point[axis]));
+    let mut near: Vec<&NpcDescriptor> = world
         .npcs
         .iter()
-        .filter(|npc| {
-            length(std::array::from_fn(|axis| npc.position[axis] - point[axis])) <= reach(npc)
-        })
+        .filter(|npc| distance(npc) <= reach(npc))
         .collect();
+    // Clients draw at most MAX_NPCS_LISTED characters, and every wandering one costs a route to work out: the people of a
+    // story come first, the crowd and the families of the houses fill the rest, nearest first.
+    if near.len() > MAX_NPCS_LISTED {
+        near.sort_by(|a, b| {
+            is_background(&a.id)
+                .cmp(&is_background(&b.id))
+                .then(distance(a).total_cmp(&distance(b)))
+        });
+        near.truncate(MAX_NPCS_LISTED);
+    }
     let terrain = if near.iter().any(|npc| npc.movement.is_some()) {
         movement::terrain(state).await.ok()
     } else {
@@ -1120,22 +1167,37 @@ fn load_patches(
     Ok((patches, descriptors))
 }
 
-/// Landscape patches whose rectangle lies within reach of a point, for the client.
+/// How much farther than its `visible_m` a landscape patch is announced: the client paints its rivers on
+/// the planet from there (Uruk's Euphrates seen from the hunter's water-hole 12 km away, and while landing).
+const TERRAIN_VIEW_M: f64 = 15_000.0;
+
+/// The client takes at most this many patches in one region.
+const MAX_TERRAINS: usize = 8;
+
+/// Landscape patches whose rectangle lies within reach of a point, for the client, nearest first.
 pub async fn terrains_near(state: &AppState, point: [f64; 3]) -> Vec<TerrainDescriptor> {
     match world(state).await {
-        Ok(Some(world)) => world
-            .terrains
-            .iter()
-            .filter(|terrain| {
-                let reach = 0.5 * (terrain.extent_m[0].hypot(terrain.extent_m[1]))
-                    + terrain.feather_m
-                    + terrain.visible_m;
-                length(std::array::from_fn(|axis| {
-                    terrain.position[axis] - point[axis]
-                })) <= reach
-            })
-            .cloned()
-            .collect(),
+        Ok(Some(world)) => {
+            let mut near: Vec<(f64, TerrainDescriptor)> = world
+                .terrains
+                .iter()
+                .filter_map(|terrain| {
+                    let reach = 0.5 * (terrain.extent_m[0].hypot(terrain.extent_m[1]))
+                        + terrain.feather_m
+                        + terrain.visible_m
+                        + TERRAIN_VIEW_M;
+                    let distance = length(std::array::from_fn(|axis| {
+                        terrain.position[axis] - point[axis]
+                    }));
+                    (distance <= reach).then(|| (distance, terrain.clone()))
+                })
+                .collect();
+            near.sort_by(|a, b| a.0.total_cmp(&b.0));
+            near.into_iter()
+                .take(MAX_TERRAINS)
+                .map(|(_, terrain)| terrain)
+                .collect()
+        }
         _ => Vec::new(),
     }
 }

@@ -35,6 +35,7 @@ mod story;
 mod survival;
 mod terrain;
 mod trade;
+mod vehicles;
 
 use atmosphere::Atmosphere;
 

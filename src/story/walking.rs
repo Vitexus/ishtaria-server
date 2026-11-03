@@ -30,6 +30,15 @@ const MAX_POINTS: usize = 36;
 /// Waypoints along a walk are at most this far apart.
 const STEP_M: f64 = 18.0;
 
+/// The walks of wanderers by (character, slot, slot length, radius and speed), so that the routes asked for again and
+/// again are not worked out again. Home and ground are fixed for a character of a world.
+type SlotKey = (String, i64, i64, u64, u64, usize, [u64; 3]);
+static SLOT_WALKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<SlotKey, Vec<[f64; 4]>>>,
+> = std::sync::LazyLock::new(Default::default);
+/// The cache is emptied when it holds this many slots.
+const MAX_CACHED_SLOTS: usize = 50_000;
+
 fn word(hash: &[u8], index: usize) -> f64 {
     f64::from(u32::from_le_bytes(
         hash[index * 4..index * 4 + 4].try_into().unwrap(),
@@ -59,6 +68,13 @@ fn leg(
     speed: f64,
 ) {
     let distance = arc_m(from, to);
+    // Along a road the pace is half as fast again (both ends and the middle of the stretch are on it).
+    let middle = unit(std::array::from_fn(|axis| (from[axis] + to[axis]) / 2.0));
+    let speed = if ground.on_trail(from) && ground.on_trail(middle) && ground.on_trail(to) {
+        speed * crate::movement::ROAD_PACE
+    } else {
+        speed
+    };
     let move_ms = ((distance / speed) * 1000.0).round() as i64;
     let move_ms = move_ms.min(end_ms - start_ms).max(0);
     let parts = (distance / STEP_M).ceil().clamp(1.0, 8.0) as i64;
@@ -125,15 +141,47 @@ fn wander(
     let mut route = Vec::new();
     let mut slot = first;
     loop {
-        let from = waypoint(ground, id, home, slot, movement.radius_m);
-        let to = waypoint(ground, id, home, slot + 1, movement.radius_m);
-        leg_around(
-            &mut route,
-            ground,
-            [from, home, to],
-            (slot * slot_ms, (slot + 1) * slot_ms),
-            movement.speed_m_s,
+        // The walk of a slot is the same whenever it is asked for, and costs a dozen look-ups of the ground: it is
+        // worked out once (every client asks for the routes of the same characters again and again).
+        let key = (
+            id.to_owned(),
+            slot,
+            slot_ms,
+            movement.radius_m.to_bits(),
+            movement.speed_m_s.to_bits(),
+            // The ground and the home, so that another world (or a rebuilt ground) never reads these walks.
+            ground.cache_id(),
+            home.map(f64::to_bits),
         );
+        let cacheable = key.5 != 0;
+        let cached = if cacheable {
+            SLOT_WALKS
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&key).cloned())
+        } else {
+            None
+        };
+        let walk = cached.unwrap_or_else(|| {
+            let from = waypoint(ground, id, home, slot, movement.radius_m);
+            let to = waypoint(ground, id, home, slot + 1, movement.radius_m);
+            let mut walk = Vec::new();
+            leg_around(
+                &mut walk,
+                ground,
+                [from, home, to],
+                (slot * slot_ms, (slot + 1) * slot_ms),
+                movement.speed_m_s,
+            );
+            if let (true, Ok(mut cache)) = (cacheable, SLOT_WALKS.lock()) {
+                if cache.len() >= MAX_CACHED_SLOTS {
+                    cache.clear();
+                }
+                cache.insert(key, walk.clone());
+            }
+            walk
+        });
+        route.extend(walk);
         slot += 1;
         let covered = route
             .last()
@@ -158,12 +206,21 @@ fn patrol(
         .map(|index| {
             let next = points[(index + 1) % points.len()];
             // A leg that a wall blocks goes by the place of the character.
-            let metres = if ground.blocked(points[index], next) {
+            let metres = if movement.follow.is_none() && ground.blocked(points[index], next) {
                 arc_m(points[index], site) + arc_m(site, next)
             } else {
                 arc_m(points[index], next)
             };
-            ((metres / movement.speed_m_s) * 1000.0).round() as i64 + pause_ms
+            // Along a road the pace is half as fast again, as in `leg`.
+            let from = points[index];
+            let middle = unit(std::array::from_fn(|axis| (from[axis] + next[axis]) / 2.0));
+            let pace = if ground.on_trail(from) && ground.on_trail(middle) && ground.on_trail(next)
+            {
+                crate::movement::ROAD_PACE
+            } else {
+                1.0
+            };
+            ((metres / (movement.speed_m_s * pace)) * 1000.0).round() as i64 + pause_ms
         })
         .collect();
     let cycle: i64 = leg_ms.iter().sum::<i64>().max(1);
@@ -180,13 +237,26 @@ fn patrol(
     let mut route = Vec::new();
     loop {
         let next = (index + 1) % points.len();
-        leg_around(
-            &mut route,
-            ground,
-            [points[index], site, points[next]],
-            (start, start + leg_ms[index]),
-            movement.speed_m_s,
-        );
+        if movement.follow.is_some() {
+            // The road is clear of what would be in the way: it never goes round by its place.
+            leg(
+                &mut route,
+                ground,
+                points[index],
+                points[next],
+                start,
+                start + leg_ms[index],
+                movement.speed_m_s,
+            );
+        } else {
+            leg_around(
+                &mut route,
+                ground,
+                [points[index], site, points[next]],
+                (start, start + leg_ms[index]),
+                movement.speed_m_s,
+            );
+        }
         start += leg_ms[index];
         index = next;
         let covered = route
@@ -332,6 +402,44 @@ mod tests {
         }
     }
 
+    /// A flat world of land that is all road.
+    struct Road;
+
+    impl Ground for Road {
+        fn land_site(&self, direction: [f64; 3]) -> Option<(u8, f64)> {
+            Flat.land_site(direction)
+        }
+        fn height(&self, direction: [f64; 3]) -> f64 {
+            Flat.height(direction)
+        }
+        fn is_sea(&self, _direction: [f64; 3]) -> bool {
+            false
+        }
+        fn on_trail(&self, _direction: [f64; 3]) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_character_on_a_road_walks_half_as_fast_again() {
+        let from = unit([1.0, 0.0, 0.0]);
+        let to = unit([1.0, 0.0, 0.00004]);
+        let country = {
+            let mut route = Vec::new();
+            leg(&mut route, &Flat, from, to, 0, 1_000_000, 1.0);
+            route[route.len() - 2][0]
+        };
+        let road = {
+            let mut route = Vec::new();
+            leg(&mut route, &Road, from, to, 0, 1_000_000, 1.0);
+            route[route.len() - 2][0]
+        };
+        assert!(
+            (country / road - 1.5).abs() < 0.02,
+            "{country} against {road}"
+        );
+    }
+
     /// A flat world of land in which every walk of any length runs into a wall.
     struct Boxed;
 
@@ -379,6 +487,7 @@ mod tests {
             pause_s: 2.0,
             waypoints: Vec::new(),
             phase_s: 0.0,
+            follow: None,
         };
         let walked = patrol(
             &Boxed,
@@ -404,6 +513,7 @@ mod tests {
             pause_s: 0.0,
             waypoints: vec![[crate::herd::DRIVE_M, 0.0]],
             phase_s: 0.0,
+            follow: None,
         };
         let at = |time: i64| {
             let walk = route(
@@ -438,6 +548,7 @@ mod tests {
             pause_s: 8.0,
             waypoints: Vec::new(),
             phase_s: 0.0,
+            follow: None,
         }
     }
 
@@ -529,6 +640,7 @@ mod tests {
             pause_s: 5.0,
             waypoints: vec![[0.0, 0.0], [30.0, 0.0], [30.0, 30.0], [0.0, 30.0]],
             phase_s: 0.0,
+            follow: None,
         };
         let now = 1_800_000_000_000;
         let first = route(&Flat, "a", site, site, &beat, now);
