@@ -145,6 +145,19 @@ impl Solar {
     }
 }
 
+/// Ecliptic longitudes in degrees (0 at the vernal equinox) of the sun and of the moon at a moment: the same low-order
+/// formulas as [`Solar::at`] and the moon below, for calendars that count by the sky (`festival.rs`).
+pub fn ecliptic_longitudes(unix_seconds: f64) -> (f64, f64) {
+    let days = unix_seconds / 86400.0 + 2440587.5 - 2451545.0;
+    let anomaly = (357.528 + 0.9856003 * days).rem_euclid(360.0).to_radians();
+    let sun = (280.460 + 0.9856474 * days + 1.915 * anomaly.sin() + 0.020 * (2.0 * anomaly).sin())
+        .rem_euclid(360.0);
+    let mean_longitude = (218.316 + 13.176396 * days).rem_euclid(360.0);
+    let mean_anomaly = (134.963 + 13.064993 * days).rem_euclid(360.0).to_radians();
+    let moon = (mean_longitude + 6.289 * mean_anomaly.sin()).rem_euclid(360.0);
+    (sun, moon)
+}
+
 /// Low-order lunar position in the same planet-fixed frame as the sun (Meeus-style mean
 /// elements with the leading longitude and latitude terms). Distance is kilometres from
 /// the planet's centre; the angular radius uses the Moon's mean volumetric radius.

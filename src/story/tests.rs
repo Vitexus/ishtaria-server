@@ -64,6 +64,43 @@ fn base(root: &Path, id: &str, version: &str, extra: &str) {
 }
 
 #[test]
+fn a_dialogue_effect_may_tell_the_player_of_places() {
+    let a = scratch("reveal");
+    base(&a, "zeta", "1.0.0", "");
+    let with = |effect: &str| {
+        write(
+            &a,
+            "dialogues/hermit.yaml",
+            &format!("id: hermit\nstart: hi\nnodes:\n  hi:\n    text_key: hi\n    choices:\n      - {{text_key: bye, effects: [{effect}]}}\n"),
+        );
+        Story::load(std::slice::from_ref(&a), false)
+    };
+    let story = with("{reveal_places: [hut]}").unwrap();
+    let choice = &story.dialogues["zeta:hermit"].nodes["hi"]
+        .choices
+        .as_ref()
+        .unwrap()[0];
+    let mut ops = Vec::new();
+    super::engine::apply(
+        &choice.effects,
+        &mut super::engine::PlayerState::default(),
+        &mut ops,
+    )
+    .unwrap();
+    assert_eq!(
+        ops,
+        [super::engine::Op::Reveal(vec!["zeta:hut".to_owned()])],
+        "the place is qualified with the disk"
+    );
+    for (effect, why) in [
+        ("{reveal_places: [nowhere]}", "an unknown place"),
+        ("{reveal_places: []}", "an empty list"),
+    ] {
+        assert!(with(effect).is_err(), "{why} must be rejected");
+    }
+}
+
+#[test]
 fn composes_disks_in_dependency_order_with_qualified_ids() {
     let a = scratch("a");
     let b = scratch("b");

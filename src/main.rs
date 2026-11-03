@@ -12,6 +12,7 @@ mod environment;
 mod escort;
 mod experience;
 mod federation;
+mod festival;
 mod fishing;
 mod gathering;
 mod glb;

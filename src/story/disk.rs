@@ -614,6 +614,9 @@ pub struct SetPlayable {
     pub disk: Option<String>,
 }
 
+/// The most places one dialogue effect may tell the player of.
+pub const MAX_REVEALED_PLACES: usize = 16;
+
 /// A structured effect: exactly one field is set.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -630,6 +633,9 @@ pub struct Effect {
     pub set_playable: Option<SetPlayable>,
     /// Move the player to a placed story place (qualified on load).
     pub teleport_place: Option<String>,
+    /// Tell the player of places (qualified on load): from then on they stay on the map and the compass, like the
+    /// places of begun quests. An elder who names where the tablets of a legend lie.
+    pub reveal_places: Option<Vec<String>>,
 }
 
 /// A short piece of knowledge a character tells about itself or its trade (`knowledge.yaml`), shown with one
@@ -2385,6 +2391,7 @@ fn check_effects(
             effect.flourish.is_some(),
             effect.set_playable.is_some(),
             effect.teleport_place.is_some(),
+            effect.reveal_places.is_some(),
         ]
         .iter()
         .filter(|set| **set)
@@ -2449,6 +2456,18 @@ fn check_effects(
                 is_id(place, 48) || place.contains(':'),
                 "invalid teleport_place {place}"
             );
+        }
+        if let Some(places) = &effect.reveal_places {
+            ensure!(
+                (1..=MAX_REVEALED_PLACES).contains(&places.len()),
+                "reveal_places must name 1..={MAX_REVEALED_PLACES} places"
+            );
+            for place in places {
+                ensure!(
+                    is_id(place, 48) || place.contains(':'),
+                    "invalid reveal_places entry {place}"
+                );
+            }
         }
     }
     Ok(())

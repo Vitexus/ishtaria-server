@@ -75,6 +75,8 @@ pub enum Op {
     Playable(SetPlayable),
     /// Move the player to a qualified place id.
     TeleportPlace(String),
+    /// The player learns of these (qualified) places: they stay on his map and compass.
+    Reveal(Vec<String>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +142,9 @@ pub fn apply(effects: &[Effect], state: &mut PlayerState, ops: &mut Vec<Op>) -> 
         }
         if let Some(place) = &effect.teleport_place {
             ops.push(Op::TeleportPlace(place.clone()));
+        }
+        if let Some(places) = &effect.reveal_places {
+            ops.push(Op::Reveal(places.clone()));
         }
     }
     Ok(())

@@ -136,8 +136,10 @@ async fn load_state(tx: &mut Tx<'_>, player_id: i64) -> Result<PlayerState, Erro
             .bind(player_id)
             .fetch_all(&mut **tx)
             .await?;
+    // The festival flags of the moment are no story flags: they are never stored, only offered to the conditions.
+    let festivals = crate::festival::flags_now().into_iter().map(str::to_owned);
     Ok(PlayerState {
-        flags: flags.into_iter().collect(),
+        flags: flags.into_iter().chain(festivals).collect(),
         stages: stages.into_iter().collect(),
         items: items.into_iter().collect(),
         once_done: once.into_iter().collect(),
@@ -227,6 +229,16 @@ async fn apply_ops(
             }
             Op::TeleportPlace(place) => {
                 super::checkpoint::teleport_to_place(tx, story, player_id, place).await?;
+            }
+            Op::Reveal(places) => {
+                // Learned by word of mouth, not from a quest: `quest_id` names where the player heard of it.
+                for place in places {
+                    sqlx::query("INSERT INTO player_known_places (player_id, place_id, quest_id) VALUES ($1, $2, 'told') ON CONFLICT DO NOTHING")
+                        .bind(player_id)
+                        .bind(place)
+                        .execute(&mut **tx)
+                        .await?;
+                }
             }
         }
     }
@@ -896,7 +908,7 @@ async fn markers(
     .fetch_all(&state.pool)
     .await?;
     found.extend(known_markers(&story.story, &story.sites, &known, &found));
-    found.truncate(64);
+    found.truncate(128);
     Ok(Json(found))
 }
 

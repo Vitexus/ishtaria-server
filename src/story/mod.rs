@@ -172,6 +172,11 @@ fn qualify_effects(effects: &mut [Effect], disk: &str) {
         if let Some(place) = &mut effect.teleport_place {
             *place = qualify(disk, place);
         }
+        if let Some(places) = &mut effect.reveal_places {
+            for place in places {
+                *place = qualify(disk, place);
+            }
+        }
     }
 }
 
@@ -545,6 +550,31 @@ impl Story {
                     "{}: unknown achievement {achievement}",
                     anchor.id
                 );
+            }
+        }
+        for (dialogue_id, dialogue) in &self.dialogues {
+            let mut stack: Vec<&disk::Effect> = dialogue
+                .nodes
+                .values()
+                .flat_map(|node| {
+                    node.effects.iter().chain(
+                        node.choices
+                            .iter()
+                            .flatten()
+                            .flat_map(|choice| choice.effects.iter()),
+                    )
+                })
+                .collect();
+            while let Some(effect) = stack.pop() {
+                for place in effect.reveal_places.iter().flatten() {
+                    ensure!(
+                        self.anchors.iter().any(|anchor| anchor.id == *place),
+                        "{dialogue_id}: reveal_places names unknown place {place}"
+                    );
+                }
+                if let Some(once) = &effect.once {
+                    stack.extend(once.effects.iter());
+                }
             }
         }
         for achievement in &self.achievements {
