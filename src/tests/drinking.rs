@@ -107,7 +107,7 @@ async fn sleeping_characters_keep_their_water_and_food_and_drink_restore_it(pool
 
 #[sqlx::test]
 #[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
-async fn a_character_in_water_loses_health_by_fractions_and_drowns(pool: PgPool) {
+async fn swimming_costs_stamina_and_a_character_drowns_only_while_it_is_low(pool: PgPool) {
     let _auth_test = AUTH_TESTS.acquire().await.unwrap();
     let world_id = initialize_spawn_world(&pool).await;
     let state = AppState {
@@ -120,26 +120,68 @@ async fn a_character_in_water_loses_health_by_fractions_and_drowns(pool: PgPool)
         .fetch_one(&pool)
         .await
         .unwrap();
+    let reserves = |pool: PgPool| async move {
+        sqlx::query_as::<_, (f64, f64)>(
+            "SELECT (stamina + stamina_fraction)::float8, (health + health_fraction)::float8 FROM players WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
 
-    // One step of a quarter second costs less than a point, and the rest is not lost.
+    // With strength left, swimming costs stamina by the second and no health at all.
+    for _ in 0..40 {
+        let mut transaction = pool.begin().await.unwrap();
+        assert!(!survival::swim(&state, &mut transaction, id, 0.25, true)
+            .await
+            .unwrap());
+        transaction.commit().await.unwrap();
+    }
+    let (stamina, health) = reserves(pool.clone()).await;
+    assert!((stamina - (100.0 - 10.0 * 0.25)).abs() < 1e-6, "{stamina}");
+    assert!((health - 100.0).abs() < 1e-6, "{health}");
+
+    // Treading water costs nothing either; low stamina drowns by fractions, and stops when it is above the level.
+    sqlx::query("UPDATE players SET stamina = 10, stamina_fraction = 0 WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let mut transaction = pool.begin().await.unwrap();
-    assert!(!survival::drown(&state, &mut transaction, id, 0.25)
+    assert!(!survival::swim(&state, &mut transaction, id, 0.25, false)
         .await
         .unwrap());
     transaction.commit().await.unwrap();
-    let health: f64 =
-        sqlx::query_scalar("SELECT (health + health_fraction)::float8 FROM players WHERE id = $1")
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert!((health - (100.0 - 0.25 * 100.0 / 60.0)).abs() < 1e-6);
+    let (stamina, health) = reserves(pool.clone()).await;
+    assert!((stamina - 10.0).abs() < 1e-6);
+    assert!(
+        (health - (100.0 - 0.25 * 100.0 / 60.0)).abs() < 1e-6,
+        "{health}"
+    );
+    sqlx::query("UPDATE players SET stamina = 50, stamina_fraction = 0 WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = reserves(pool.clone()).await.1;
+    let mut transaction = pool.begin().await.unwrap();
+    survival::swim(&state, &mut transaction, id, 0.25, true)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert!((reserves(pool.clone()).await.1 - before).abs() < 1e-6);
 
-    // About a minute in the water kills for good, with its own cause.
+    // About a minute of drowning kills for good, with its own cause.
+    sqlx::query("UPDATE players SET stamina = 0, stamina_fraction = 0 WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let mut died = false;
     for _ in 0..300 {
         let mut transaction = pool.begin().await.unwrap();
-        died = survival::drown(&state, &mut transaction, id, 0.25)
+        died = survival::swim(&state, &mut transaction, id, 0.25, false)
             .await
             .unwrap();
         transaction.commit().await.unwrap();

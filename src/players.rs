@@ -71,6 +71,9 @@ pub(super) async fn stats(
 #[derive(Serialize, FromRow)]
 pub(super) struct Player {
     username: String,
+    /// Which life under this login (2 and up); the first life carries no number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ordinal: Option<i64>,
     character: String,
     /// Flag the player chose to show next to their name (two capital letters), if any.
     flag: Option<String>,
@@ -263,7 +266,7 @@ pub(super) async fn profile(state: &AppState, player_id: i64) -> Result<Player, 
         transaction.commit().await?;
         return Err(Error::Obituary(Box::new(notice)));
     }
-    let mut player: Player = sqlx::query_as(&format!("SELECT username, character, flag, CASE WHEN story_model IS NOT NULL THEN '/story/media/' || story_model_disk || '/' || story_model END AS story_model, coalesce((SELECT quantity FROM player_inventory WHERE player_id = players.id AND item_id = 'gold'), 0)::text AS gold, health, stamina, greatest(0, least(100, ceil(100 * (1 - extract(epoch FROM (now() - last_ate_at)) / 604800))))::integer AS food, water, floor({mana})::integer AS mana, {mana_max} AS mana_max, level, experience, (100::bigint * level + 10 * greatest(0, floor(extract(epoch FROM (coalesce(died_at, now()) - created_at)) / 86400))::bigint)::text AS score FROM players WHERE id = $1 AND world_id = $2 FOR SHARE", mana = super::magic::mana_now_sql(), mana_max = super::magic::mana_max()))
+    let mut player: Player = sqlx::query_as(&format!("SELECT username, nullif(ordinal, 1) AS ordinal, character, flag, CASE WHEN story_model IS NOT NULL THEN '/story/media/' || story_model_disk || '/' || story_model END AS story_model, coalesce((SELECT quantity FROM player_inventory WHERE player_id = players.id AND item_id = 'gold'), 0)::text AS gold, health, stamina, greatest(0, least(100, ceil(100 * (1 - extract(epoch FROM (now() - last_ate_at)) / 604800))))::integer AS food, water, floor({mana})::integer AS mana, {mana_max} AS mana_max, level, experience, (100::bigint * level + 10 * greatest(0, floor(extract(epoch FROM (coalesce(died_at, now()) - created_at)) / 86400))::bigint)::text AS score FROM players WHERE id = $1 AND world_id = $2 FOR SHARE", mana = super::magic::mana_now_sql(), mana_max = super::magic::mana_max()))
         .bind(player_id).bind(state.world_id).fetch_one(&mut *transaction).await?;
     player.stats = player.stats.with_progress();
     player.life = Some(super::survival::life(&mut transaction, player_id).await?);
@@ -366,7 +369,7 @@ async fn register(
     }
     let password_hash = password_job(credentials.password, None).await?;
     let mut transaction = state.pool.begin().await?;
-    let player_id: Option<i64> = sqlx::query_scalar("INSERT INTO players (world_id, username, password_hash, character, created_at) SELECT $1, $2, $3, $4, greatest(clock_timestamp(), coalesce(max(created_at) + interval '1 microsecond', clock_timestamp())) FROM players WHERE world_id = $1 AND lower(username) = lower($2) ON CONFLICT DO NOTHING RETURNING id")
+    let player_id: Option<i64> = sqlx::query_scalar("INSERT INTO players (world_id, username, password_hash, character, created_at, ordinal) SELECT $1, $2, $3, $4, greatest(clock_timestamp(), coalesce(max(created_at) + interval '1 microsecond', clock_timestamp())), count(*) + 1 FROM players WHERE world_id = $1 AND lower(username) = lower($2) ON CONFLICT DO NOTHING RETURNING id")
         .bind(state.world_id).bind(credentials.username).bind(password_hash).bind(character).fetch_optional(&mut *transaction).await?;
     let player_id = player_id.ok_or(Error::Status(
         StatusCode::CONFLICT,

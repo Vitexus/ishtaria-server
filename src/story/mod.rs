@@ -11,6 +11,7 @@ pub mod eggs;
 pub mod engine;
 pub mod placement;
 pub mod settlements;
+pub mod sky;
 pub mod trails;
 pub mod walking;
 pub mod world;
@@ -45,6 +46,9 @@ pub struct DiskInfo {
     pub name: String,
     /// URL path of the cover image, when the disk has one.
     pub cover: Option<String>,
+    /// URL path of the picture the loading bar draws at its current value, when the disk has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loading_marker: Option<String>,
     /// URL path of the cover/logo jingle, when the disk has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cover_music: Option<MusicRef>,
@@ -57,9 +61,18 @@ pub struct DiskInfo {
     pub player_model: Option<String>,
     /// How tall and tough that character is, when the disk says.
     pub player_body: Option<disk::PlayerBody>,
+    /// How clients write the number of a life on a memorial (`roman` or `sumerian`), when the disk says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ordinal_numerals: Option<String>,
+    /// URL path of the font with the glyphs of those numerals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ordinal_font: Option<String>,
     /// The ground set clients draw the land with, when the disk says.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ground: Option<String>,
+    /// Ground layers per biome, when the disk says (`ground_layers` of the manifest).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ground_layers: Option<std::collections::BTreeMap<String, Vec<String>>>,
     /// The sky of the disk's world; the server applies it to the sun and moon, clients get it with `GET /world` `solar`.
     #[serde(skip)]
     pub astronomy: Option<disk::Astronomy>,
@@ -94,6 +107,8 @@ pub struct Story {
     pub strings: BTreeMap<String, BTreeMap<String, String>>,
     /// Easter-egg unlocks from every disk (npc ids and flags already qualified).
     pub easter_eggs: Vec<disk::EasterEgg>,
+    /// Sky-ship flights of the disk that defines them (ids and media keys qualified); at most one disk does.
+    pub sky_flyers: Option<disk::SkyFlyers>,
     /// Knowledge cards by qualified id; `image` is the media key (`<disk>/media/knowledge/…`).
     pub knowledge: BTreeMap<String, disk::KnowledgeCard>,
     /// Achievements of the disks in application order, ids and text keys qualified (`<disk>:<id>`).
@@ -102,6 +117,9 @@ pub struct Story {
     pub buildings: Vec<(String, String, Vec<disk::Building>)>,
     /// The footpaths of the disks: the qualified ids of the places they pass, and the clearances at both ends.
     pub trails: Vec<TrailEntry>,
+    /// The rivers of the disks' real planet: qualified id, the unit directions of the course and the width of the water
+    /// (metres) at each.
+    pub rivers: Vec<(String, Vec<[f64; 3]>, Vec<f64>)>,
     /// The houses of the generated settlements one of the disks defines: (disk id, styles).
     pub settlement_houses: Option<(String, Vec<disk::HouseStyle>)>,
     /// The real planet one of the disks defines, when any.
@@ -254,11 +272,23 @@ impl Story {
                 .cover
                 .as_deref()
                 .map(|cover| world::media_url(&format!("{id}/{cover}"))),
+            loading_marker: disk
+                .manifest
+                .loading_marker
+                .as_deref()
+                .map(|marker| world::media_url(&format!("{id}/{marker}"))),
             cover_music: track_ref(&disk.manifest.cover_music),
             ambient_music: track_ref(&disk.manifest.ambient_music),
             player_character: disk.manifest.player_character.clone(),
             player_body: disk.manifest.player_body,
+            ordinal_numerals: disk.manifest.ordinal_numerals.clone(),
+            ordinal_font: disk
+                .manifest
+                .ordinal_font
+                .as_deref()
+                .map(|font| world::media_url(&format!("{id}/{font}"))),
             ground: disk.manifest.ground.clone(),
+            ground_layers: disk.manifest.ground_layers.clone(),
             astronomy: disk.manifest.astronomy,
             player_model: disk
                 .manifest
@@ -451,6 +481,11 @@ impl Story {
         if !disk.manifest.settlement_houses.is_empty() && story.settlement_houses.is_none() {
             story.settlement_houses = Some((id.clone(), disk.manifest.settlement_houses.clone()));
         }
+        for river in &disk.rivers {
+            story
+                .rivers
+                .push((qualify(&id, &river.id), river.directions(), river.widths()));
+        }
         for trail in disk.trails {
             story.trails.push((
                 trail
@@ -477,6 +512,20 @@ impl Story {
                 achievement.id
             );
             story.achievements.push(achievement);
+        }
+        if let Some(mut flyers) = disk.sky_flyers {
+            ensure!(
+                story.sky_flyers.is_none(),
+                "{id}: another datadisk already defines sky flyers"
+            );
+            for city in &mut flyers.cities {
+                *city = qualify(&id, city);
+            }
+            for ship in &mut flyers.ships {
+                ship.model = format!("{id}/{}", ship.model);
+                ship.achievement = ship.achievement.take().map(|a| qualify(&id, &a));
+            }
+            story.sky_flyers = Some(flyers);
         }
         for mut egg in disk.easter_eggs {
             egg.id = format!("{id}:{}", egg.id);
@@ -572,6 +621,14 @@ impl Story {
                         "{dialogue_id}: reveal_places names unknown place {place}"
                     );
                 }
+                if let Some(ship) = &effect.sky_ship {
+                    ensure!(
+                        self.sky_flyers
+                            .as_ref()
+                            .is_some_and(|flyers| flyers.ships.iter().any(|s| s.id == *ship)),
+                        "{dialogue_id}: sky_ship names unknown ship {ship}"
+                    );
+                }
                 if let Some(once) = &effect.once {
                     stack.extend(once.effects.iter());
                 }
@@ -586,6 +643,24 @@ impl Story {
                     .and_then(|anchor| anchor.place.structure.as_ref())
                     .is_some_and(|structure| structure.about.is_some());
                 ensure!(readable, "{}: {place} has nothing to read", achievement.id);
+            }
+        }
+        if let Some(flyers) = &self.sky_flyers {
+            for city in &flyers.cities {
+                ensure!(
+                    self.anchors.iter().any(|anchor| &anchor.id == city),
+                    "sky flyers: unknown city {city}"
+                );
+            }
+            for achievement in flyers
+                .ships
+                .iter()
+                .filter_map(|ship| ship.achievement.as_ref())
+            {
+                ensure!(
+                    self.achievements.iter().any(|a| a.id == *achievement),
+                    "sky flyers: unknown achievement {achievement}"
+                );
             }
         }
         for egg in &self.easter_eggs {

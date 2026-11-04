@@ -17,9 +17,17 @@ const STAMINA_RECOVERY: f64 = 0.5;
 /// Sitting on a rock: shorter wait and faster stamina recovery than standing idle.
 const SIT_REST_DELAY: f64 = 1.0;
 const SIT_STAMINA_RECOVERY: f64 = 1.25;
-const WATER_IDLE_RATE: f64 = 0.01;
+/// Water points lost per second of presence, and per second of walking and running (half of the first values).
+const WATER_IDLE_RATE: f64 = 0.005;
+const WATER_WALK_RATE: f64 = 0.0075;
+const WATER_RUN_RATE: f64 = 0.045;
 const DEHYDRATION_DAMAGE: f64 = 0.2;
-/// Health a character in water loses per second: a full reserve lasts about a minute.
+/// Stamina a character loses per second of moving through deep water (swimming), on top of what walking costs.
+const SWIM_STAMINA_RATE: f64 = 0.25;
+/// Drowning is a state of low stamina: in deep water at or below this much (the HUD's warning level) the character
+/// has no strength left to keep afloat and loses health; it ends as soon as the stamina is above it again.
+pub(super) const DROWNING_STAMINA: f64 = 20.0;
+/// Health a drowning character loses per second: a full reserve lasts about a minute.
 const DROWNING_DAMAGE: f64 = 100.0 / 60.0;
 /// A character is present while their client reports (events poll) or they move within this
 /// many seconds. Sleeping characters lose no water: only present time is charged.
@@ -107,16 +115,24 @@ async fn rest(
     Ok(true)
 }
 
-/// Charges a character in water the health they lose by drowning during `seconds`. Returns whether
-/// they died (permanently, as with any other damage).
-pub(super) async fn drown(
+/// Charges a character in deep water for `seconds`: moving costs stamina, and while the stamina is low they drown,
+/// that is lose health. Swimming with strength left costs no health. Returns whether they died (permanently, as
+/// with any other damage).
+pub(super) async fn swim(
     state: &AppState,
     transaction: &mut Transaction<'_, Postgres>,
     id: i64,
     seconds: f64,
+    moving: bool,
 ) -> Result<bool, Error> {
+    let seconds = seconds.clamp(0.0, 0.25);
     let mut value = reserves(transaction, id).await?;
-    value.health = (value.health - seconds.clamp(0.0, 0.25) * DROWNING_DAMAGE).max(0.0);
+    if moving {
+        value.stamina = (value.stamina - seconds * SWIM_STAMINA_RATE).max(0.0);
+    }
+    if value.stamina <= DROWNING_STAMINA {
+        value.health = (value.health - seconds * DROWNING_DAMAGE).max(0.0);
+    }
     save_reserves(transaction, id, &value).await?;
     if value.health < 1.0 {
         return lethal(state, transaction, id, DamageCause::Drowning).await;
@@ -159,7 +175,14 @@ pub(super) async fn activity(
         (exertion - (value.stamina - 1.0) / stamina_rate).max(0.0)
     };
     value.stamina = (value.stamina - exertion * stamina_rate).max(0.0);
-    value.water = (value.water - seconds * if running { 0.09 } else { 0.015 }).max(0.0);
+    value.water = (value.water
+        - seconds
+            * if running {
+                WATER_RUN_RATE
+            } else {
+                WATER_WALK_RATE
+            })
+    .max(0.0);
     value.health = (value.health - exhausted * 0.05).max(0.0);
     save_reserves(transaction, id, &value).await?;
     sqlx::query("UPDATE players SET last_active_at = clock_timestamp() WHERE id = $1")
@@ -369,7 +392,7 @@ async fn die(
     id: i64,
     cause: &str,
 ) -> Result<(), Error> {
-    let grave_id: i64 = sqlx::query_scalar("INSERT INTO graves (world_id, player_id, player_uuid, player_name, cause, kind, lifetime_gold, position_x, position_y, position_z, lived_days, friends_count, born_at) SELECT world_id, id, uuid, username, $2, CASE WHEN lifetime_gold > 1000000 THEN 'mausoleum' WHEN lifetime_gold >= 1000 THEN 'monument' ELSE 'headstone' END, lifetime_gold, position_x, position_y, position_z, greatest(0, floor(extract(epoch FROM (now() - created_at)) / 86400))::bigint, (SELECT count(*) FROM player_friendships WHERE player_id = players.id OR friend_id = players.id), created_at FROM players WHERE id = $1 RETURNING id")
+    let grave_id: i64 = sqlx::query_scalar("INSERT INTO graves (world_id, player_id, player_uuid, player_name, cause, kind, lifetime_gold, position_x, position_y, position_z, lived_days, friends_count, born_at, ordinal) SELECT world_id, id, uuid, username, $2, CASE WHEN lifetime_gold > 1000000 THEN 'mausoleum' WHEN lifetime_gold >= 1000 THEN 'monument' ELSE 'headstone' END, lifetime_gold, position_x, position_y, position_z, greatest(0, floor(extract(epoch FROM (now() - created_at)) / 86400))::bigint, (SELECT count(*) FROM player_friendships WHERE player_id = players.id OR friend_id = players.id), created_at, ordinal FROM players WHERE id = $1 RETURNING id")
         .bind(id).bind(cause).fetch_one(&mut **transaction).await?;
     sqlx::query("INSERT INTO grave_inventory (grave_id, item_id, quantity, durability) SELECT $1, item_id, quantity, durability FROM player_inventory WHERE player_id = $2")
         .bind(grave_id).bind(id).execute(&mut **transaction).await?;
@@ -381,7 +404,7 @@ async fn die(
         .bind(id)
         .execute(&mut **transaction)
         .await?;
-    sqlx::query("UPDATE players SET died_at = now(), death_cause = $2, health = 0 WHERE id = $1")
+    sqlx::query("UPDATE players SET died_at = now(), death_cause = $2, health = 0, vehicle_id = NULL WHERE id = $1")
         .bind(id)
         .bind(cause)
         .execute(&mut **transaction)
@@ -416,13 +439,16 @@ pub(super) struct Obituary {
     /// How the character died (`creature`, `fall`, …); drives the client death clip.
     #[serde(skip_serializing_if = "Option::is_none")]
     death_cause: Option<String>,
+    /// Which life under this login it was (2 and up); the first life carries no number, like the first of a name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ordinal: Option<i64>,
 }
 
 pub(super) async fn obituary(
     transaction: &mut Transaction<'_, Postgres>,
     id: i64,
 ) -> Result<Obituary, Error> {
-    Ok(sqlx::query_as("SELECT player_name AS name, to_char(born_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS born_at, lived_days::text, lifetime_gold::text, friends_count::text, cause AS death_cause FROM graves WHERE player_id = $1")
+    Ok(sqlx::query_as("SELECT player_name AS name, to_char(born_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS born_at, lived_days::text, lifetime_gold::text, friends_count::text, cause AS death_cause, nullif(ordinal, 1) AS ordinal FROM graves WHERE player_id = $1")
         .bind(id).fetch_one(&mut **transaction).await?)
 }
 
@@ -845,7 +871,7 @@ async fn grave(
         .ok_or(Error::Status(StatusCode::NOT_FOUND, "grave not found"))?;
     grave.items = sqlx::query_as("SELECT item_id, name, quantity::text, calories, water, capacity_bonus, asset, coalesce(durability, max_durability) AS durability, max_durability, category, capacity_ml, NULL::int AS fill_ml FROM grave_inventory JOIN item_types ON item_types.id = item_id WHERE grave_id = $1 AND item_id <> 'gold' ORDER BY item_id")
         .bind(id).fetch_all(&mut *transaction).await?;
-    grave.obituary = Some(sqlx::query_as("SELECT player_name AS name, to_char(born_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS born_at, lived_days::text, lifetime_gold::text, friends_count::text, cause AS death_cause FROM graves WHERE id = $1")
+    grave.obituary = Some(sqlx::query_as("SELECT player_name AS name, to_char(born_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS born_at, lived_days::text, lifetime_gold::text, friends_count::text, cause AS death_cause, nullif(ordinal, 1) AS ordinal FROM graves WHERE id = $1")
         .bind(id).fetch_one(&mut *transaction).await?);
     transaction.commit().await?;
     Ok(Json(grave))

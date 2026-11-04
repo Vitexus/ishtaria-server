@@ -44,6 +44,10 @@ pub struct Manifest {
     /// Image below `media/` that clients show when they connect to a server using the disk.
     #[serde(default)]
     pub cover: Option<String>,
+    /// Image (png) below `media/` that the client's loading bar draws at its current value, instead of the
+    /// plain colour difference of the engine.
+    #[serde(default)]
+    pub loading_marker: Option<String>,
     /// Track id from `music/*.yaml` played once while the cover is shown (logo jingle).
     #[serde(default)]
     pub cover_music: Option<String>,
@@ -62,9 +66,21 @@ pub struct Manifest {
     /// `player_character`.
     #[serde(default)]
     pub player_body: Option<PlayerBody>,
+    /// How clients write the number of a life under one login on a memorial (`II` after a ruler's name): `roman`
+    /// (the engine default when absent) or `sumerian` (cuneiform numerals, which need `ordinal_font`).
+    #[serde(default)]
+    pub ordinal_numerals: Option<String>,
+    /// A font below `media/fonts/` with the glyphs of those numerals; clients fetch it from the disk.
+    #[serde(default)]
+    pub ordinal_font: Option<String>,
     /// The ground set clients draw the land with, one of `GROUND_SETS` (the default ground when absent).
     #[serde(default)]
     pub ground: Option<String>,
+    /// Which ground layers each land biome (and the beach and the scree) is drawn with: the biome name (`lowland`,
+    /// `grassland`, `temperate_forest`, `mountain`, `polar`), `beach` or `scree` to one to three names of
+    /// `GROUND_LAYERS` (base, alternate and accent ground). Biomes left out keep the layers of the `ground` set.
+    #[serde(default)]
+    pub ground_layers: Option<std::collections::BTreeMap<String, Vec<String>>>,
     /// When and on which kind of planet the story happens: the tilt of the axis, the turn of the planet and the
     /// precession of the stars. Absent, the sky of today's Earth.
     #[serde(default)]
@@ -115,6 +131,39 @@ pub const MAX_HOUSE_STYLES: usize = 16;
 /// The ground sets the client has textures for (`ground` of the manifest).
 pub const GROUND_SETS: [&str; 1] = ["alluvial"];
 
+/// The ground layers the client has textures for (Poly Haven, CC0, `assets/terrain/`), named by their folder.
+pub const GROUND_LAYERS: [&str; 18] = [
+    "grass_ground",
+    "forest_ground_06",
+    "gravelly_sand",
+    "gravel_ground_01",
+    "gray_rocks",
+    "grass_path_2",
+    "dry_mud_field_001",
+    "aerial_sand",
+    "dirt_aerial_03",
+    "mud_cracked_dry_03",
+    "brown_mud_leaves_01",
+    "forest_leaves_02",
+    "dry_ground_01",
+    "red_laterite_soil_stones",
+    "snow_02",
+    "rocky_terrain_02",
+    "coast_sand_rocks_02",
+    "grass_path_3",
+];
+
+/// The keys of `ground_layers`: the land biomes, and the beach sand and the scree below cliffs.
+pub const GROUND_LAYER_KEYS: [&str; 7] = [
+    "lowland",
+    "grassland",
+    "temperate_forest",
+    "mountain",
+    "polar",
+    "beach",
+    "scree",
+];
+
 /// The sky of a disk's world (manifest `astronomy`). Every field is optional and defaults to today's Earth.
 #[derive(Clone, Copy, Debug, Default, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +209,10 @@ pub struct Building {
     /// 0 A.D. do not share one floor level, so a disk sets it for each model it lists.
     #[serde(default)]
     pub sink_m: Option<f64>,
+    /// A thing that lies on the ground and is walked over (a tilled field): it blocks nothing and stands at the height of
+    /// the ground under its middle, sunk by `sink_m` (default 0), not on the lowest ground of its plot.
+    #[serde(default)]
+    pub passable: bool,
 }
 
 /// A footpath a disk lays between its places (`trails/<name>.yaml`): the server routes it over the ground leg by leg, from
@@ -182,6 +235,52 @@ pub struct Trail {
     /// laid every 4 m instead of the engine's stepping stones.
     #[serde(default)]
     pub model: Option<String>,
+}
+
+/// A river of the real planet a disk draws (`rivers/<name>.yaml`): a course of points from the source to the mouth, each
+/// `[latitude, longitude, width_m]` (degrees, and the width of the water there), carved into the ground and drawn as
+/// water wherever no landscape patch replaces the ground. The coarse map has rivers a few tens of metres wide at best, so
+/// a great river (the Euphrates, 160 m wide at Uruk) is told here.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct River {
+    pub id: String,
+    pub points: Vec<[f64; 3]>,
+}
+
+/// A `rivers/*.yaml` file: one river, or a list of them (a drainage network is thousands of short rivers).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum RiverFile {
+    One(River),
+    Many(Vec<River>),
+}
+
+/// Most points one river may have, how many rivers and points a disk may tell, and the widest river.
+pub const MAX_RIVER_POINTS: usize = 4000;
+pub const MAX_RIVERS: usize = 6000;
+pub const MAX_RIVER_POINTS_TOTAL: usize = 200_000;
+pub const MAX_RIVER_WIDTH_M: f64 = 400.0;
+
+impl River {
+    /// The unit directions of the course, in the frame of `Geo::direction`.
+    pub fn directions(&self) -> Vec<[f64; 3]> {
+        self.points
+            .iter()
+            .map(|[latitude, longitude, _]| {
+                Geo {
+                    latitude_deg: *latitude,
+                    longitude_deg: *longitude,
+                }
+                .direction()
+            })
+            .collect()
+    }
+
+    /// The width of the water at each point, in metres.
+    pub fn widths(&self) -> Vec<f64> {
+        self.points.iter().map(|point| point[2]).collect()
+    }
 }
 
 /// Most places one trail may pass.
@@ -636,6 +735,9 @@ pub struct Effect {
     /// Tell the player of places (qualified on load): from then on they stay on the map and the compass, like the
     /// places of begun quests. An elder who names where the tablets of a legend lie.
     pub reveal_places: Option<Vec<String>>,
+    /// Easter egg: a sky ship of the disk's `sky_flyers.yaml` (its id) flies low over the player, who earns the ship's
+    /// achievement the first time.
+    pub sky_ship: Option<String>,
 }
 
 /// A short piece of knowledge a character tells about itself or its trade (`knowledge.yaml`), shown with one
@@ -695,6 +797,40 @@ fn story_category() -> String {
 /// Steam API name that cannot be mistaken for another (`achievements::steam_api_name`).
 pub fn is_achievement_id(text: &str) -> bool {
     is_id(text, 40) && !text.contains("__") && !text.starts_with('_') && !text.ends_with('_')
+}
+
+/// Flights of sky ships between cities (`sky_flyers.yaml` at the disk root): scenery only, drawn by clients from the
+/// schedule of `GET /story/sky_flights`. Nothing about a flight is stored or changes any state.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkyFlyers {
+    /// Seconds between flights: one flight per slot of this length, at a seeded moment of it.
+    pub interval_s: u32,
+    /// Seconds a flight takes from city to city.
+    pub duration_s: u32,
+    /// Height of the flight above the planet's surface, metres.
+    pub altitude_m: f64,
+    /// Places (local ids, qualified when composed) the ships fly between.
+    pub cities: Vec<String>,
+    pub ships: Vec<SkyShip>,
+}
+
+/// One kind of sky ship.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkyShip {
+    pub id: String,
+    /// `.glb` under `media/` (the composed story keeps `<disk>/<path>`); its front is +Z.
+    pub model: String,
+    /// Size factor clients draw it at.
+    #[serde(default = "one")]
+    pub scale: f64,
+    /// Achievement (id of `achievements.yaml`) earned by the player a character shows this ship to.
+    pub achievement: Option<String>,
+}
+
+fn one() -> f64 {
+    1.0
 }
 
 /// Hidden animation unlock for an NPC (Easter egg). Conditions are evaluated server-side.
@@ -888,6 +1024,8 @@ pub fn media_type(path: &str) -> Option<&'static str> {
         "ogg" => Some("audio/ogg"),
         "glb" => Some("model/gltf-binary"),
         "pgm" => Some("image/x-portable-graymap"),
+        "ttf" => Some("font/ttf"),
+        "otf" => Some("font/otf"),
         _ => None,
     }
 }
@@ -1006,6 +1144,8 @@ pub struct Disk {
     pub music: Vec<Music>,
     /// Optional Easter-egg unlocks (`easter_eggs.yaml` at the disk root).
     pub easter_eggs: Vec<EasterEgg>,
+    /// Sky-ship flights between cities (`sky_flyers.yaml` at the disk root).
+    pub sky_flyers: Option<SkyFlyers>,
     /// Knowledge cards of the characters (`knowledge.yaml` at the disk root).
     pub knowledge: Vec<KnowledgeCard>,
     /// Achievements of the disk (`achievements.yaml` at the disk root).
@@ -1014,6 +1154,8 @@ pub struct Disk {
     pub buildings: Vec<Buildings>,
     /// Footpaths between the places of the disk (`trails/*.yaml`).
     pub trails: Vec<Trail>,
+    /// Rivers of the real planet (`rivers/*.yaml`).
+    pub rivers: Vec<River>,
     /// Media files (path below the disk -> absolute file) with their sha256.
     pub media: BTreeMap<String, (PathBuf, String)>,
     /// Spoken lines: (language, local text key) -> media path, from `media/voice/<language>/<key>.ogg`.
@@ -1174,6 +1316,61 @@ impl Disk {
                 Vec::new()
             }
         };
+        let sky_flyers = {
+            let path = dir.join("sky_flyers.yaml");
+            if path.is_file() {
+                count += 1;
+                ensure!(count <= MAX_FILES, "too many files in the datadisk");
+                let text = read_limited(&path, &mut hasher, dir)?;
+                let flyers: SkyFlyers = parse(&path, &text)?;
+                ensure!(
+                    (600..=86_400).contains(&flyers.interval_s),
+                    "sky flyers: interval_s must be 600 to 86400"
+                );
+                ensure!(
+                    flyers.duration_s >= 10 && flyers.duration_s <= flyers.interval_s / 2,
+                    "sky flyers: duration_s must be 10 to half of the interval"
+                );
+                ensure!(
+                    flyers.altitude_m.is_finite()
+                        && (100.0..=20_000.0).contains(&flyers.altitude_m),
+                    "sky flyers: altitude_m must be 100 to 20000"
+                );
+                ensure!(
+                    (2..=16).contains(&flyers.cities.len())
+                        && flyers.cities.iter().all(|city| is_id(city, 48)),
+                    "sky flyers: 2 to 16 valid city ids"
+                );
+                ensure!(
+                    (1..=8).contains(&flyers.ships.len()),
+                    "sky flyers: 1 to 8 ships"
+                );
+                for ship in &flyers.ships {
+                    ensure!(is_id(&ship.id, 48), "invalid sky ship id {}", ship.id);
+                    ensure!(
+                        ship.model.starts_with("media/")
+                            && ship.model.ends_with(".glb")
+                            && !ship.model.contains(".."),
+                        "invalid sky ship model {}",
+                        ship.model
+                    );
+                    if let Some(achievement) = &ship.achievement {
+                        ensure!(
+                            is_achievement_id(achievement),
+                            "invalid sky ship achievement {achievement}"
+                        );
+                    }
+                    ensure!(
+                        ship.scale.is_finite() && (0.1..=100.0).contains(&ship.scale),
+                        "invalid sky ship scale {}",
+                        ship.id
+                    );
+                }
+                Some(flyers)
+            } else {
+                None
+            }
+        };
         let knowledge = {
             let path = dir.join("knowledge.yaml");
             if path.is_file() {
@@ -1244,6 +1441,33 @@ impl Disk {
             }
             all
         };
+        let rivers = {
+            let folder = dir.join("rivers");
+            let mut files: Vec<PathBuf> = Vec::new();
+            if folder.is_dir() {
+                for entry in fs::read_dir(&folder)? {
+                    let path = entry?.path();
+                    if path
+                        .extension()
+                        .is_some_and(|extension| extension == "yaml")
+                    {
+                        files.push(path);
+                    }
+                }
+                files.sort();
+            }
+            let mut all = Vec::new();
+            for path in files {
+                count += 1;
+                ensure!(count <= MAX_FILES, "too many files in the datadisk");
+                let text = read_limited(&path, &mut hasher, dir)?;
+                match parse::<RiverFile>(&path, &text)? {
+                    RiverFile::One(river) => all.push(river),
+                    RiverFile::Many(rivers) => all.extend(rivers),
+                }
+            }
+            all
+        };
         let mut strings = BTreeMap::new();
         for language in &manifest.languages {
             ensure!(
@@ -1288,7 +1512,14 @@ impl Disk {
         wanted.extend(music.iter().map(|m| m.file.as_str()));
         wanted.extend(knowledge.iter().map(|card| card.image.as_str()));
         wanted.extend(manifest.cover.as_deref());
+        wanted.extend(manifest.loading_marker.as_deref());
         wanted.extend(manifest.player_model.as_deref());
+        wanted.extend(manifest.ordinal_font.as_deref());
+        wanted.extend(
+            sky_flyers
+                .iter()
+                .flat_map(|flyers| flyers.ships.iter().map(|ship| ship.model.as_str())),
+        );
         wanted.extend(placeable_media.iter().map(String::as_str));
         let world_files: Vec<&str> = manifest
             .world
@@ -1382,10 +1613,12 @@ impl Disk {
             lore,
             music,
             easter_eggs,
+            sky_flyers,
             knowledge,
             achievements,
             buildings,
             trails,
+            rivers,
             media,
             voices,
             strings,
@@ -1418,6 +1651,15 @@ impl Disk {
 
     fn check(&self, allow_draft: bool) -> Result<()> {
         let id = &self.manifest.id;
+        if let Some(flyers) = &self.sky_flyers {
+            for ship in &flyers.ships {
+                ensure!(
+                    self.media.contains_key(&ship.model),
+                    "{id}: sky ship model {} is missing from the media list",
+                    ship.model
+                );
+            }
+        }
         if let Some(world) = &self.manifest.world {
             let heightmap = world_pgm_header(
                 self.media
@@ -1796,6 +2038,28 @@ impl Disk {
                 );
             }
         }
+        ensure!(
+            self.rivers.len() <= MAX_RIVERS
+                && self
+                    .rivers
+                    .iter()
+                    .map(|river| river.points.len())
+                    .sum::<usize>()
+                    <= MAX_RIVER_POINTS_TOTAL,
+            "{id}: too many rivers"
+        );
+        for river in &self.rivers {
+            ensure!(
+                (2..=MAX_RIVER_POINTS).contains(&river.points.len())
+                    && river.points.iter().all(|[latitude, longitude, width]| {
+                        latitude.abs() <= 90.0
+                            && longitude.abs() <= 180.0
+                            && (10.0..=MAX_RIVER_WIDTH_M).contains(width)
+                    }),
+                "{id}: river {} has bad points or width",
+                river.id
+            );
+        }
         for trail in &self.trails {
             ensure!(
                 (2..=MAX_TRAIL_PLACES).contains(&trail.places.len()),
@@ -1941,6 +2205,12 @@ impl Disk {
                 "{id}: cover {cover} must be a png or jpg"
             );
         }
+        if let Some(marker) = &self.manifest.loading_marker {
+            ensure!(
+                marker.ends_with(".png"),
+                "{id}: loading_marker {marker} must be a png"
+            );
+        }
         for (label, track) in [
             ("cover_music", self.manifest.cover_music.as_deref()),
             ("ambient_music", self.manifest.ambient_music.as_deref()),
@@ -2025,6 +2295,24 @@ impl Disk {
                 "{id}: ground {ground} is not a ground set of the client (one of {GROUND_SETS:?})"
             );
         }
+        if let Some(layers) = &self.manifest.ground_layers {
+            for (key, names) in layers {
+                ensure!(
+                    GROUND_LAYER_KEYS.contains(&key.as_str()),
+                    "{id}: ground_layers key {key} is not one of {GROUND_LAYER_KEYS:?}"
+                );
+                ensure!(
+                    (1..=3).contains(&names.len()),
+                    "{id}: ground_layers {key} needs one to three layers"
+                );
+                for name in names {
+                    ensure!(
+                        GROUND_LAYERS.contains(&name.as_str()),
+                        "{id}: ground layer {name} is not one of the client's {GROUND_LAYERS:?}"
+                    );
+                }
+            }
+        }
         if let Some(sky) = &self.manifest.astronomy {
             ensure!(
                 sky.year
@@ -2050,6 +2338,23 @@ impl Disk {
             ensure!(
                 (0.5..=8.0).contains(&body.height_m) && (1.0..=20.0).contains(&body.toughness),
                 "{id}: player_body height_m must be 0.5..8 and toughness 1..20"
+            );
+        }
+        if let Some(numerals) = &self.manifest.ordinal_numerals {
+            ensure!(
+                matches!(numerals.as_str(), "roman" | "sumerian"),
+                "{id}: ordinal_numerals must be roman or sumerian"
+            );
+            ensure!(
+                numerals != "sumerian" || self.manifest.ordinal_font.is_some(),
+                "{id}: sumerian ordinal_numerals need an ordinal_font with cuneiform glyphs"
+            );
+        }
+        if let Some(font) = &self.manifest.ordinal_font {
+            ensure!(
+                font.starts_with("media/fonts/")
+                    && (font.ends_with(".ttf") || font.ends_with(".otf")),
+                "{id}: ordinal_font {font} must be a .ttf or .otf below media/fonts/"
             );
         }
         if let Some(model) = &self.manifest.player_model {
@@ -2392,6 +2697,7 @@ fn check_effects(
             effect.set_playable.is_some(),
             effect.teleport_place.is_some(),
             effect.reveal_places.is_some(),
+            effect.sky_ship.is_some(),
         ]
         .iter()
         .filter(|set| **set)
@@ -2456,6 +2762,9 @@ fn check_effects(
                 is_id(place, 48) || place.contains(':'),
                 "invalid teleport_place {place}"
             );
+        }
+        if let Some(ship) = &effect.sky_ship {
+            ensure!(is_id(ship, 48), "invalid sky_ship {ship}");
         }
         if let Some(places) = &effect.reveal_places {
             ensure!(

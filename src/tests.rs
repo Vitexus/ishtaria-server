@@ -1150,6 +1150,63 @@ async fn survival_eating_starvation_and_graves(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
+async fn reused_login_counts_its_lives_on_the_memorial(pool: PgPool) {
+    let _auth_test = AUTH_TESTS.acquire().await.unwrap();
+    let world_id = initialize_spawn_world(&pool).await;
+    let state = AppState {
+        pool: pool.clone(),
+        world_id,
+    };
+    let router = app(state.clone());
+    for life in 1..=2_i64 {
+        let token = create_session(&router, "Heir").await;
+        let profile =
+            response_json(player_request(&router, "GET", "/players/me", "", &token).await).await;
+        assert_eq!(profile["ordinal"].as_i64().unwrap_or(1), life);
+        let ordinal: i64 = sqlx::query_scalar("SELECT ordinal FROM players WHERE died_at IS NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(ordinal, life);
+        sqlx::query(
+            "UPDATE players SET last_ate_at = now() - interval '7 days' WHERE died_at IS NULL",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        survival::settle_world(&state).await.unwrap();
+        let response = player_request(
+            &router,
+            "POST",
+            "/players/login",
+            r#"{"username":"Heir","password":"test-password"}"#,
+            "",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::GONE);
+        let obituary: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        // The first life carries no number; later ones do.
+        if life == 1 {
+            assert!(obituary["obituary"].get("ordinal").is_none());
+        } else {
+            assert_eq!(obituary["obituary"]["ordinal"], 2);
+        }
+    }
+    let graves: Vec<i64> = sqlx::query_scalar("SELECT ordinal FROM graves ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(graves, [1, 2]);
+    assert!(sqlx::query("UPDATE graves SET ordinal = 1")
+        .execute(&pool)
+        .await
+        .is_err());
+}
+
+#[sqlx::test]
+#[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
 async fn survival_damage_and_concurrent_loot(pool: PgPool) {
     let _auth_test = AUTH_TESTS.acquire().await.unwrap();
     let world_id = initialize_spawn_world(&pool).await;

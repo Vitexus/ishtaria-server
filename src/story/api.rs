@@ -44,6 +44,7 @@ pub fn routes() -> Router<AppState> {
         .route("/story/places/{place_id}/read", post(read_place))
         .route("/story/quests", get(quests))
         .route("/story/markers", get(markers))
+        .route("/story/sky_flights", get(sky_flights))
         .layer(DefaultBodyLimit::max(1024))
         .route("/story/strings", get(strings))
         .route("/story/media/{disk}/{*path}", get(media))
@@ -229,6 +230,26 @@ async fn apply_ops(
             }
             Op::TeleportPlace(place) => {
                 super::checkpoint::teleport_to_place(tx, story, player_id, place).await?;
+            }
+            Op::SkyShip(ship) => {
+                let ship = story
+                    .story
+                    .sky_flyers
+                    .as_ref()
+                    .and_then(|flyers| flyers.ships.iter().find(|s| s.id == *ship))
+                    .ok_or_else(|| status(StatusCode::INTERNAL_SERVER_ERROR, "unknown sky ship"))?;
+                if let Some(achievement) = &ship.achievement {
+                    crate::achievements::unlock_disk(tx, &story.story, player_id, achievement)
+                        .await?;
+                }
+                // The client draws the flight over the player; nothing about it is stored.
+                sqlx::query(
+                    "INSERT INTO player_events (recipient_id, kind, subject, expires_at) VALUES ($1, 'sky_flyover', $2, now() + interval '60 seconds')",
+                )
+                .bind(player_id)
+                .bind(&ship.id)
+                .execute(&mut **tx)
+                .await?;
             }
             Op::Reveal(places) => {
                 // Learned by word of mouth, not from a quest: `quest_id` names where the player heard of it.
@@ -849,6 +870,20 @@ pub(super) struct Marker {
 
 /// The item that reveals markers for quests not yet begun (Faust / Endland intro).
 const GUIDE_ITEM: &str = "aetherglass";
+
+/// The sky-ship flights of the world's datadisk now and in the next hour: scenery for clients, the same for everyone.
+async fn sky_flights(State(state): State<AppState>) -> Result<Json<super::sky::Sky>, Error> {
+    let story = story_of(&state).await?;
+    let Some(flyers) = &story.story.sky_flyers else {
+        return Ok(Json(super::sky::Sky::default()));
+    };
+    Ok(Json(super::sky::Sky {
+        ships: flyers.ships.iter().map(super::sky::Ship::from).collect(),
+        flights: super::sky::flights(flyers, crate::movement::unix_now_ms(), |city| {
+            story.sites.get(city).map(world::site_position)
+        }),
+    }))
+}
 
 /// Markers of the player's quests. Active quest guides always show (the Gilgamesh hunter
 /// never meets Faust). Markers for quests not yet started need the aetherglass.

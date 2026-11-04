@@ -35,7 +35,7 @@ const WALK_SPEED: f64 = 4.0;
 const RUN_SPEED: f64 = 6.0;
 /// A character in water swims at this share of the walking speed and cannot run or jump.
 const SWIM_SPEED_FACTOR: f64 = 0.4;
-/// Water this deep (metres) reaches a character's chest: up to it they wade on the bed, beyond it they swim and drown.
+/// Water this deep (metres) reaches a character's chest: up to it they wade on the bed, beyond it they swim (slowly, using stamina; they drown only when it is low).
 pub(super) const WADE_DEPTH_M: f64 = 1.2;
 /// Wading is slowed by the resistance of the water; swimming is slower still.
 const WADE_SPEED_FACTOR: f64 = 0.6;
@@ -1160,6 +1160,160 @@ impl Rivers {
     }
 }
 
+/// A river of a datadisk's real planet (`rivers/*.yaml`) as the server and the client carve it: a polyline of great-circle
+/// segments of `width_m` water, in the same channel profile as the coarse rivers.
+struct DiskRiverLine {
+    id: String,
+    points: Vec<[f64; 3]>,
+    widths_m: Vec<f64>,
+}
+
+#[derive(Default)]
+struct DiskRivers {
+    lines: Vec<DiskRiverLine>,
+    segments: Vec<RiverSegment>,
+    /// Segments by the grid cell they pass through (`river_bucket`).
+    cells: HashMap<usize, Vec<usize>>,
+    /// The widest reach of a segment: how far a probe must look for a channel over a cell edge.
+    widest_reach_m: f64,
+}
+
+static DISK_RIVERS: std::sync::RwLock<Option<DiskRivers>> = std::sync::RwLock::new(None);
+
+/// Cells of the grid that files the rivers of a disk: a cube-face grid about 5 km across.
+const RIVER_GRID: usize = 2048;
+/// The water of a river is this part of its carved reach wide (the channel is deeper than `RIVER_LEVEL_M` inside it).
+const DISK_RIVER_WATER_SHARE: f64 = 1.3;
+
+fn river_bucket(direction: [f64; 3]) -> usize {
+    let (face, horizontal, vertical) = coordinates(direction);
+    let cell = |value: f64| ((value * RIVER_GRID as f64) as usize).min(RIVER_GRID - 1);
+    face * RIVER_GRID * RIVER_GRID + cell(vertical) * RIVER_GRID + cell(horizontal)
+}
+
+/// Installs the rivers of the story's disks (id, unit directions of the course, width of the water at each point).
+pub(super) fn set_rivers(_key: String, rivers: Vec<(String, Vec<[f64; 3]>, Vec<f64>)>) {
+    let mut built = DiskRivers::default();
+    for (id, points, widths_m) in rivers {
+        for (index, pair) in points.windows(2).enumerate() {
+            let reach_m = (widths_m[index] + widths_m[index + 1]) / 2.0 / DISK_RIVER_WATER_SHARE;
+            built.widest_reach_m = built.widest_reach_m.max(reach_m);
+            let segment = built.segments.len();
+            let samples = (length(std::array::from_fn(|axis| pair[1][axis] - pair[0][axis]))
+                * RADIUS
+                / (RIVER_INDEX_STEP_M / 2.0))
+                .ceil()
+                .max(1.0) as usize;
+            for step in 0..=samples {
+                let t = step as f64 / samples as f64;
+                let point = unit(std::array::from_fn(|axis| {
+                    pair[0][axis] + (pair[1][axis] - pair[0][axis]) * t
+                }));
+                let listed = built.cells.entry(river_bucket(point)).or_default();
+                if listed.last() != Some(&segment) {
+                    listed.push(segment);
+                }
+            }
+            built.segments.push(RiverSegment {
+                from: pair[0],
+                to: pair[1],
+                reach_m,
+            });
+        }
+        built.lines.push(DiskRiverLine {
+            id,
+            points,
+            widths_m,
+        });
+    }
+    if let Ok(mut stored) = DISK_RIVERS.write() {
+        *stored = (!built.lines.is_empty()).then_some(built);
+    }
+}
+
+/// A river as announced to clients in `GET /world/rivers`: `[latitude, longitude, width_m]` of each point of the course
+/// (degrees to five places, about a metre).
+#[derive(Clone, Debug, serde::Serialize)]
+pub(super) struct RiverInfo {
+    pub id: String,
+    pub points: Vec<[f64; 3]>,
+}
+
+pub(super) fn announced_rivers() -> Vec<RiverInfo> {
+    let Ok(stored) = DISK_RIVERS.read() else {
+        return Vec::new();
+    };
+    let round = |value: f64| (value * 1e5).round() / 1e5;
+    stored.as_ref().map_or_else(Vec::new, |rivers| {
+        rivers
+            .lines
+            .iter()
+            .map(|line| RiverInfo {
+                id: line.id.clone(),
+                points: line
+                    .points
+                    .iter()
+                    .zip(&line.widths_m)
+                    .map(|(point, width)| {
+                        [
+                            round(point[1].clamp(-1.0, 1.0).asin().to_degrees()),
+                            round((-point[2]).atan2(point[0]).to_degrees()),
+                            width.round(),
+                        ]
+                    })
+                    .collect(),
+            })
+            .collect()
+    })
+}
+
+/// Metres the rivers of the disks carve into the ground in a direction (0 away from every river).
+fn disk_river_carve(direction: [f64; 3]) -> f64 {
+    let Ok(stored) = DISK_RIVERS.read() else {
+        return 0.0;
+    };
+    let Some(rivers) = stored.as_ref() else {
+        return 0.0;
+    };
+    let reference = if direction[1].abs() < 0.9 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let east = unit(cross(reference, direction));
+    let north = cross(direction, east);
+    let probe = rivers.widest_reach_m / RADIUS;
+    let mut cells = vec![river_bucket(direction)];
+    for (axis, sign) in [(east, 1.0), (east, -1.0), (north, 1.0), (north, -1.0)] {
+        let cell = river_bucket(unit(std::array::from_fn(|index| {
+            direction[index] + axis[index] * probe * sign
+        })));
+        if !cells.contains(&cell) {
+            cells.push(cell);
+        }
+    }
+    let mut deepest: f64 = 0.0;
+    for cell in cells {
+        for &index in rivers.cells.get(&cell).map(Vec::as_slice).unwrap_or(&[]) {
+            let segment = &rivers.segments[index];
+            let along: [f64; 3] = std::array::from_fn(|axis| segment.to[axis] - segment.from[axis]);
+            let offset: [f64; 3] = std::array::from_fn(|axis| direction[axis] - segment.from[axis]);
+            let t = (dot(offset, along) / dot(along, along)).clamp(0.0, 1.0);
+            let nearest = unit(std::array::from_fn(|axis| {
+                segment.from[axis] + along[axis] * t
+            }));
+            let distance =
+                length(std::array::from_fn(|axis| direction[axis] - nearest[axis])) * RADIUS;
+            if distance >= segment.reach_m {
+                continue;
+            }
+            let x = distance / segment.reach_m;
+            deepest = deepest.max(RIVER_BED_M * (1.0 - x * x * (3.0 - 2.0 * x)));
+        }
+    }
+    deepest
+}
+
 /// The index of the environment cell under a direction.
 fn environment_cell(environment: &environment::Environment, direction: [f64; 3]) -> usize {
     let (face, horizontal, vertical) = coordinates(direction);
@@ -1332,8 +1486,31 @@ struct ObjectDescriptor {
     wander: Option<Vec<[f64; 4]>>,
 }
 
+/// Cells (about 17 m) the far ring of `/world/objects` reaches from the player: static scenery beyond the near list,
+/// drawn by the client as small trees and rocks up to the edge of its detail disk, so the horizon is not bare.
+const FAR_SPAN: i32 = 42;
+/// Most objects of the far ring.
+const FAR_MAX: usize = 1800;
+
+/// A tree, rock or shrub of the far ring: only what is needed to draw it.
+#[derive(Serialize)]
+struct FarObject {
+    model: String,
+    position: [f64; 3],
+    scale_m: f64,
+    yaw: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    ground_offset_m: f64,
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
 #[derive(Serialize)]
 pub(super) struct ObjectRegion {
+    /// Scenery beyond `objects`, nearest first, without collision, harvest or identity.
+    far: Vec<FarObject>,
     version: u32,
     heightmap_sha256: String,
     seed: String,
@@ -1570,6 +1747,11 @@ impl WalkingTerrain {
                 std::array::from_fn(|axis| position[axis] + east[axis] * dx + north[axis] * dz);
             let direction = point.map(|value| value / length(point));
             if patch_water(direction).is_some() {
+                return WaterNear::Fresh;
+            }
+            // Water a character swims in is water they can drink: a carved river or canal of a datadisk runs through
+            // cells whose biome says steppe, and `water_depth` (what decides swimming) knows it where the biome does not.
+            if !self.is_sea(direction) && self.water_depth(direction) > 0.0 {
                 return WaterNear::Fresh;
             }
             // Standing on a dry tell/patch: the coarse sea or river under it is not drinkable here.
@@ -1842,7 +2024,7 @@ impl WalkingTerrain {
 
     #[cfg(test)]
     /// Whether a character standing at `direction` is out of their depth in water (the sea, a lake, a river, a pond):
-    /// swimming, slowly, and drowning until they reach a shore where the water is shallow again.
+    /// swimming, slowly (no running, no jumping), until they reach a shore where the water is shallow again.
     pub(super) fn in_water(&self, direction: [f64; 3]) -> bool {
         self.in_water_for(direction, 1.0)
     }
@@ -1910,6 +2092,7 @@ impl WalkingTerrain {
         self.rivers
             .get_or_init(|| Rivers::build(&self.environment))
             .carve(&self.environment, direction)
+            .max(disk_river_carve(direction))
     }
 
     /// The ground height where a character can stand or wade: dry land and water up to their chest.
@@ -3277,12 +3460,28 @@ pub(super) async fn world_objects(
     let terrain = terrain(&state).await?;
     let worker = terrain.clone();
     let now_ms = unix_now_ms();
-    let objects = tokio::task::spawn_blocking(move || {
+    let (objects, far) = tokio::task::spawn_blocking(move || {
         let mut objects = worker.objects(point, 16);
-        objects.truncate(512 - 64 - FARM_ANIMALS_MAX);
+        let near_limit = 512 - 64 - FARM_ANIMALS_MAX;
+        let mut far: Vec<FarObject> = worker
+            .objects(point, FAR_SPAN)
+            .into_iter()
+            .skip(objects.len().min(near_limit))
+            .filter(|object| object.collision_radius_m > 0.0 || object.scale_m >= 1.5)
+            .take(FAR_MAX)
+            .map(|object| FarObject {
+                model: object.model,
+                position: object.position.map(|value| (value * 100.0).round() / 100.0),
+                scale_m: (object.scale_m * 100.0).round() / 100.0,
+                yaw: (object.yaw * 100.0).round() / 100.0,
+                ground_offset_m: object.ground_offset_m,
+            })
+            .collect();
+        far.shrink_to_fit();
+        objects.truncate(near_limit);
         let objects: Vec<_> = objects.into_iter().map(|object| (object, None)).collect();
         let animals = worker.moving_animals(point, now_ms);
-        objects.into_iter().chain(animals).collect::<Vec<_>>()
+        (objects.into_iter().chain(animals).collect::<Vec<_>>(), far)
     })
     .await
     .map_err(|_| {
@@ -3291,6 +3490,7 @@ pub(super) async fn world_objects(
     let memorials = super::survival::memorials(&state, unit(point)).await?;
     let npcs = super::story::world::npcs_near(&state, point, player_id).await;
     Ok(Json(ObjectRegion {
+        far,
         memorials,
         npcs,
         areas: super::story::world::areas_near(&state, point).await,
@@ -3454,7 +3654,17 @@ pub(super) async fn walk(
             transaction.commit().await?;
             return Err(players::Error::Obituary(Box::new(notice)));
         }
-        // Whoever is in water, moving or not, is drowning until they reach a dry shore.
+        // Whoever is in deep water swims slowly (the step below). Swimming costs stamina when moving and no health;
+        // only a character whose stamina is low drowns (decided by the project owner).
+        if vehicle.is_none()
+            && !position.airborne
+            && terrain.in_water_for(unit([position.x, position.y, position.z]), intent.scale())
+            && super::survival::swim(&state, &mut transaction, player_id, seconds, moving).await?
+        {
+            let notice = super::survival::obituary(&mut transaction, player_id).await?;
+            transaction.commit().await?;
+            return Err(players::Error::Obituary(Box::new(notice)));
+        }
         if let Some((id, _)) = &vehicle {
             if moving {
                 super::vehicles::remember(
@@ -3466,15 +3676,6 @@ pub(super) async fn walk(
                 )
                 .await?;
             }
-        }
-        if vehicle.is_none()
-            && !position.airborne
-            && terrain.in_water_for(unit([position.x, position.y, position.z]), intent.scale())
-            && super::survival::drown(&state, &mut transaction, player_id, seconds).await?
-        {
-            let notice = super::survival::obituary(&mut transaction, player_id).await?;
-            transaction.commit().await?;
-            return Err(players::Error::Obituary(Box::new(notice)));
         }
         if moving
             && vehicle.is_none()
@@ -4863,6 +5064,43 @@ mod tests {
         assert_eq!(terrain.water_near([0.0; 3], 6.0), WaterNear::None);
     }
 
+    #[test]
+    fn a_canal_a_character_swims_in_gives_fresh_water_to_drink() {
+        let _serial = serial();
+        let at = |latitude: f64, longitude: f64| {
+            let (latitude, longitude) = (latitude.to_radians(), longitude.to_radians());
+            [
+                latitude.cos() * longitude.cos(),
+                latitude.sin(),
+                -latitude.cos() * longitude.sin(),
+            ]
+        };
+        // A canal 100 m wide through a dry (steppe) cell: the carved channel of a river of a datadisk.
+        set_rivers(
+            "test-canal".to_owned(),
+            vec![(
+                "test-canal:canal".to_owned(),
+                vec![at(-0.01, 0.0), at(0.0, 0.0), at(0.01, 0.0)],
+                vec![100.0; 3],
+            )],
+        );
+        let terrain = terrain_with(80, 4, Vec::new());
+        let middle = at(0.0, 0.0);
+        let position = middle.map(|value| value * RADIUS);
+        // The character swims here ...
+        assert!(
+            terrain.water_depth(middle) > 0.0,
+            "the canal holds water: {}",
+            terrain.water_depth(middle)
+        );
+        // ... so there is water to drink as well, not "no fresh water within reach".
+        assert_eq!(terrain.water_near(position, 6.0), WaterNear::Fresh);
+        // Dry steppe away from the canal still gives none.
+        let away = at(0.0, 0.01).map(|value| value * RADIUS);
+        assert_eq!(terrain.water_near(away, 6.0), WaterNear::None);
+        set_rivers("test-canal".to_owned(), Vec::new());
+    }
+
     fn catalog_with_fauna() -> Vec<ObjectKind> {
         let mut catalog = object_catalog().unwrap();
         catalog.extend(fauna_catalog().unwrap());
@@ -5866,5 +6104,40 @@ mod tests {
             .step_at_speed(here, [0.0, 0.0, 1.0], 0.15, 4.0)
             .expect("walk at hunter spawn");
         assert!(length(std::array::from_fn(|axis| step[axis] - here[axis])) > 0.1);
+    }
+
+    /// A river of a datadisk is carved along its course and nowhere else, as wide as its water.
+    #[test]
+    fn a_disk_river_is_carved_along_its_course() {
+        let at = |latitude: f64, longitude: f64| {
+            let (latitude, longitude) = (latitude.to_radians(), longitude.to_radians());
+            [
+                latitude.cos() * longitude.cos(),
+                latitude.sin(),
+                -latitude.cos() * longitude.sin(),
+            ]
+        };
+        // A river 100 m wide in the far north-east, where no other test stands.
+        set_rivers(
+            "test".to_owned(),
+            vec![(
+                "test:river".to_owned(),
+                vec![at(70.0, 100.0), at(70.2, 100.0), at(70.4, 100.0)],
+                vec![100.0; 3],
+            )],
+        );
+        let middle = disk_river_carve(at(70.1, 100.0));
+        assert!((middle - RIVER_BED_M).abs() < 1e-6, "{middle}");
+        assert_eq!(announced_rivers().len(), 1);
+        let metres_to_degrees = 360.0 / (2.0 * std::f64::consts::PI * RADIUS) * 1.0;
+        let lon_step = metres_to_degrees / 70.1_f64.to_radians().cos();
+        // 30 m from the middle the channel is still deeper than the water level: water; 90 m away: dry ground.
+        assert!(disk_river_carve(at(70.1, 100.0 + 30.0 * lon_step)) > RIVER_LEVEL_M);
+        assert_eq!(disk_river_carve(at(70.1, 100.0 + 90.0 * lon_step)), 0.0);
+        // Beyond the ends there is no river.
+        assert_eq!(disk_river_carve(at(70.6, 100.0)), 0.0);
+        set_rivers("test".to_owned(), Vec::new());
+        assert_eq!(disk_river_carve(at(70.1, 100.0)), 0.0);
+        assert!(announced_rivers().is_empty());
     }
 }

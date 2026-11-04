@@ -51,7 +51,7 @@ fn arc_m(first: [f64; 3], second: [f64; 3]) -> f64 {
 
 /// A waypoint `[time, x, y, z]` of the character standing at `direction` at `time_ms`.
 fn entry(ground: &dyn Ground, time_ms: i64, direction: [f64; 3]) -> [f64; 4] {
-    let metres = RADIUS + ground.height(direction).max(0.0);
+    let metres = RADIUS + ground.level(direction);
     let round = |value: f64| (value * 100.0).round() / 100.0;
     let point = direction.map(|value| round(value * metres));
     [time_ms as f64, point[0], point[1], point[2]]

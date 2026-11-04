@@ -241,6 +241,7 @@ fn styled_house(
         scale: [scale_w, scale_h, scale_d],
         footprint: [width, depth],
         sink_m: style.sink_m,
+        passable: false,
     }
 }
 

@@ -30,6 +30,17 @@ pub trait Ground {
     fn height(&self, direction: [f64; 3]) -> f64;
     /// Open sea in a direction.
     fn is_sea(&self, direction: [f64; 3]) -> bool;
+    /// The height things stand at: the ground, but not below the sea level over the open sea. Dry land below 0 m
+    /// (a landscape patch such as Uruk's floodplain, about -5 m) is real ground, so what stands there stands on it
+    /// instead of hovering at 0 m.
+    fn level(&self, direction: [f64; 3]) -> f64 {
+        let height = self.height(direction);
+        if height < 0.0 && self.is_sea(direction) {
+            0.0
+        } else {
+            height
+        }
+    }
     /// Whether a character walking the straight line from one direction to another would run into a
     /// wall, fence, tree or rock. Walking characters of a datadisk do not make such walks.
     fn blocked(&self, _from: [f64; 3], _to: [f64; 3]) -> bool {
@@ -62,7 +73,7 @@ impl Ground for WalkingTerrain {
     fn on_trail(&self, direction: [f64; 3]) -> bool {
         let unit = crate::movement::unit(direction);
         crate::movement::on_trail(
-            unit.map(|value| value * (crate::movement::RADIUS + self.ground_height(unit).max(0.0))),
+            unit.map(|value| value * (crate::movement::RADIUS + Ground::level(self, unit))),
         )
     }
     fn cache_id(&self) -> usize {

@@ -142,6 +142,39 @@ fn announces_the_cover_of_a_disk_and_rejects_a_missing_one() {
 }
 
 #[test]
+fn announces_the_loading_marker_of_a_disk_and_rejects_a_wrong_one() {
+    let a = scratch("marker");
+    base(
+        &a,
+        "marked",
+        "1.0.0",
+        "loading_marker: media/loading/mark.png\n",
+    );
+    assert!(
+        Story::load(std::slice::from_ref(&a), false).is_err(),
+        "a marker that is not shipped must be rejected"
+    );
+    write(&a, "media/loading/mark.png", "png bytes");
+    let story = Story::load(std::slice::from_ref(&a), false).unwrap();
+    assert_eq!(
+        story.infos[0].loading_marker.as_deref(),
+        Some("/story/media/marked/media/loading/mark.png")
+    );
+    let b = scratch("marker-jpg");
+    base(
+        &b,
+        "marked",
+        "1.0.0",
+        "loading_marker: media/loading/mark.jpg\n",
+    );
+    write(&b, "media/loading/mark.jpg", "jpeg bytes");
+    assert!(
+        Story::load(&[b], false).is_err(),
+        "only a png may be a loading marker"
+    );
+}
+
+#[test]
 fn a_disk_may_decide_the_character_of_new_players() {
     let a = scratch("hero");
     base(&a, "heroic", "1.0.0", "player_character: nowhere/nobody\n");
@@ -160,6 +193,38 @@ fn a_disk_may_decide_the_character_of_new_players() {
     assert_eq!(
         story.infos[0].player_character.as_deref(),
         Some("protagonists/criminalMaleA")
+    );
+    // Sumerian numerals need a shipped cuneiform font below media/fonts/; roman needs nothing.
+    let n = scratch("numerals1");
+    base(&n, "counting", "1.0.0", "ordinal_numerals: sumerian\n");
+    assert!(
+        Story::load(std::slice::from_ref(&n), false).is_err(),
+        "no font"
+    );
+    let n2 = scratch("numerals2");
+    base(
+        &n2,
+        "counting",
+        "1.0.0",
+        "ordinal_numerals: sumerian\nordinal_font: media/fonts/cuneiform.ttf\n",
+    );
+    assert!(
+        Story::load(std::slice::from_ref(&n2), false).is_err(),
+        "font not shipped"
+    );
+    write(&n2, "media/fonts/cuneiform.ttf", "font");
+    let story = Story::load(std::slice::from_ref(&n2), false).unwrap();
+    assert_eq!(story.infos[0].ordinal_numerals.as_deref(), Some("sumerian"));
+    assert!(story.infos[0]
+        .ordinal_font
+        .as_deref()
+        .unwrap()
+        .ends_with("media/fonts/cuneiform.ttf"));
+    let n3 = scratch("numerals3");
+    base(&n3, "counting", "1.0.0", "ordinal_numerals: klingon\n");
+    assert!(
+        Story::load(std::slice::from_ref(&n3), false).is_err(),
+        "unknown system"
     );
     // A model of the disk replaces the look: it must be shipped, and needs the character it stands for.
     let d = scratch("hero4");
@@ -1780,4 +1845,55 @@ fn write_world_rasters(root: &Path, height: (usize, usize), water: (usize, usize
         if fine { 65535 } else { 255 },
     );
     raster("media/world/water.pgm", water, 255);
+}
+
+#[test]
+fn a_dialogue_may_show_a_sky_ship_that_earns_its_achievement() {
+    let a = scratch("skyship");
+    base(&a, "zeta", "1.0.0", "");
+    write(
+        &a,
+        "places/p.yaml",
+        "- {id: hut, kind: building, name_key: place.hut}\n- {id: tent, kind: building, name_key: place.hut}\n",
+    );
+    write(&a, "media/models/disc.glb", "glTF");
+    write(
+        &a,
+        "achievements.yaml",
+        "- {id: saw_disc, title_key: hi, description_key: bye, icon: foundation_tablet}\n",
+    );
+    write(
+        &a,
+        "sky_flyers.yaml",
+        "interval_s: 3600\nduration_s: 90\naltitude_m: 2500\ncities: [hut, tent]\nships:\n  - {id: disc, model: media/models/disc.glb, scale: 4, achievement: saw_disc}\n",
+    );
+    let with = |effect: &str| {
+        write(
+            &a,
+            "dialogues/hermit.yaml",
+            &format!("id: hermit\nstart: hi\nnodes:\n  hi:\n    text_key: hi\n    choices:\n      - {{text_key: bye, effects: [{effect}]}}\n"),
+        );
+        Story::load(std::slice::from_ref(&a), false)
+    };
+    let story = with("{sky_ship: disc}").unwrap();
+    let flyers = story.sky_flyers.as_ref().unwrap();
+    assert_eq!(flyers.cities, ["zeta:hut", "zeta:tent"]);
+    assert_eq!(flyers.ships[0].model, "zeta/media/models/disc.glb");
+    assert_eq!(
+        flyers.ships[0].achievement.as_deref(),
+        Some("zeta:saw_disc")
+    );
+    let choice = &story.dialogues["zeta:hermit"].nodes["hi"]
+        .choices
+        .as_ref()
+        .unwrap()[0];
+    let mut ops = Vec::new();
+    super::engine::apply(
+        &choice.effects,
+        &mut super::engine::PlayerState::default(),
+        &mut ops,
+    )
+    .unwrap();
+    assert_eq!(ops, [super::engine::Op::SkyShip("disc".to_owned())]);
+    assert!(with("{sky_ship: zeppelin}").is_err(), "an unknown ship");
 }

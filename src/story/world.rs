@@ -389,6 +389,7 @@ async fn build(
             .await
             .map_err(|_| anyhow::anyhow!("terrain patch loading panicked"))??;
     movement::set_patches(format!("{seed}:{heightmap}"), patches);
+    movement::set_rivers(format!("{seed}:{heightmap}"), story.rivers.clone());
     crate::atmosphere::set_astronomy(story.infos.iter().find_map(|info| info.astronomy));
     let built = super::settlements::finish(&mut story, &mut sites, terrain.as_ref(), &seed)?;
     let props = built.props;
@@ -452,7 +453,7 @@ pub fn find_spawn(
             site.direction,
             distance * angle.cos(),
             distance * angle.sin(),
-            |direction| ground.height(direction).max(0.0),
+            |direction| ground.level(direction),
             movement::RADIUS,
         );
         fallback.get_or_insert(position);
@@ -464,7 +465,7 @@ pub fn find_spawn(
             .all(|c| clear(c.position, c.collision_radius_m + 1.2))
             && npcs.iter().all(|npc| clear(npc.position, 2.0))
         {
-            // Dry ground first: a character put into water has to swim, and drowns.
+            // Dry ground first: a character put into water has to swim.
             if ground.land_site(direction).is_some() {
                 return Some(position);
             }
@@ -574,7 +575,7 @@ pub fn npc_descriptors(
             }
         }
         let (direction, yaw_sample) = chosen.expect("at least one attempt");
-        let height = ground.height(direction).max(0.0);
+        let height = ground.level(direction);
         npcs.push(NpcDescriptor {
             id: npc.id.clone(),
             name_key: npc.name_key.clone(),

@@ -247,6 +247,7 @@ fn app(state: AppState) -> Router {
         .route("/world", get(world))
         .route("/world/heightmap", get(heightmap))
         .route("/world/environment", get(world_environment))
+        .route("/world/rivers", get(world_rivers))
         .route("/world/objects", get(movement::world_objects))
         .route("/world/memorials", get(movement::world_memorials))
         .route("/terrain/{face}/{x}/{y}", get(sample))
@@ -311,6 +312,14 @@ async fn world(
         .collect();
     world.datadisks = announced_datadisks(&state).await;
     Ok(Json(world))
+}
+
+/// The rivers the world's datadisks tell, for the client to carve and draw like the server does (empty without such a
+/// disk). Large (a drainage network is tens of thousands of points) and fixed for a world: the client asks once.
+async fn world_rivers(State(state): State<AppState>) -> Json<Vec<movement::RiverInfo>> {
+    // The story builds them (once per world, cached); a world without a story has none.
+    let _ = story::world::world(&state).await;
+    Json(movement::announced_rivers())
 }
 
 /// The datadisks of this world for clients. A story that cannot be loaded announces none:

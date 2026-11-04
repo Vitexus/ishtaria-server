@@ -77,6 +77,8 @@ pub enum Op {
     TeleportPlace(String),
     /// The player learns of these (qualified) places: they stay on his map and compass.
     Reveal(Vec<String>),
+    /// A sky ship (id) flies low over the player; the ship's achievement is earned.
+    SkyShip(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,6 +147,9 @@ pub fn apply(effects: &[Effect], state: &mut PlayerState, ops: &mut Vec<Op>) -> 
         }
         if let Some(places) = &effect.reveal_places {
             ops.push(Op::Reveal(places.clone()));
+        }
+        if let Some(ship) = &effect.sky_ship {
+            ops.push(Op::SkyShip(ship.clone()));
         }
     }
     Ok(())

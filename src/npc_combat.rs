@@ -298,6 +298,13 @@ fn step_toward(from: [f64; 3], to: [f64; 3], step_m: f64) -> [f64; 3] {
     ]
 }
 
+/// A counter-blow lands only if the NPC stood within reach when the tick began and still does after
+/// its step. The step is a jump of up to `speed * dt` metres, so judging by the position after it
+/// alone let a hostile NPC hit a player who had run far beyond its reach.
+fn counter_in_reach(distance_before_m: f64, distance_after_m: f64, engage_range_m: f64) -> bool {
+    distance_before_m <= engage_range_m && distance_after_m <= engage_range_m
+}
+
 fn yaw_toward(from: [f64; 3], to: [f64; 3]) -> f64 {
     let dx = to[0] - from[0];
     let dz = to[2] - from[2];
@@ -599,7 +606,11 @@ pub(super) async fn tick(state: &AppState) -> Result<(), Error> {
         .bind(chase[2])
         .execute(&mut *tx)
         .await?;
-        let in_reach = distance_squared(chase, player).sqrt() <= config.engage_range_m;
+        let in_reach = counter_in_reach(
+            to_player,
+            distance_squared(chase, player).sqrt(),
+            config.engage_range_m,
+        );
         let cooled = !since_hit.is_some_and(|s| s < rules.counter_cooldown_seconds);
         if in_reach && cooled && OsRng.gen_bool(rules.counter_chance) {
             let died = crate::survival::hurt(
@@ -646,6 +657,9 @@ mod tests {
         assert_eq!(rules_for("gilgamesh:enkidu").max_health, 500);
         // Two counters drop a full-health hunter (100).
         assert!(enkidu.counter_damage * 2 > 100);
+        // A fleeing player 25 m ahead is out of reach even though the NPC's step would close the gap.
+        assert!(!counter_in_reach(25.0, 3.8, config.engage_range_m));
+        assert!(counter_in_reach(5.0, 3.8, config.engage_range_m));
         let stepped = step_toward([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 4.0);
         assert!((stepped[0] - 4.0).abs() < 1e-9);
         assert!(

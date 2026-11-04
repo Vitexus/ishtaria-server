@@ -602,17 +602,23 @@ async fn reading_a_tablet_earns_the_disks_hidden_achievement_once(pool: PgPool) 
     let _ = fs::remove_dir_all(dir);
 }
 
-/// Puts the player's health at 1 and lets them drown for a quarter second; whether they died for good.
-async fn drown_once(state: &AppState, player_id: i64) -> bool {
+/// Puts the player's health at 1 and hurts them by 1 (a fall); whether they died for good.
+async fn die_once(state: &AppState, player_id: i64) -> bool {
     sqlx::query("UPDATE players SET health = 1, health_fraction = 0 WHERE id = $1")
         .bind(player_id)
         .execute(&state.pool)
         .await
         .unwrap();
     let mut transaction = state.pool.begin().await.unwrap();
-    let died = crate::survival::drown(state, &mut transaction, player_id, 0.25)
-        .await
-        .unwrap();
+    let died = crate::survival::hurt(
+        state,
+        &mut transaction,
+        player_id,
+        1,
+        crate::survival::DamageCause::Fall,
+    )
+    .await
+    .unwrap();
     transaction.commit().await.unwrap();
     died
 }
@@ -685,7 +691,7 @@ async fn a_story_death_returns_to_where_the_quest_last_changed(pool: PgPool) {
         .map(|value| value * length / ((x + 150.0).powi(2) + y * y + z * z).sqrt());
     teleport(&pool, player_id, away).await;
     assert!(
-        !drown_once(&state, player_id).await,
+        !die_once(&state, player_id).await,
         "past the first stage a story death restarts the quest instead of a memorial"
     );
     let (stage, health, died, px, py, pz): (String, i32, bool, f64, f64, f64) = sqlx::query_as(
@@ -724,7 +730,7 @@ async fn a_story_death_returns_to_where_the_quest_last_changed(pool: PgPool) {
         .unwrap();
     set_item(&pool, player_id, "stone", 2).await;
     teleport(&pool, player_id, away).await;
-    assert!(!drown_once(&state, player_id).await);
+    assert!(!die_once(&state, player_id).await);
     let story = world::world(&state).await.unwrap().expect("disk applied");
     let start = story.story.quests["play:p"].start_place.clone().unwrap();
     let hut = world::site_position(&story.sites[&start]);
@@ -746,7 +752,7 @@ async fn a_story_death_returns_to_where_the_quest_last_changed(pool: PgPool) {
         .unwrap();
     let before = inventory(&pool, player_id).await;
     assert!(
-        drown_once(&state, player_id).await,
+        die_once(&state, player_id).await,
         "a death on the first stage is permanent"
     );
     let kept: Vec<(String, i64)> =
@@ -759,4 +765,131 @@ async fn a_story_death_returns_to_where_the_quest_last_changed(pool: PgPool) {
     std::env::remove_var("ISHTARIA_DATADISK_DIR");
     world::reset_cache().await;
     let _ = fs::remove_dir_all(dir);
+}
+
+fn install_sky_disk() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("ishtaria-story-sky-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let root = dir.join("sky");
+    write(&root, "datadisk.yaml", "id: sky\nversion: 1.0.0\nname: Test\nrequires_ruleset: \"1\"\nlicense: CC0-1.0\nattribution: Test\nlanguages: [en]\n");
+    write(&root, "i18n/en.yaml", "place.hut: Hut\nplace.tent: Tent\nnpc.hermit: Hermit\nhi: Hi\nlights: Lights\nask: Ask\nbye: Bye\na.t: Disc\na.d: Saw it.\n");
+    write(&root, "places/p.yaml", "- {id: hut, kind: building, name_key: place.hut, spawn: true}\n- {id: tent, kind: building, name_key: place.tent}\n");
+    write(&root, "npcs/n.yaml", "- {id: hermit, name_key: npc.hermit, place: hut, character: {pack: retro, skin: humanMaleA}, dialogue: hermit}\n");
+    write(&root, "dialogues/hermit.yaml", "id: hermit\nstart: hi\nnodes:\n  hi:\n    text_key: hi\n    choices:\n      - {text_key: ask, goto: lights}\n  lights:\n    text_key: lights\n    effects: [{sky_ship: disc}]\n    choices:\n      - {text_key: bye}\n");
+    write(
+        &root,
+        "achievements.yaml",
+        "- {id: saw_disc, title_key: a.t, description_key: a.d, icon: foundation_tablet}\n",
+    );
+    write(&root, "sky_flyers.yaml", "interval_s: 3600\nduration_s: 90\naltitude_m: 2500\ncities: [hut, tent]\nships:\n  - {id: disc, model: media/models/disc.glb, scale: 4, achievement: saw_disc}\n");
+    fs::create_dir_all(root.join("media/models")).unwrap();
+    fs::write(
+        root.join("media/models/disc.glb"),
+        crate::glb::tests::sample(5125),
+    )
+    .unwrap();
+    dir
+}
+
+#[sqlx::test]
+#[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
+async fn being_told_of_a_sky_ship_sends_one_over_the_player_and_earns_its_achievement_once(
+    pool: PgPool,
+) {
+    let _auth_test = AUTH_TESTS.acquire().await.unwrap();
+    let dir = install_sky_disk();
+    std::env::set_var("ISHTARIA_DATADISK_DIR", &dir);
+    world::reset_cache().await;
+    let world_id = initialize_spawn_world(&pool).await;
+    let state = AppState {
+        pool: pool.clone(),
+        world_id,
+    };
+    let router = app(state.clone());
+    let token = create_session(&router, "watcher").await;
+    let player_id: i64 = sqlx::query_scalar("SELECT id FROM players")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO world_datadisks (world_id, disk_id, version, position) VALUES ($1, 'sky', '1.0.0', 0)")
+        .bind(world_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    world::reset_cache().await;
+    let story = world::world(&state).await.unwrap().expect("disk applied");
+    let npc = story.npcs[0].clone();
+
+    // The schedule is public and names the kinds of ship and the flights of this hour.
+    let response = player_request(&router, "GET", "/story/sky_flights", "", &token).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let sky = response_json(response).await;
+    assert_eq!(sky["ships"][0]["id"], "disc");
+    assert_eq!(sky["ships"][0]["model"], "sky/media/models/disc.glb");
+    assert!(
+        !sky["flights"].as_array().unwrap().is_empty(),
+        "a flight of this or the next hour"
+    );
+
+    teleport(&pool, player_id, npc.position).await;
+    let talk = || async {
+        let started = response_json(
+            post(
+                &router,
+                &token,
+                "/story/dialogue/start",
+                serde_json::json!({"npc_id": "sky:hermit"}),
+            )
+            .await,
+        )
+        .await;
+        let seq = started["seq"].as_i64().unwrap();
+        let response = post(
+            &router,
+            &token,
+            "/story/dialogue/choose",
+            serde_json::json!({"npc_id": "sky:hermit", "seq": seq, "choice": 0}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    };
+    let events = || async {
+        response_json(player_request(&router, "GET", "/events?after=0", "", &token).await).await
+            ["events"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+
+    talk().await;
+    let seen = events().await;
+    let flyovers: Vec<_> = seen.iter().filter(|e| e["kind"] == "sky_flyover").collect();
+    assert_eq!(flyovers.len(), 1, "one ship flies over");
+    assert_eq!(flyovers[0]["subject"], "disc");
+    assert!(
+        seen.iter()
+            .any(|e| e["kind"] == "achievement" && e["subject"] == "sky:saw_disc"),
+        "the achievement is announced"
+    );
+
+    // Told again, the ship flies again, but the achievement is earned only once.
+    talk().await;
+    let seen = events().await;
+    assert_eq!(
+        seen.iter().filter(|e| e["kind"] == "sky_flyover").count(),
+        2
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|e| e["kind"] == "achievement" && e["subject"] == "sky:saw_disc")
+            .count(),
+        1
+    );
+    let earned: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM player_achievements WHERE achievement = 'sky:saw_disc'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(earned, 1);
 }

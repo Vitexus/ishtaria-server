@@ -97,7 +97,7 @@ async fn teleport_to_position(
     sqlx::query(
         "UPDATE players SET position_x = $2, position_y = $3, position_z = $4,
          movement_sequence = movement_sequence + 1, movement_airborne = false,
-         jump_vertical_speed = 0
+         jump_vertical_speed = 0, vehicle_id = NULL
          WHERE id = $1",
     )
     .bind(player_id)
@@ -250,7 +250,7 @@ async fn give_back_since_checkpoint(
 }
 
 /// Where the quest last changed its stage, when that spot is dry ground (a checkpoint taken while
-/// swimming would drown the character again).
+/// swimming would put the character back into the water).
 async fn usable_checkpoint(
     state: &AppState,
     tx: &mut Transaction<'_, Postgres>,
