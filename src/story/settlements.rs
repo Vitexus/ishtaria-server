@@ -434,6 +434,8 @@ pub fn world_disk(seed: &str, count: usize) -> Disk {
             tags: vec!["guard".to_owned()],
             size: None,
             movement: None,
+            visible_if: None,
+            lift_m: None,
         });
     }
     if guarded {
@@ -1577,6 +1579,8 @@ pub fn finish(
                 tags: vec!["shop".to_owned(), "shop:general".to_owned()],
                 size: None,
                 movement: None,
+                visible_if: None,
+                lift_m: None,
             });
             sites.insert(site.id.clone(), site.clone());
         }
@@ -1652,6 +1656,8 @@ pub fn finish(
                     phase_s: 0.0,
                     follow: None,
                 }),
+                visible_if: None,
+                lift_m: None,
             });
             let mut placed = site.clone();
             placed.id = format!("travelers:{local}");
@@ -1721,6 +1727,8 @@ pub fn finish(
                 tags: Vec::new(),
                 size: None,
                 movement: Some(movement.clone()),
+                visible_if: None,
+                lift_m: None,
             });
             sites.insert(site.id.clone(), site.clone());
         }
@@ -1801,6 +1809,8 @@ pub fn finish(
                         phase_s: 0.0,
                         follow: None,
                     }),
+                    visible_if: None,
+                    lift_m: None,
                 });
             }
             sites.insert(site.id.clone(), site.clone());
@@ -1862,6 +1872,8 @@ pub fn finish(
                 tags: vec!["shop".to_owned()],
                 size: None,
                 movement: None,
+                visible_if: None,
+                lift_m: None,
             });
             sites.insert(site.id.clone(), site.clone());
         }
@@ -1916,6 +1928,8 @@ pub fn finish(
                 tags: vec!["shop".to_owned(), "shop:smith".to_owned()],
                 size: None,
                 movement: None,
+                visible_if: None,
+                lift_m: None,
             });
             sites.insert(site.id.clone(), site.clone());
         }

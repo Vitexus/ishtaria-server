@@ -729,6 +729,58 @@ fn unaffordable_effects_change_nothing() {
 }
 
 #[test]
+fn a_hunter_who_dies_in_uruk_with_the_kings_errand_returns_to_the_kings_palace() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ishtaria-datadisk-gilgamesh");
+    if !path
+        .join("quests/the_hunter_and_the_wild_man.yaml")
+        .is_file()
+    {
+        return;
+    }
+    let story = Story::load(&[path], true).unwrap();
+    // Sent by Gilgamesh for Shamhat: a death comes back to the palace beside the king, with the errand kept.
+    let restart = crate::story::checkpoint::resolve(
+        &story,
+        "gilgamesh:the_hunter_and_the_wild_man",
+        "seek_shamhat",
+    )
+    .expect("the stage restarts");
+    assert_eq!(restart.stage, "seek_shamhat");
+    assert_eq!(restart.place.as_deref(), Some("gilgamesh:uruk_palace"));
+    assert!(!restart.checkpoint, "not wherever the stage was reached");
+}
+
+#[test]
+fn a_character_with_visible_if_is_there_only_for_the_player_the_story_has_got_to() {
+    use crate::story::engine::PlayerState;
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ishtaria-datadisk-gilgamesh");
+    if !path.join("npcs/epic.yaml").is_file() {
+        return;
+    }
+    let story = Story::load(&[path], true).unwrap();
+    let id = "gilgamesh:enkidu_civilized";
+    assert!(
+        story.npcs[id].visible_if.is_some(),
+        "the civilized Enkidu waits for the story"
+    );
+    let mut player = PlayerState::default();
+    // The hunter at the start, a guest: nobody has brought Enkidu to Uruk.
+    assert!(!crate::story::api::npc_visible(&story, id, Some(&player)));
+    assert!(!crate::story::api::npc_visible(&story, id, None));
+    player.stages.insert(
+        "gilgamesh:shamhat_and_the_wild_man".to_owned(),
+        "present_enkidu".to_owned(),
+    );
+    assert!(crate::story::api::npc_visible(&story, id, Some(&player)));
+    // A character without the condition is always there, for a guest as well.
+    assert!(crate::story::api::npc_visible(
+        &story,
+        "gilgamesh:gilgamesh",
+        None
+    ));
+}
+
+#[test]
 fn the_gilgamesh_disk_lists_the_houses_of_uruk() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ishtaria-datadisk-gilgamesh");
     if !path.join("buildings/uruk.yaml").is_file() {

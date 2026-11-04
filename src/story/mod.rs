@@ -354,6 +354,9 @@ impl Story {
             npc.name_key = qualify(&id, &npc.name_key);
             npc.bio_key = npc.bio_key.map(|k| qualify(&id, &k));
             npc.about = npc.about.map(|k| qualify(&id, &k));
+            if let Some(condition) = &mut npc.visible_if {
+                qualify_condition(condition, &id);
+            }
             npc.portrait = npc.portrait.map(|p| format!("{id}/{p}"));
             // A model below `media/models/` is served like a portrait: under the id of its disk.
             npc.character.model = npc.character.model.map(|m| format!("{id}/{m}"));

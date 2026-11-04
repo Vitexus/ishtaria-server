@@ -748,6 +748,7 @@ mod tests {
             wander: None,
             unlocked_eggs: Vec::new(),
             health: None,
+            follow: false,
         };
         let merchant = world::NpcDescriptor {
             position: [crate::movement::RADIUS + 50.0, 20.0, 0.0],

@@ -551,6 +551,10 @@ pub struct Terrain {
     /// A `.png` (any size, 8 or 16 bit greyscale) over the whole rectangle: pixels above zero are
     /// built or tilled ground (streets, houses, squares, fields) where no natural scenery stands.
     pub clear: Option<String>,
+    /// A `.png` (RGBA, any size) over the same rectangle: the map of the place that the minimap draws, with its
+    /// houses, streets, canals and walls (the clear mask only says where something is built).
+    #[serde(default)]
+    pub map: Option<String>,
     /// The size of the rectangle in the client's local x and z frame, centred on `offset_m`.
     pub extent_m: [f64; 2],
     /// The centre of the rectangle from the anchor, in metres along the local x and z axes.
@@ -592,6 +596,13 @@ pub struct Npc {
     pub size: Option<f64>,
     /// A character that walks instead of standing at its place.
     pub movement: Option<Movement>,
+    /// The character stands in the world only for a player of whom this holds (a character the story has not brought
+    /// forth yet is not there, and cannot be talked to); without it the character is always there.
+    #[serde(default, rename = "visible_if")]
+    pub visible_if: Option<Condition>,
+    /// Metres above the ground that a character without a walk stands (on the top of a ziggurat, whose stairs a player climbs).
+    #[serde(default)]
+    pub lift_m: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -1508,6 +1519,7 @@ impl Disk {
             wanted.push(terrain.heightmap.as_str());
             wanted.extend(terrain.water.as_deref());
             wanted.extend(terrain.clear.as_deref());
+            wanted.extend(terrain.map.as_deref());
         }
         wanted.extend(music.iter().map(|m| m.file.as_str()));
         wanted.extend(knowledge.iter().map(|card| card.image.as_str()));
@@ -1864,6 +1876,7 @@ impl Disk {
                 for path in std::iter::once(&terrain.heightmap)
                     .chain(terrain.water.iter())
                     .chain(terrain.clear.iter())
+                    .chain(terrain.map.iter())
                 {
                     ensure!(
                         path.starts_with("media/terrain/") && path.ends_with(".png"),
@@ -2526,6 +2539,11 @@ impl Disk {
             }
             Ok(())
         };
+        for npc in &self.npcs {
+            if let Some(condition) = &npc.visible_if {
+                check_condition(condition, &stage_ok)?;
+            }
+        }
         for dialogue in &self.dialogues {
             if dialogue.status.as_deref() == Some("draft") {
                 ensure!(

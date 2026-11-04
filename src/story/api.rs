@@ -115,6 +115,31 @@ fn reject(reject: Reject) -> Error {
 }
 
 /// Everything the engine needs to know about a player, read under row locks.
+/// What the story knows of a player, read once for the conditions on which characters stand in the world (`visible_if`).
+pub(super) async fn player_state(state: &AppState, player_id: i64) -> Option<PlayerState> {
+    let mut tx = state.pool.begin().await.ok()?;
+    let loaded = load_state(&mut tx, player_id).await.ok();
+    let _ = tx.rollback().await;
+    loaded
+}
+
+/// Whether a character stands in the world for a player: always, unless its `visible_if` asks something the player does
+/// not meet (a guest meets nothing).
+pub(super) fn npc_visible(
+    story: &super::Story,
+    npc_id: &str,
+    player: Option<&PlayerState>,
+) -> bool {
+    match story
+        .npcs
+        .get(npc_id)
+        .and_then(|npc| npc.visible_if.as_ref())
+    {
+        None => true,
+        Some(condition) => player.is_some_and(|player| super::engine::holds(condition, player)),
+    }
+}
+
 async fn load_state(tx: &mut Tx<'_>, player_id: i64) -> Result<PlayerState, Error> {
     let flags: Vec<String> =
         sqlx::query_scalar("SELECT flag FROM player_story_flags WHERE player_id = $1")
@@ -292,6 +317,18 @@ async fn near_npc<'a>(
         .iter()
         .find(|npc| npc.id == npc_id)
         .ok_or_else(|| status(StatusCode::NOT_FOUND, "unknown character"))?;
+    // A character the story has not brought forth for this player is not there to talk to.
+    if story
+        .story
+        .npcs
+        .get(npc_id)
+        .is_some_and(|npc| npc.visible_if.is_some())
+    {
+        let known = load_state(tx, player_id).await?;
+        if !npc_visible(&story.story, npc_id, Some(&known)) {
+            return Err(status(StatusCode::NOT_FOUND, "unknown character"));
+        }
+    }
     let here = world::position_now(state, npc).await;
     let range = if ongoing && npc.movement.is_some() {
         ONGOING_RANGE_M

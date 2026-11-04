@@ -2715,13 +2715,22 @@ impl WalkingTerrain {
                         |_| 0.0,
                         RADIUS,
                     );
-                    let metres = RADIUS + self.height(direction).max(0.0);
+                    let metres = RADIUS + self.animal_ground(direction);
                     let round = |value: f64| (value * 100.0).round() / 100.0;
                     let point = direction.map(|value| round(value * metres));
                     [time as f64, point[0], point[1], point[2]]
                 })
                 .collect(),
         )
+    }
+
+    /// The height an animal stands on at a point of its route: the ground where it can stand, below sea level too
+    /// (the floodplain of Uruk lies at -3 m on dry steppe), exactly where `place` puts the animals that stand still. The
+    /// routes used to clamp it to 0 m, which lifted every wandering animal above such ground by as much as the ground lies
+    /// below the sea, up to the head of a man.
+    fn animal_ground(&self, direction: [f64; 3]) -> f64 {
+        self.surface(direction)
+            .unwrap_or_else(|| self.height(direction).max(0.0))
     }
 
     /// Where an animal heads to at the start of a slot: a spot near where it was put, on land.
@@ -2895,7 +2904,7 @@ impl WalkingTerrain {
                 .map(|step| {
                     let time = first + step * WATERHOLE_STEP_MS;
                     let direction = along(time);
-                    let metres = RADIUS + self.height(direction).max(0.0);
+                    let metres = RADIUS + self.animal_ground(direction);
                     let point = direction.map(|value| round(value * metres));
                     [time as f64, point[0], point[1], point[2]]
                 })
@@ -2923,7 +2932,7 @@ impl WalkingTerrain {
         let target = unit(std::array::from_fn(|axis| {
             here[axis] + tangent[axis] * FLEE_DISTANCE_M / RADIUS
         }));
-        let metres = RADIUS + self.height(target).max(0.0);
+        let metres = RADIUS + self.animal_ground(target);
         let to = target.map(|value| value * metres);
         let mut flees = FLEES
             .lock()
@@ -2978,7 +2987,7 @@ impl WalkingTerrain {
         // The walk of a slot takes less time for a faster pace (the same distance, the rest of the slot standing).
         let move_ms = WANDER_MOVE_MS as f64 / pace_factor(&animal.model);
         let entry = |time: i64, direction: [f64; 3], slot: i64| {
-            let ground = self.height(direction).max(0.0);
+            let ground = self.animal_ground(direction);
             let clearance = if flying {
                 self.flight_clearance(animal, slot)
             } else {
@@ -5067,6 +5076,8 @@ mod tests {
     #[test]
     fn a_canal_a_character_swims_in_gives_fresh_water_to_drink() {
         let _serial = serial();
+        // No landscape patch of another test may stand over the canal.
+        set_patches(String::new(), Vec::new());
         let at = |latitude: f64, longitude: f64| {
             let (latitude, longitude) = (latitude.to_radians(), longitude.to_radians());
             [
@@ -5279,6 +5290,62 @@ mod tests {
             ) > 1.0
         });
         assert!(moving, "some animal walks");
+    }
+
+    #[test]
+    fn animals_walk_on_the_ground_even_where_it_lies_below_sea_level() {
+        let _serial = serial();
+        set_wildlife(String::new(), Vec::new());
+        let terrain = terrain_with(144, 4, catalog_with_fauna());
+        let anchor = [1.0, 0.0, 0.0];
+        // A dry landscape patch 3 m below the sea, like the floodplain of Uruk: the routes used to clamp the height to
+        // 0 m, which put every wandering animal 3 m above the ground, level with a man's head.
+        set_patches(
+            "42:floodplain".into(),
+            vec![TerrainPatch {
+                anchor,
+                anchor_height_m: -3.0,
+                extent_m: [600.0, 600.0],
+                offset_m: [0.0, 0.0],
+                feather_m: 40.0,
+                width: 32,
+                height: 32,
+                elevation: vec![0; 32 * 32],
+                water: None,
+                clear: None,
+            }],
+        );
+        let (axis_x, _) = crate::scenery::client_axes(anchor);
+        let spot = unit(std::array::from_fn(|axis| {
+            anchor[axis] * RADIUS + axis_x[axis] * 20.0
+        }));
+        let ground = terrain
+            .surface(spot)
+            .expect("dry land below the sea in a patch");
+        assert!((ground + 3.0).abs() < 0.3, "{ground}");
+        let animal = WorldObject {
+            id: format!("{}:fauna:0:0:0", terrain.environment.seed),
+            model: "animal.gazelle".into(),
+            position: spot.map(|value| value * (RADIUS + ground)),
+            scale_m: 2.09,
+            yaw: 0.0,
+            collision_radius_m: 0.0,
+            biome: 4,
+            ground_offset_m: 0.0,
+        };
+        let now = 1_700_000_000_000;
+        for time in (now..now + WANDER_SLOTS * WANDER_SLOT_MS).step_by(1500) {
+            let route = terrain.animal_route(&animal, now);
+            let position = route_position(&route, time);
+            let walking = length(position) - RADIUS;
+            assert!(
+                (walking - terrain.surface(unit(position)).unwrap_or(0.0)).abs() < 0.3,
+                "walks at {walking} m, the ground is at {:?}",
+                terrain.surface(unit(position))
+            );
+            assert!(walking < -2.0, "walks at {walking} m, not at the sea level");
+        }
+        set_patches(String::new(), Vec::new());
     }
 
     #[test]

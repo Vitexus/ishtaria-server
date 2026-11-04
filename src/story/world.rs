@@ -83,6 +83,10 @@ pub struct NpcDescriptor {
     /// Health bar for this viewer: hidden until the NPC is hurt or hostile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<crate::npc_combat::HealthBar>,
+    /// The character walks after this viewer (an escorted companion): `position` is only where it starts, the client
+    /// walks it to the player and lets it stand beside them, instead of jumping to a new place at every list.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub follow: bool,
 }
 
 /// A region around a place where a track plays; clients fade it in and out by distance.
@@ -114,6 +118,9 @@ pub struct TerrainDescriptor {
     /// Cleared / built ground for the minimap city silhouette (ADR 0013 clear mask).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clear: Option<String>,
+    /// The picture of the place for the minimap (houses, streets, canals, walls), over the whole rectangle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -581,7 +588,15 @@ pub fn npc_descriptors(
             name_key: npc.name_key.clone(),
             character: format!("{}/{}", npc.character.pack, npc.character.skin),
             model: npc.character.model.as_deref().map(media_url),
-            position: direction.map(|axis| axis * (RADIUS + height)),
+            position: direction.map(|axis| {
+                axis * (RADIUS
+                    + height
+                    + if npc.movement.is_none() {
+                        npc.lift_m.unwrap_or(0.0).clamp(0.0, 200.0)
+                    } else {
+                        0.0
+                    })
+            }),
             yaw: yaw_sample * std::f64::consts::TAU,
             scale_m: MAN_HEIGHT_M * npc.size.unwrap_or(1.0),
             portrait: npc.portrait.as_deref().map(media_url),
@@ -595,6 +610,7 @@ pub fn npc_descriptors(
             wander: None,
             unlocked_eggs: Vec::new(),
             health: None,
+            follow: false,
         });
     }
     npcs
@@ -854,10 +870,21 @@ pub async fn npcs_near(
     };
     let distance =
         |npc: &NpcDescriptor| length(std::array::from_fn(|axis| npc.position[axis] - point[axis]));
+    // Characters the story has not brought forth for this player are not listed (`visible_if`).
+    let conditional = world
+        .story
+        .npcs
+        .values()
+        .any(|npc| npc.visible_if.is_some());
+    let story_state = match player_id {
+        Some(id) if conditional => super::api::player_state(state, id).await,
+        _ => None,
+    };
     let mut near: Vec<&NpcDescriptor> = world
         .npcs
         .iter()
         .filter(|npc| distance(npc) <= reach(npc))
+        .filter(|npc| super::api::npc_visible(&world.story, &npc.id, story_state.as_ref()))
         .collect();
     // Clients draw at most MAX_NPCS_LISTED characters, and every wandering one costs a route to work out: the people of a
     // story come first, the crowd and the families of the houses fill the rest, nearest first.
@@ -944,11 +971,13 @@ pub async fn npcs_near(
                 listed[index].position = follow;
                 listed[index].wander = None;
                 listed[index].movement = None;
+                listed[index].follow = true;
             } else if let Some(home) = world.npcs.iter().find(|npc| npc.id == companion_id) {
                 let mut described = home.clone();
                 described.position = follow;
                 described.wander = None;
                 described.movement = None;
+                described.follow = true;
                 if let Some(ctx) = &egg_ctx {
                     described.unlocked_eggs = super::eggs::unlocked_clips(
                         &world.story.easter_eggs,
@@ -1161,6 +1190,10 @@ fn load_patches(
                 .map(|path| media_url(&format!("{disk}/{path}"))),
             clear: terrain
                 .clear
+                .as_ref()
+                .map(|path| media_url(&format!("{disk}/{path}"))),
+            map: terrain
+                .map
                 .as_ref()
                 .map(|path| media_url(&format!("{disk}/{path}"))),
         });
