@@ -5,27 +5,72 @@
   "shield_wear": 2,
   "armor_wear": 1,
   "armor": {
-    "armor_leather": {"slot": "body", "defense": 15},
-    "armor_golden": {"slot": "body", "defense": 25},
-    "armor_metal": {"slot": "body", "defense": 35},
-    "glove": {"slot": "hands", "defense": 5}
+    "armor_leather": {
+      "slot": "body",
+      "defense": 15
+    },
+    "armor_golden": {
+      "slot": "body",
+      "defense": 25
+    },
+    "armor_metal": {
+      "slot": "body",
+      "defense": 35
+    },
+    "glove": {
+      "slot": "hands",
+      "defense": 5
+    }
   },
   "fierce": {
-    "animal.wolf": {"damage": 8, "chance": 1.0},
-    "animal.husky": {"damage": 5, "chance": 1.0},
-    "animal.fox": {"damage": 3, "chance": 1.0},
-    "zeroad.wolf": {"damage": 8, "chance": 1.0},
-    "zeroad.fox": {"damage": 3, "chance": 1.0},
-    "zeroad.mastiff": {"damage": 5, "chance": 1.0},
-    "zeroad.boar": {"damage": 6, "chance": 0.6},
-    "zeroad.lion": {"damage": 12, "chance": 1.0},
-    "zeroad.lioness": {"damage": 10, "chance": 1.0},
-    "zeroad.crocodile": {"damage": 12, "chance": 1.0}
+    "animal.wolf": {
+      "damage": 12,
+      "chance": 1.0
+    },
+    "animal.husky": {
+      "damage": 7,
+      "chance": 1.0
+    },
+    "animal.fox": {
+      "damage": 4,
+      "chance": 1.0
+    },
+    "zeroad.wolf": {
+      "damage": 12,
+      "chance": 1.0
+    },
+    "zeroad.fox": {
+      "damage": 4,
+      "chance": 1.0
+    },
+    "zeroad.mastiff": {
+      "damage": 7,
+      "chance": 1.0
+    },
+    "zeroad.boar": {
+      "damage": 8,
+      "chance": 0.6
+    },
+    "zeroad.lion": {
+      "damage": 18,
+      "chance": 1.0
+    },
+    "zeroad.lioness": {
+      "damage": 15,
+      "chance": 1.0
+    },
+    "zeroad.crocodile": {
+      "damage": 16,
+      "chance": 1.0
+    }
   },
   "ambush": {
-    "range_m": 11.0,
-    "cooldown_seconds": 7.0,
-    "chance": 0.4,
+    "range_m": 22.0,
+    "cooldown_seconds": 4.0,
+    "chance": 0.65,
+    "max_level": 12,
+    "snare_chance": 0.9,
+    "snare_range_m": 28.0,
     "quest_suffix": "the_hunter_and_the_wild_man"
   }
 }

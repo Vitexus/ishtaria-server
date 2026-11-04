@@ -31,7 +31,7 @@ pub(super) const DROWNING_STAMINA: f64 = 20.0;
 const DROWNING_DAMAGE: f64 = 100.0 / 60.0;
 /// A character is present while their client reports (events poll) or they move within this
 /// many seconds. Sleeping characters lose no water: only present time is charged.
-const PRESENCE_SECONDS: f64 = 120.0;
+pub(super) const PRESENCE_SECONDS: f64 = 120.0;
 /// Water one drink from fresh water restores, and how far from the water the character may stand.
 const DRINK_WATER: f64 = 25.0;
 const DRINK_REACH_M: f64 = 6.0;

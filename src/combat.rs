@@ -3,8 +3,8 @@
 //! Which armour goes where, how much it takes away and which animals strike back is data in
 //! `etc/combat.json`. The server decides every outcome: a client only swings at an animal and
 //! learns from the reply what it cost. Armour and shields wear out with the blows they stop.
-//! During the hunter's snare stages, fierce animals also ambush unprovoked when the trapper
-//! strays too close (`ambush_tick`).
+//! Fierce animals also strike first, unprovoked, at a low-level character who comes too close, and more
+//! boldly at the trapper during the hunter's snare stages (`ambush_tick`).
 
 use super::durability::{self, Wear};
 use super::players::Error;
@@ -33,10 +33,16 @@ struct Fierce {
 
 #[derive(Deserialize)]
 struct Ambush {
+    /// How near a fierce animal must be to feel threatened and strike first.
     range_m: f64,
     cooldown_seconds: f64,
     chance: f64,
-    /// Quest id suffix: only players on that quest's snare stages are ambushed.
+    /// Only characters up to this level are ambushed: a seasoned one is no easy prey.
+    max_level: i32,
+    /// While the hunter lays snares the animals are bolder: a larger reach and a surer strike.
+    snare_chance: f64,
+    snare_range_m: f64,
+    /// Quest id suffix: the players on that quest's snare stages.
     quest_suffix: String,
 }
 
@@ -63,8 +69,11 @@ fn combat() -> &'static Combat {
         assert!((0..=100).contains(&config.max_defense_percent));
         if let Some(ambush) = &config.ambush {
             assert!((3.0..=30.0).contains(&ambush.range_m));
+            assert!((ambush.range_m..=30.0).contains(&ambush.snare_range_m));
             assert!((2.0..=60.0).contains(&ambush.cooldown_seconds));
             assert!((0.05..=1.0).contains(&ambush.chance));
+            assert!((ambush.chance..=1.0).contains(&ambush.snare_chance));
+            assert!((1..=100).contains(&ambush.max_level));
             assert!(!ambush.quest_suffix.is_empty());
         }
         config
@@ -139,29 +148,28 @@ fn distance_squared(first: [f64; 3], second: [f64; 3]) -> f64 {
         .sum()
 }
 
-/// During the hunter's snare stages, fierce animals within ambush range bite without being hit
-/// first — the trapper must clear them or keep distance while waiting on a snare.
+/// Fierce animals strike first at a present, low-level character who comes within their reach, anywhere in the
+/// world: such a character should go round them. While the hunter lays snares they are bolder still (a larger
+/// reach and a surer strike), so that the trapper must clear them or keep his distance.
 pub(super) async fn ambush_tick(state: &AppState) -> Result<(), Error> {
     let Some(ambush) = &combat().ambush else {
         return Ok(());
     };
     let stages = crate::hunting::snare_stages();
-    if stages.is_empty() {
-        return Ok(());
-    }
-    let suffix = &ambush.quest_suffix;
-    let players: Vec<(i64, f64, f64, f64)> = sqlx::query_as(
-        "SELECT p.id, p.position_x, p.position_y, p.position_z
+    let players: Vec<(i64, f64, f64, f64, bool)> = sqlx::query_as(
+        "SELECT p.id, p.position_x, p.position_y, p.position_z,
+                EXISTS (SELECT 1 FROM player_quests q
+                        WHERE q.player_id = p.id AND q.quest_id LIKE '%' || $2 AND q.stage = ANY($3)) AS snaring
          FROM players p
-         JOIN player_quests q ON q.player_id = p.id
-         WHERE p.world_id = $1 AND p.died_at IS NULL
+         WHERE p.world_id = $1 AND p.died_at IS NULL AND p.level <= $4
            AND p.position_x IS NOT NULL AND p.position_y IS NOT NULL AND p.position_z IS NOT NULL
-           AND q.quest_id LIKE '%' || $2
-           AND q.stage = ANY($3)",
+           AND coalesce(greatest(p.last_seen_at, p.last_active_at) > clock_timestamp() - make_interval(secs => $5), false)",
     )
     .bind(state.world_id)
-    .bind(suffix)
+    .bind(&ambush.quest_suffix)
     .bind(&stages)
+    .bind(ambush.max_level)
+    .bind(super::survival::PRESENCE_SECONDS)
     .fetch_all(&state.pool)
     .await?;
     if players.is_empty() {
@@ -171,9 +179,19 @@ pub(super) async fn ambush_tick(state: &AppState) -> Result<(), Error> {
         return Ok(());
     };
     let now_ms = crate::movement::unix_now_ms();
-    let range2 = ambush.range_m * ambush.range_m;
     let cooldown = Duration::from_secs_f64(ambush.cooldown_seconds);
-    for (player_id, x, y, z) in players {
+    for (player_id, x, y, z, snaring) in players {
+        let range = if snaring {
+            ambush.snare_range_m
+        } else {
+            ambush.range_m
+        };
+        let range2 = range * range;
+        let chance = if snaring {
+            ambush.snare_chance
+        } else {
+            ambush.chance
+        };
         {
             let map = ambush_cooldowns()
                 .lock()
@@ -206,7 +224,7 @@ pub(super) async fn ambush_tick(state: &AppState) -> Result<(), Error> {
         let Some((_id, model, _)) = nearest else {
             continue;
         };
-        if !OsRng.gen_bool(ambush.chance.clamp(0.0, 1.0)) {
+        if !OsRng.gen_bool(chance.clamp(0.0, 1.0)) {
             continue;
         }
         let mut tx = state.pool.begin().await?;
