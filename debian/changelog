@@ -1,3 +1,15 @@
+ishtaria-server (0.5.0) unstable; urgency=medium
+
+  * Swimming no longer drowns a character with strength left; drowning
+    only at low stamina.
+  * Story characters can appear only for players at a given quest stage
+    (visible_if) and stand lifted (lift_m); landscape patches carry a
+    city map (terrain.map); datadisks announce a loading marker.
+  * A character struck by an NPC and then fleeing out of reach no longer
+    takes counter-blows; hunters can drink in irrigation canals.
+
+ -- Vítězslav Dvořák <cybervitexus@gmail.com>  Wed, 04 Nov 2026 08:41:25 +0100
+
 ishtaria-server (0.4.2) unstable; urgency=medium
 
   * Walking matches the client's water: ground below sea level in a dry
