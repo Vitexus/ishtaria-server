@@ -1,5 +1,6 @@
 ishtaria-server (0.5.0) unstable; urgency=medium
 
+  [ Vítězslav Dvořák ]
   * Swimming no longer drowns a character with strength left; drowning
     only at low stamina.
   * Story characters can appear only for players at a given quest stage
@@ -7,6 +8,11 @@ ishtaria-server (0.5.0) unstable; urgency=medium
     city map (terrain.map); datadisks announce a loading marker.
   * A character struck by an NPC and then fleeing out of reach no longer
     takes counter-blows; hunters can drink in irrigation canals.
+
+  [ vitex ]
+  * Fierce animals strike first at any present character of level 12 or
+    lower who comes within reach (bolder while the hunter lays snares)
+    and hit harder; sleeping characters are left alone.
 
  -- Vítězslav Dvořák <cybervitexus@gmail.com>  Wed, 04 Nov 2026 08:41:25 +0100
 
