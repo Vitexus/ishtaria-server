@@ -1,5 +1,9 @@
 # ishtaria-server
 
+<!-- source-notice -->
+> **Primary source:** <https://git.vitexsoftware.com/Ishtaria/ishtaria-server> (development happens there). **GitHub** (<https://github.com/Vitexus/ishtaria-server>) is a secondary mirror; packages and binaries are **not built from GitHub**.
+<!-- /source-notice -->
+
 Authoritative world server of Ishtaria: one planet, its simulation, persistence and the federation endpoint that links worlds through portals.
 
 **Status:** PostgreSQL-backed world identity, heightmaps, characters, inventory, eating, permanent death, memorial APIs and server-authoritative walking and jumping onto scenery. General rigid-body physics, free-roaming enemies and player-versus-player combat, travel tickets and cross-world play are not implemented yet; portals are built alone and linked with portals of other worlds by share links.
