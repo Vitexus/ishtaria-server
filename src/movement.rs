@@ -5087,25 +5087,29 @@ mod tests {
             ]
         };
         // A canal 100 m wide through a dry (steppe) cell: the carved channel of a river of a datadisk.
-        set_rivers(
-            "test-canal".to_owned(),
-            vec![(
-                "test-canal:canal".to_owned(),
-                vec![at(-0.01, 0.0), at(0.0, 0.0), at(0.01, 0.0)],
-                vec![100.0; 3],
-            )],
-        );
         let terrain = terrain_with(80, 4, Vec::new());
         let middle = at(0.0, 0.0);
         let position = middle.map(|value| value * RADIUS);
-        // The character swims here ...
+        // Loading a story in a test of another module replaces the process-wide rivers at any moment (the lock above
+        // covers this module only), so the canal is set and read again until one try ran undisturbed.
+        let canal_gives_fresh_water = || {
+            set_rivers(
+                "test-canal".to_owned(),
+                vec![(
+                    "test-canal:canal".to_owned(),
+                    vec![at(-0.01, 0.0), at(0.0, 0.0), at(0.01, 0.0)],
+                    vec![100.0; 3],
+                )],
+            );
+            // The character swims here, so there is water to drink as well, not "no fresh water within reach".
+            terrain.water_depth(middle) > 0.0
+                && terrain.water_near(position, 6.0) == WaterNear::Fresh
+        };
         assert!(
-            terrain.water_depth(middle) > 0.0,
+            (0..200).any(|_| canal_gives_fresh_water()),
             "the canal holds water: {}",
             terrain.water_depth(middle)
         );
-        // ... so there is water to drink as well, not "no fresh water within reach".
-        assert_eq!(terrain.water_near(position, 6.0), WaterNear::Fresh);
         // Dry steppe away from the canal still gives none.
         let away = at(0.0, 0.01).map(|value| value * RADIUS);
         assert_eq!(terrain.water_near(away, 6.0), WaterNear::None);
