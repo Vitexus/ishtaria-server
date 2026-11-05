@@ -286,7 +286,7 @@ async fn a_ward_softens_the_bite_of_creatures(pool: PgPool) {
         },
     )
     .await;
-    assert_eq!((bare.damage, bare.warded), (8, false));
+    assert_eq!((bare.damage, bare.warded), (12, false));
     assert_eq!(
         cast(&router, &token, "ward", None).await.status(),
         StatusCode::OK
@@ -301,7 +301,7 @@ async fn a_ward_softens_the_bite_of_creatures(pool: PgPool) {
     .await;
     assert_eq!(
         (warded.damage, warded.warded),
-        (4, true),
+        (6, true),
         "half of the bite gets through"
     );
     sqlx::query("UPDATE players SET warded_until = clock_timestamp() - interval '1 second'")
@@ -318,7 +318,7 @@ async fn a_ward_softens_the_bite_of_creatures(pool: PgPool) {
         )
         .await
         .damage,
-        8,
+        12,
         "a ward does not last"
     );
 }

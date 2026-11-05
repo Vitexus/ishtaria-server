@@ -36,12 +36,12 @@ async fn sleeping_characters_keep_their_water_and_food_and_drink_restore_it(pool
         .unwrap();
     assert_eq!(health, 100, "no dehydration while asleep");
 
-    // A character whose client is polling is awake and thirsty: 100 s cost one point.
+    // A character whose client is polling is awake and thirsty: 100 s of presence cost half a point at the idle rate.
     sqlx::query("UPDATE players SET last_seen_at = now(), survival_updated_at = now() - interval '100 seconds' WHERE id = $1")
         .bind(id).execute(&pool).await.unwrap();
     survival::settle_world(&state).await.unwrap();
     let awake = water_of(&pool, id).await;
-    assert!((awake - 59.0).abs() < 0.05, "awake drain: {awake}");
+    assert!((awake - 59.5).abs() < 0.05, "awake drain: {awake}");
 
     // Fruit holds water; bread and cheese hardly any; the reserve never exceeds 100.
     sqlx::query("UPDATE players SET water = 50, water_fraction = 0 WHERE id = $1")

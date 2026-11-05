@@ -200,7 +200,9 @@ pub fn media_url(media: &str) -> String {
     format!("/story/media/{media}")
 }
 
-type Cached = Option<(Instant, String, Option<Arc<StoryWorld>>)>;
+/// The outcome of a story build: `Ok(None)` means the world has no datadisk, `Err` a build that failed.
+type Built = Result<Option<Arc<StoryWorld>>, ()>;
+type Cached = Option<(Instant, String, Built)>;
 static WORLD: Mutex<Cached> = Mutex::const_new(None);
 
 fn unavailable() -> Error {
@@ -210,49 +212,70 @@ fn unavailable() -> Error {
 /// A rebuild of the story world is running in the background.
 static REFRESHING: AtomicBool = AtomicBool::new(false);
 
+/// Spawns a background rebuild of the story world, if none is running.
+fn spawn_rebuild(state: &AppState) {
+    if !REFRESHING.swap(true, Ordering::AcqRel) {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let built = compute(&state).await.map_err(|error| {
+                eprintln!("story unavailable: {error:#}");
+            });
+            let mut cache = WORLD.lock().await;
+            // A failed rebuild keeps the story that works, and tries again after the next period.
+            let kept = cache
+                .as_ref()
+                .and_then(|(_, _, built)| built.as_ref().ok().and_then(|world| world.clone()));
+            *cache = Some((
+                Instant::now(),
+                state.world_id.to_string(),
+                built.or(kept.map(|world| Ok(Some(world))).unwrap_or(Err(()))),
+            ));
+            REFRESHING.store(false, Ordering::Release);
+        });
+    }
+}
+
 /// The world's story, or `None` when no datadisk was applied to it.
 ///
 /// Building the story (reading and hashing the disks, parsing their models, placing buildings and loading
 /// the landscape patches) takes seconds, more than a client waits for. So a story that is merely
-/// stale is returned at once and rebuilt in the background; only the very first build, or one after a
-/// failure, makes the request wait.
+/// stale is returned at once and rebuilt in the background; only the very first build makes the request
+/// wait. A remembered *failure* is likewise retried in the background instead of blocking the request
+/// again, so a broken or mismatched datadisk never makes a client wait for the disks to be re-hashed.
 pub async fn world(state: &AppState) -> Result<Option<Arc<StoryWorld>>, Error> {
     let mut cache = WORLD.lock().await;
     let key = state.world_id.to_string();
-    if let Some((at, stored, world)) = cache.as_ref() {
+    if let Some((at, stored, built)) = cache.as_ref() {
         if stored == &key {
             if at.elapsed() < REFRESH {
-                return Ok(world.clone());
+                // As before a failure was remembered, a "no story" answer covers both cases here.
+                return Ok(built.as_ref().ok().and_then(|world| world.clone()));
             }
-            if world.is_some() {
-                if !REFRESHING.swap(true, Ordering::AcqRel) {
-                    let state = state.clone();
-                    tokio::spawn(async move {
-                        let built = compute(&state).await;
-                        let mut cache = WORLD.lock().await;
-                        // A failed rebuild keeps the story that works, and tries again after the next period.
-                        let kept = cache.as_ref().and_then(|(_, _, world)| world.clone());
-                        *cache = Some((
-                            Instant::now(),
-                            state.world_id.to_string(),
-                            built.ok().flatten().or(kept),
-                        ));
-                        REFRESHING.store(false, Ordering::Release);
-                    });
+            match built {
+                Ok(Some(world)) => {
+                    let world = world.clone();
+                    spawn_rebuild(state);
+                    return Ok(Some(world));
                 }
-                return Ok(world.clone());
+                // A failed build: answer at once, retry in the background.
+                Err(()) => {
+                    spawn_rebuild(state);
+                    return Err(unavailable());
+                }
+                // No datadisk: rebuilding is a cheap read, do it before answering as before.
+                Ok(None) => {}
             }
         }
     }
     match compute(state).await {
         Ok(built) => {
-            *cache = Some((Instant::now(), key, built.clone()));
+            *cache = Some((Instant::now(), key, Ok(built.clone())));
             Ok(built)
         }
         Err(error) => {
             eprintln!("story unavailable: {error:#}");
             // Do not rebuild on every request: remember the failure for a while.
-            *cache = Some((Instant::now(), key, None));
+            *cache = Some((Instant::now(), key, Err(())));
             Err(unavailable())
         }
     }

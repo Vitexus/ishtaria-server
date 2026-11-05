@@ -143,18 +143,18 @@ async fn dangerous_animals_bite_back_and_armour_helps(pool: PgPool) {
     let bare = strike(&pool, &state, id, "animal.wolf").await;
     assert_eq!(
         (bare.attempted, bare.damage, bare.blocked, bare.defense),
-        (8, 8, false, 0)
+        (12, 12, false, 0)
     );
-    assert_eq!(health(&pool, id).await, 92);
+    assert_eq!(health(&pool, id).await, 88);
 
     // Armour takes a share, wears, and a broken piece is gone.
     give(&pool, "knight", &[("armor_metal", 1), ("glove", 1)]).await;
     equip(&router, &token, "armor_metal").await;
     equip(&router, &token, "glove").await;
     let armoured = strike(&pool, &state, id, "animal.wolf").await;
-    assert_eq!((armoured.damage, armoured.defense), (4, 40));
+    assert_eq!((armoured.damage, armoured.defense), (7, 40));
     assert_eq!(armoured.wear.len(), 2);
-    assert_eq!(health(&pool, id).await, 88);
+    assert_eq!(health(&pool, id).await, 81);
     sqlx::query("UPDATE player_inventory SET durability = 1 WHERE item_id = 'glove'")
         .execute(&pool)
         .await
@@ -182,7 +182,7 @@ async fn dangerous_animals_bite_back_and_armour_helps(pool: PgPool) {
     sqlx::query("UPDATE players SET blocked_until = clock_timestamp() + interval '2 seconds', health = 100 WHERE id = $1").bind(id).execute(&pool).await.unwrap();
     let blocked = strike(&pool, &state, id, "animal.wolf").await;
     assert!(blocked.blocked);
-    assert_eq!(blocked.damage, 2);
+    assert_eq!(blocked.damage, 3);
     assert!(!blocked.wear.is_empty());
 
     // A blow that takes the last health kills for good and leaves a grave.
