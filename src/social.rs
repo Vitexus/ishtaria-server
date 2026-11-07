@@ -307,7 +307,12 @@ async fn events(
         .bind(query.after)
         .execute(&mut *transaction)
         .await?;
-    sqlx::query(&format!("DELETE FROM player_events WHERE (expires_at IS NULL AND created_at < now() - make_interval(secs => {EVENT_LIFETIME_SECONDS})) OR expires_at < now()"))
+    // Two statements, not one with an `OR` across two columns: a top-level `OR` cannot use either
+    // index, and this sweep runs inside every `/events` poll, which every client sends constantly.
+    sqlx::query(&format!("DELETE FROM player_events WHERE expires_at IS NULL AND created_at < now() - make_interval(secs => {EVENT_LIFETIME_SECONDS})"))
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("DELETE FROM player_events WHERE expires_at < now()")
         .execute(&mut *transaction)
         .await?;
     let events: Vec<Event> = sqlx::query_as(&format!("SELECT id, kind, subject, level, body FROM player_events WHERE recipient_id = $1 AND id > $2 ORDER BY id LIMIT {MAX_EVENTS}"))

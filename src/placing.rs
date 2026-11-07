@@ -141,8 +141,10 @@ pub(super) async fn station_near(
         .map(|(kind, _)| kind.clone())
         .collect();
     let reach = config().station_reach_m;
-    Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM placed_objects JOIN players ON players.id = $1 WHERE placed_objects.world_id = players.world_id AND placed_objects.kind = ANY($2) AND players.position_x IS NOT NULL AND (placed_objects.position_x - players.position_x)^2 + (placed_objects.position_y - players.position_y)^2 + (placed_objects.position_z - players.position_z)^2 <= $3)")
-        .bind(player_id).bind(&kinds).bind(reach * reach).fetch_one(&mut **transaction).await?)
+    // Bounded on `position_x` first so `placed_objects_area` can answer it; the distance below is
+    // an expression over three columns and on its own reads every placed thing in the world.
+    Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM placed_objects JOIN players ON players.id = $1 WHERE placed_objects.world_id = players.world_id AND placed_objects.kind = ANY($2) AND players.position_x IS NOT NULL AND placed_objects.position_x BETWEEN players.position_x - $4 AND players.position_x + $4 AND (placed_objects.position_x - players.position_x)^2 + (placed_objects.position_y - players.position_y)^2 + (placed_objects.position_z - players.position_z)^2 <= $3)")
+        .bind(player_id).bind(&kinds).bind(reach * reach).bind(reach).fetch_one(&mut **transaction).await?)
 }
 
 #[derive(Serialize, FromRow)]

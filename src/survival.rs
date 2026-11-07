@@ -272,8 +272,24 @@ pub(super) async fn memorials(
     state: &AppState,
     direction: [f64; 3],
 ) -> Result<Vec<Memorial>, Error> {
-    Ok(sqlx::query_as("SELECT id::text, player_name, kind, ARRAY[position_x, position_y, position_z] AS position FROM graves WHERE world_id = $1 AND sqrt(position_x * position_x + position_y * position_y + position_z * position_z) BETWEEN 6363000 AND 6379000 AND (position_x * $2 + position_y * $3 + position_z * $4) / nullif(sqrt(position_x * position_x + position_y * position_y + position_z * position_z), 0) >= $5 ORDER BY id LIMIT 128")
-        .bind(state.world_id).bind(direction[0]).bind(direction[1]).bind(direction[2]).bind((700.0_f64 / 6_371_000.0).cos()).fetch_all(&state.pool).await?)
+    // The cone below is what decides which graves are near, but it is an expression over three
+    // columns and so reads every grave of the world: a table that only ever grows. The box added
+    // first is the same neighbourhood stated in plain coordinates, which `graves_world_x`
+    // (migration 0071) can answer. It is deliberately generous - the radial band is +/-8000 m, the
+    // cone 700 m - so it never excludes a grave the cone would have kept.
+    const REACH_M: f64 = 700.0;
+    const RADIUS_M: f64 = 6_371_000.0;
+    const BOX_M: f64 = 9_000.0;
+    let centre = [
+        direction[0] * RADIUS_M,
+        direction[1] * RADIUS_M,
+        direction[2] * RADIUS_M,
+    ];
+    Ok(sqlx::query_as("SELECT id::text, player_name, kind, ARRAY[position_x, position_y, position_z] AS position FROM graves WHERE world_id = $1 AND position_x BETWEEN $6 - $9 AND $6 + $9 AND position_y BETWEEN $7 - $9 AND $7 + $9 AND position_z BETWEEN $8 - $9 AND $8 + $9 AND sqrt(position_x * position_x + position_y * position_y + position_z * position_z) BETWEEN 6363000 AND 6379000 AND (position_x * $2 + position_y * $3 + position_z * $4) / nullif(sqrt(position_x * position_x + position_y * position_y + position_z * position_z), 0) >= $5 ORDER BY id LIMIT 128")
+        .bind(state.world_id).bind(direction[0]).bind(direction[1]).bind(direction[2])
+        .bind((REACH_M / RADIUS_M).cos())
+        .bind(centre[0]).bind(centre[1]).bind(centre[2]).bind(BOX_M)
+        .fetch_all(&state.pool).await?)
 }
 
 #[derive(Deserialize)]

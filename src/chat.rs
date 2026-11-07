@@ -55,8 +55,28 @@ async fn nearby(
     headers: HeaderMap,
 ) -> Result<Json<Vec<Neighbour>>, Error> {
     let player_id = players::player_id(&state, &players::token_hash(&headers)?).await?;
-    let neighbours = sqlx::query_as(&format!("SELECT other.username AS name, other.character, other.flag, other.level, other.position_x AS x, other.position_y AS y, other.position_z AS z FROM players me JOIN players other ON other.world_id = me.world_id AND other.id <> me.id WHERE me.id = $1 AND me.position_x IS NOT NULL AND other.position_x IS NOT NULL AND other.died_at IS NULL AND other.banned_at IS NULL AND coalesce(greatest(other.last_seen_at, other.last_active_at) > clock_timestamp() - make_interval(secs => {PRESENT_SECONDS}), false) AND (other.position_x - me.position_x)^2 + (other.position_y - me.position_y)^2 + (other.position_z - me.position_z)^2 <= $2 ORDER BY (other.position_x - me.position_x)^2 + (other.position_y - me.position_y)^2 + (other.position_z - me.position_z)^2 LIMIT {MAX_NEARBY}"))
+    // The caller's own position is read first, on its primary key, so that the listing below can
+    // bound `position_x` by a constant. Written as one self-join the bound is correlated, and
+    // PostgreSQL cannot turn a correlated range into index bounds: measured on 50 000 players it
+    // kept a sequential scan, and forcing the index made it slower still, while the same range
+    // against a constant is answered by `players_world_x` (migration 0072) outright.
+    let Some((world_id, x, y, z)): Option<(i64, f64, f64, f64)> = sqlx::query_as(
+        "SELECT world_id, position_x, position_y, position_z FROM players
+         WHERE id = $1 AND position_x IS NOT NULL",
+    )
+    .bind(player_id)
+    .fetch_optional(&state.pool)
+    .await?
+    else {
+        return Ok(Json(Vec::new()));
+    };
+    let neighbours = sqlx::query_as(&format!("SELECT username AS name, character, flag, level, position_x AS x, position_y AS y, position_z AS z FROM players WHERE world_id = $1 AND id <> $2 AND position_x IS NOT NULL AND died_at IS NULL AND banned_at IS NULL AND coalesce(greatest(last_seen_at, last_active_at) > clock_timestamp() - make_interval(secs => {PRESENT_SECONDS}), false) AND position_x BETWEEN $3 - $6 AND $3 + $6 AND (position_x - $3)^2 + (position_y - $4)^2 + (position_z - $5)^2 <= $7 ORDER BY (position_x - $3)^2 + (position_y - $4)^2 + (position_z - $5)^2 LIMIT {MAX_NEARBY}"))
+        .bind(world_id)
         .bind(player_id)
+        .bind(x)
+        .bind(y)
+        .bind(z)
+        .bind(SIGHT_M)
         .bind(SIGHT_M * SIGHT_M)
         .fetch_all(&state.pool)
         .await?;
