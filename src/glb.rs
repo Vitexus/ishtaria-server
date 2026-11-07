@@ -90,8 +90,8 @@ fn local_matrix(node: &Value) -> Result<Matrix> {
     ];
     let mut matrix = IDENTITY;
     for row in 0..3 {
-        for column in 0..3 {
-            matrix[row][column] = rotation[row][column] * scale[column];
+        for (column, factor) in scale.iter().enumerate() {
+            matrix[row][column] = rotation[row][column] * factor;
         }
         matrix[row][3] = translation[row];
     }
