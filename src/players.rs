@@ -173,12 +173,17 @@ pub(super) fn routes() -> Router<AppState> {
 }
 
 fn validate(credentials: &Credentials) -> Result<(), Error> {
+    // Every account needs a password. An empty one used to skip the length check, and because
+    // usernames are public (the hall of fame, `/players/nearby`) anyone could sign in as such a
+    // character and destroy it for good. A passwordless account has no secret to prove ownership
+    // with, so there is no safe way to let its owner claim it back over the network: accounts made
+    // before this rule can only be rescued by the operator, who can set a hash in the database.
     if !(3..=32).contains(&credentials.username.len())
         || !credentials
             .username
             .bytes()
             .all(|value| value.is_ascii_alphanumeric() || value == b'_' || value == b'-')
-        || (!credentials.password.is_empty() && !(8..=128).contains(&credentials.password.len()))
+        || !(8..=128).contains(&credentials.password.len())
     {
         return Err(Error::Status(
             StatusCode::BAD_REQUEST,

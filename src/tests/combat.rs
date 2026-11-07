@@ -273,3 +273,63 @@ async fn weapons_and_armour_are_made_from_ore_and_hides(pool: PgPool) {
     equip(&router, &token, "armor_leather").await;
     equip(&router, &token, "dagger").await;
 }
+
+#[sqlx::test]
+#[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
+async fn an_ambush_waits_until_the_player_holds_the_controls(pool: PgPool) {
+    let _auth_test = AUTH_TESTS.acquire().await.unwrap();
+    let world_id = initialize_spawn_world(&pool).await;
+    let state = AppState {
+        pool: pool.clone(),
+        world_id,
+    };
+    let router = app(state.clone());
+    let _token = create_session(&router, "newcomer").await;
+    let id: i64 = sqlx::query_scalar("SELECT id FROM players WHERE username = 'newcomer'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    // A character that has only just registered is present (the client polls while it loads the
+    // world) but has no control yet, so nothing may ambush it: that cost a character its life.
+    let waiting = crate::combat::ambush_targets(&state, "the_hunter_and_the_wild_man", 12)
+        .await
+        .unwrap();
+    assert!(
+        !waiting.iter().any(|row| row.0 == id),
+        "a character that has never moved must not be ambushed"
+    );
+
+    // The server confirmed a first move: the player is holding the controls.
+    sqlx::query(
+        "UPDATE players SET movement_sequence = 1, last_moved_at = clock_timestamp() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let playing = crate::combat::ambush_targets(&state, "the_hunter_and_the_wild_man", 12)
+        .await
+        .unwrap();
+    assert!(
+        playing.iter().any(|row| row.0 == id),
+        "a character that is walking must be ambushable"
+    );
+
+    // Signing in again reloads the world, which takes as long as it takes: an old move is no
+    // licence to ambush somebody who is staring at a loading screen.
+    sqlx::query(
+        "UPDATE players SET last_moved_at = clock_timestamp() - interval '10 minutes' WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let reloading = crate::combat::ambush_targets(&state, "the_hunter_and_the_wild_man", 12)
+        .await
+        .unwrap();
+    assert!(
+        !reloading.iter().any(|row| row.0 == id),
+        "a character that has not moved for minutes must not be ambushed"
+    );
+}

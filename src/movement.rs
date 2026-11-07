@@ -3505,7 +3505,9 @@ pub(super) async fn world_objects(
         areas: super::story::world::areas_near(&state, point).await,
         props: super::story::world::props_near(&state, point).await,
         terrains: super::story::world::terrains_near(&state, point).await,
-        loot: super::loot::near(&state, point).await.unwrap_or_default(),
+        loot: super::loot::near(&state, point, player_id)
+            .await
+            .unwrap_or_default(),
         version: 1,
         heightmap_sha256: terrain.environment.heightmap_sha256.clone(),
         seed: terrain.environment.seed.clone(),

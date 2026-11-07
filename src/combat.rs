@@ -151,27 +151,50 @@ fn distance_squared(first: [f64; 3], second: [f64; 3]) -> f64 {
 /// Fierce animals strike first at a present, low-level character who comes within their reach, anywhere in the
 /// world: such a character should go round them. While the hunter lays snares they are bolder still (a larger
 /// reach and a surer strike), so that the trapper must clear them or keep his distance.
-pub(super) async fn ambush_tick(state: &AppState) -> Result<(), Error> {
-    let Some(ambush) = &combat().ambush else {
-        return Ok(());
-    };
+/// How recently a character must have had a move confirmed to be worth ambushing.
+///
+/// Being *present* is not enough. A character is present from the moment it registers, because the
+/// client polls `/events` every few seconds while it is still loading the world, and the player has
+/// no control until the landing finishes. Ambushes used that presence, so a slow machine (or the
+/// browser build, which has no worker threads) could lose a brand new character for good on the
+/// loading screen. `movement_sequence` is 0 until the server confirms a first move, and the client
+/// posts a move ten times a second once the controls are live - standing still included - so these
+/// two together mean "the player is holding the controls right now".
+const CONTROL_SECONDS: f64 = 15.0;
+
+/// The characters an ambush may pick from: alive, low enough in level, placed, and holding the
+/// controls (see `CONTROL_SECONDS`). Each row is the id, the position and whether the character is
+/// on a snaring stage of the hunting quest.
+pub(super) async fn ambush_targets(
+    state: &AppState,
+    quest_suffix: &str,
+    max_level: i32,
+) -> Result<Vec<(i64, f64, f64, f64, bool)>, Error> {
     let stages = crate::hunting::snare_stages();
-    let players: Vec<(i64, f64, f64, f64, bool)> = sqlx::query_as(
+    Ok(sqlx::query_as(
         "SELECT p.id, p.position_x, p.position_y, p.position_z,
                 EXISTS (SELECT 1 FROM player_quests q
                         WHERE q.player_id = p.id AND q.quest_id LIKE '%' || $2 AND q.stage = ANY($3)) AS snaring
          FROM players p
          WHERE p.world_id = $1 AND p.died_at IS NULL AND p.level <= $4
            AND p.position_x IS NOT NULL AND p.position_y IS NOT NULL AND p.position_z IS NOT NULL
-           AND coalesce(greatest(p.last_seen_at, p.last_active_at) > clock_timestamp() - make_interval(secs => $5), false)",
+           AND p.movement_sequence > 0
+           AND p.last_moved_at > clock_timestamp() - make_interval(secs => $5)",
     )
     .bind(state.world_id)
-    .bind(&ambush.quest_suffix)
+    .bind(quest_suffix)
     .bind(&stages)
-    .bind(ambush.max_level)
-    .bind(super::survival::PRESENCE_SECONDS)
+    .bind(max_level)
+    .bind(CONTROL_SECONDS)
     .fetch_all(&state.pool)
-    .await?;
+    .await?)
+}
+
+pub(super) async fn ambush_tick(state: &AppState) -> Result<(), Error> {
+    let Some(ambush) = &combat().ambush else {
+        return Ok(());
+    };
+    let players = ambush_targets(state, &ambush.quest_suffix, ambush.max_level).await?;
     if players.is_empty() {
         return Ok(());
     }

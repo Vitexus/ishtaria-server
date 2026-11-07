@@ -147,7 +147,7 @@ async fn unsafe_spawn_rolls_back_registration(pool: PgPool) {
         pool: pool.clone(),
         world_id,
     });
-    let credentials = r#"{"username":"unsafe-player","password":""}"#;
+    let credentials = r#"{"username":"unsafe-player","password":"test-password"}"#;
     for has_ocean in [false, true] {
         if has_ocean {
             let mut pgm = b"P5\n96 16\n65535\n".to_vec();
@@ -199,7 +199,7 @@ async fn safe_spawn_on_imported_world(pool: PgPool) {
         pool: pool.clone(),
         world_id,
     });
-    let credentials = r#"{"username":"safe-world-player","password":""}"#;
+    let credentials = r#"{"username":"safe-world-player","password":"test-password"}"#;
     let session =
         response_json(player_request(&router, "POST", "/players", credentials, "").await).await;
     let position = &session["player"]["position"];
@@ -233,7 +233,7 @@ async fn jumping_is_persistent_and_replay_safe(pool: PgPool) {
         pool: pool.clone(),
         world_id,
     });
-    let credentials = r#"{"username":"jumping-player","password":""}"#;
+    let credentials = r#"{"username":"jumping-player","password":"test-password"}"#;
     let session =
         response_json(player_request(&router, "POST", "/players", credentials, "").await).await;
     let token = session["token"].as_str().unwrap();
@@ -402,7 +402,7 @@ async fn movement_is_persistent_bounded_and_replay_safe(pool: PgPool) {
         pool: pool.clone(),
         world_id,
     });
-    let credentials = r#"{"username":"walking-player","password":""}"#;
+    let credentials = r#"{"username":"walking-player","password":"test-password"}"#;
     let session =
         response_json(player_request(&router, "POST", "/players", credentials, "").await).await;
     let token = session["token"].as_str().unwrap();
@@ -536,14 +536,14 @@ async fn movement_is_persistent_bounded_and_replay_safe(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
-async fn survival_empty_password(pool: PgPool) {
+async fn survival_password_rules_and_position(pool: PgPool) {
     let _auth_test = AUTH_TESTS.acquire().await.unwrap();
     let world_id = initialize_spawn_world(&pool).await;
     let router = app(AppState {
         pool: pool.clone(),
         world_id,
     });
-    let credentials = r#"{"username":"passwordless-player","password":""}"#;
+    let credentials = r#"{"username":"password-player","password":"correct-horse"}"#;
     let session =
         response_json(player_request(&router, "POST", "/players", credentials, "").await).await;
     assert_eq!(session["player"]["stats"]["gold"], "100");
@@ -597,14 +597,19 @@ async fn survival_empty_password(pool: PgPool) {
             &router,
             "POST",
             "/players/login",
-            r#"{"username":"passwordless-player","password":"wrong-password"}"#,
+            r#"{"username":"password-player","password":"wrong-password"}"#,
             ""
         )
         .await
         .status(),
         StatusCode::UNAUTHORIZED
     );
-    for password in ["a".to_owned(), "1234567".to_owned(), "a".repeat(129)] {
+    for password in [
+        String::new(),
+        "a".to_owned(),
+        "1234567".to_owned(),
+        "a".repeat(129),
+    ] {
         let body =
             serde_json::json!({"username": "invalid-player", "password": password}).to_string();
         assert_eq!(
@@ -619,12 +624,27 @@ async fn survival_empty_password(pool: PgPool) {
             &router,
             "POST",
             "/players/login",
-            r#"{"username":"passwordless-player"}"#,
+            r#"{"username":"password-player"}"#,
             ""
         )
         .await
         .status(),
         StatusCode::UNPROCESSABLE_ENTITY
+    );
+    // An account made before passwords were required cannot be signed in to by anyone, including
+    // someone who knows the (public) username: the empty password is refused before any lookup,
+    // so no token is issued whatever the stored hash verifies.
+    assert_eq!(
+        player_request(
+            &router,
+            "POST",
+            "/players/login",
+            r#"{"username":"password-player","password":""}"#,
+            ""
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
     );
 }
 

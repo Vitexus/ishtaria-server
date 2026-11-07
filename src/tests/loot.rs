@@ -106,3 +106,64 @@ async fn dropped_items_lie_until_picked_or_scooped(pool: PgPool) {
         .unwrap();
     assert_eq!(left, 0);
 }
+
+#[sqlx::test]
+#[ignore = "requires DATABASE_URL pointing to PostgreSQL with CREATEDB permission"]
+async fn only_a_viewer_who_is_there_moves_the_ground(pool: PgPool) {
+    let _auth_test = AUTH_TESTS.acquire().await.unwrap();
+    let world_id = initialize_spawn_world(&pool).await;
+    let state = AppState {
+        pool: pool.clone(),
+        world_id,
+    };
+    let router = app(state.clone());
+    let _token = create_session(&router, "onlooker").await;
+    let (id, position): (i64, (f64, f64, f64)) = {
+        let row: (i64, f64, f64, f64) = sqlx::query_as(
+            "SELECT id, position_x, position_y, position_z FROM players WHERE username = 'onlooker'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        (row.0, (row.1, row.2, row.3))
+    };
+    let here = [position.0, position.1, position.2];
+
+    // Scooping and delivering follow a character who is standing there, because `/world/objects`
+    // is a GET that anyone may call with any coordinates.
+    assert!(
+        crate::loot::viewer_is_there(&state, id, here)
+            .await
+            .unwrap(),
+        "a character at the point is there"
+    );
+
+    // Five kilometres away is not "there", however the request is addressed.
+    let far = [position.0 + 5000.0, position.1, position.2];
+    assert!(
+        !crate::loot::viewer_is_there(&state, id, far).await.unwrap(),
+        "a character far from the point is not there"
+    );
+
+    // Neither is an unknown id (an anonymous request has none at all).
+    assert!(
+        !crate::loot::viewer_is_there(&state, id + 10_000, here)
+            .await
+            .unwrap(),
+        "an unknown viewer is never there"
+    );
+
+    // A dead character does not walk NPCs over anybody's belongings either.
+    // `player_death_complete` keeps `died_at` and `death_cause` together.
+    sqlx::query("UPDATE players SET died_at = now(), death_cause = 'creature' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        !crate::loot::viewer_is_there(&state, id, here)
+            .await
+            .unwrap(),
+        "a dead character is not there"
+    );
+}

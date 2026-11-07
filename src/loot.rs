@@ -111,11 +111,49 @@ pub(super) async fn npc_has_goods(state: &AppState, npc_id: &str) -> Result<bool
     .await?)
 }
 
+/// How far from a viewer's own position the region it asks about may be centred before its NPCs
+/// stop acting on it. The client asks about the ground under itself and asks again every 100 m.
+const VIEWER_REACH_M: f64 = 1000.0;
+
+/// Whether `id` is a living character of this world standing within `VIEWER_REACH_M` of `point`.
+pub(super) async fn viewer_is_there(
+    state: &AppState,
+    id: i64,
+    point: [f64; 3],
+) -> Result<bool, Error> {
+    Ok(sqlx::query_scalar(
+        "SELECT coalesce((position_x - $3)^2 + (position_y - $4)^2 + (position_z - $5)^2 <= $6 * $6, false)
+         FROM players WHERE id = $1 AND world_id = $2 AND died_at IS NULL AND position_x IS NOT NULL",
+    )
+    .bind(id)
+    .bind(state.world_id)
+    .bind(point[0])
+    .bind(point[1])
+    .bind(point[2])
+    .bind(VIEWER_REACH_M)
+    .fetch_optional(&state.pool)
+    .await?
+    .unwrap_or(false))
+}
+
 /// Ground piles near `point`, for the region reply. Also lets nearby NPCs pocket what they find
 /// and lets wayfarers deliver finds to merchants.
-pub(super) async fn near(state: &AppState, point: [f64; 3]) -> Result<Vec<GroundItem>, Error> {
-    scoop_near(state, point).await?;
-    deliver_near(state, point).await?;
+///
+/// Those two change the world, and `/world/objects` is a GET that needs no sign-in, so they follow
+/// a signed-in character who is really standing there rather than the coordinates in the request.
+/// Without that, anyone could walk NPCs over another player's dropped belongings anywhere on the
+/// planet, as fast as the rate limit allows.
+pub(super) async fn near(
+    state: &AppState,
+    point: [f64; 3],
+    viewer: Option<i64>,
+) -> Result<Vec<GroundItem>, Error> {
+    if let Some(id) = viewer {
+        if viewer_is_there(state, id, point).await? {
+            scoop_near(state, point).await?;
+            deliver_near(state, point).await?;
+        }
+    }
     Ok(sqlx::query_as(
         "SELECT g.id, g.item_id, t.name, g.quantity::text, g.durability, t.max_durability, g.position_x, g.position_y, g.position_z
          FROM ground_items g JOIN item_types t ON t.id = g.item_id
@@ -161,8 +199,11 @@ async fn scoop_near(state: &AppState, point: [f64; 3]) -> Result<(), Error> {
             SCOOP_REACH_M
         };
         let piles: Vec<(i64, String, i64, Option<i32>)> = sqlx::query_as(
+            // The range on `position_x` is what `ground_items_area` can answer; without it this ran
+            // over every pile in the world, once per nearby character, on the busiest route there is.
             "SELECT id, item_id, quantity, durability FROM ground_items
              WHERE world_id = $1
+               AND position_x BETWEEN $2 - $6 AND $2 + $6
                AND (position_x - $2)^2 + (position_y - $3)^2 + (position_z - $4)^2 <= $5
              FOR UPDATE",
         )
@@ -171,6 +212,7 @@ async fn scoop_near(state: &AppState, point: [f64; 3]) -> Result<(), Error> {
         .bind(npc.position[1])
         .bind(npc.position[2])
         .bind(reach * reach)
+        .bind(reach)
         .fetch_all(&mut *transaction)
         .await?;
         if piles.is_empty() {
