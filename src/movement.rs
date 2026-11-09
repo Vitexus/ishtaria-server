@@ -1467,9 +1467,9 @@ pub(super) struct WorldObject {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RegionQuery {
-    x: f64,
-    y: f64,
-    z: f64,
+    pub(super) x: f64,
+    pub(super) y: f64,
+    pub(super) z: f64,
 }
 
 /// A world object as sent to clients, with what it can be harvested for.

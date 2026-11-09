@@ -3,8 +3,8 @@
 //! Which armour goes where, how much it takes away and which animals strike back is data in
 //! `etc/combat.json`. The server decides every outcome: a client only swings at an animal and
 //! learns from the reply what it cost. Armour and shields wear out with the blows they stop.
-//! Fierce animals also strike first, unprovoked, at a low-level character who comes too close, and more
-//! boldly at the trapper during the hunter's snare stages (`ambush_tick`).
+//! Fierce animals also strike first, unprovoked, at a low-level character they touch (each species has its own
+//! `reach_m`, a metre or two), and more surely at the trapper during the hunter's snare stages (`ambush_tick`).
 
 use super::durability::{self, Wear};
 use super::players::Error;
@@ -29,19 +29,19 @@ struct Fierce {
     damage: i32,
     /// How likely the animal bites back after a hit it survives.
     chance: f64,
+    /// Distance between the animal's centre and the character's at which they touch (the animal's own body plus the
+    /// character's). An unprovoked bite needs the character to be this close, never farther: no damage from a distance.
+    reach_m: f64,
 }
 
 #[derive(Deserialize)]
 struct Ambush {
-    /// How near a fierce animal must be to feel threatened and strike first.
-    range_m: f64,
     cooldown_seconds: f64,
     chance: f64,
     /// Only characters up to this level are ambushed: a seasoned one is no easy prey.
     max_level: i32,
-    /// While the hunter lays snares the animals are bolder: a larger reach and a surer strike.
+    /// While the hunter lays snares the animals are bolder: a surer strike (the reach stays that of the animal's body).
     snare_chance: f64,
-    snare_range_m: f64,
     /// Quest id suffix: the players on that quest's snare stages.
     quest_suffix: String,
 }
@@ -68,8 +68,6 @@ fn combat() -> &'static Combat {
         assert!((0.0..=1.0).contains(&config.block_damage_factor));
         assert!((0..=100).contains(&config.max_defense_percent));
         if let Some(ambush) = &config.ambush {
-            assert!((3.0..=30.0).contains(&ambush.range_m));
-            assert!((ambush.range_m..=30.0).contains(&ambush.snare_range_m));
             assert!((2.0..=60.0).contains(&ambush.cooldown_seconds));
             assert!((0.05..=1.0).contains(&ambush.chance));
             assert!((ambush.chance..=1.0).contains(&ambush.snare_chance));
@@ -148,9 +146,9 @@ fn distance_squared(first: [f64; 3], second: [f64; 3]) -> f64 {
         .sum()
 }
 
-/// Fierce animals strike first at a present, low-level character who comes within their reach, anywhere in the
-/// world: such a character should go round them. While the hunter lays snares they are bolder still (a larger
-/// reach and a surer strike), so that the trapper must clear them or keep his distance.
+/// Fierce animals strike first at a present, low-level character they touch, anywhere in the world: such a
+/// character should go round them. While the hunter lays snares they are bolder still (a surer strike), so that
+/// the trapper must clear them or keep his distance.
 /// How recently a character must have had a move confirmed to be worth ambushing.
 ///
 /// Being *present* is not enough. A character is present from the moment it registers, because the
@@ -190,6 +188,11 @@ pub(super) async fn ambush_targets(
     .await?)
 }
 
+/// Whether an animal whose centre is `distance_squared` (m²) from the character's touches it, given its `reach_m`.
+fn touches(distance_squared: f64, reach_m: f64) -> bool {
+    distance_squared <= reach_m * reach_m
+}
+
 pub(super) async fn ambush_tick(state: &AppState) -> Result<(), Error> {
     let Some(ambush) = &combat().ambush else {
         return Ok(());
@@ -204,12 +207,6 @@ pub(super) async fn ambush_tick(state: &AppState) -> Result<(), Error> {
     let now_ms = crate::movement::unix_now_ms();
     let cooldown = Duration::from_secs_f64(ambush.cooldown_seconds);
     for (player_id, x, y, z, snaring) in players {
-        let range = if snaring {
-            ambush.snare_range_m
-        } else {
-            ambush.range_m
-        };
-        let range2 = range * range;
         let chance = if snaring {
             ambush.snare_chance
         } else {
@@ -229,11 +226,12 @@ pub(super) async fn ambush_tick(state: &AppState) -> Result<(), Error> {
         let player = [x, y, z];
         let mut nearest: Option<(String, String, f64)> = None;
         for (animal, _) in terrain.moving_animals(player, now_ms) {
-            if !is_fierce(&animal.model) {
+            let Some(fierce) = combat().fierce.get(&animal.model) else {
                 continue;
-            }
+            };
+            // Only a touch hurts: the animal must be against the character, by its own reach.
             let dist2 = distance_squared(player, animal.position);
-            if dist2 > range2 {
+            if !touches(dist2, fierce.reach_m) {
                 continue;
             }
             let closer = match nearest.as_ref() {
@@ -365,6 +363,20 @@ mod tests {
     }
 
     #[test]
+    fn an_animal_bites_only_what_it_touches() {
+        let fox = combat().fierce.get("animal.fox").unwrap().reach_m;
+        assert!(touches(0.5 * 0.5, fox), "against the character");
+        assert!(touches(fox * fox, fox), "exactly at its reach");
+        assert!(!touches(5.0 * 5.0, fox), "five metres away is no touch");
+        assert!(
+            !touches(22.0 * 22.0, fox),
+            "the old ambush range is no touch"
+        );
+        let lion = combat().fierce.get("zeroad.lion").unwrap().reach_m;
+        assert!(lion > fox, "a big animal reaches farther than a small one");
+    }
+
+    #[test]
     fn bundled_rules_are_consistent() {
         let config = combat();
         for armor in config.armor.values() {
@@ -374,6 +386,10 @@ mod tests {
         for fierce in config.fierce.values() {
             assert!((1..=100).contains(&fierce.damage));
             assert!((0.0..=1.0).contains(&fierce.chance));
+            assert!(
+                (0.5..=3.0).contains(&fierce.reach_m),
+                "a bite is a touch, not a strike from afar"
+            );
         }
     }
 }

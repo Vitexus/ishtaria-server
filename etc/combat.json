@@ -25,52 +25,60 @@
   "fierce": {
     "animal.wolf": {
       "damage": 12,
-      "chance": 1.0
+      "chance": 1.0,
+      "reach_m": 1.6
     },
     "animal.husky": {
       "damage": 7,
-      "chance": 1.0
+      "chance": 1.0,
+      "reach_m": 1.4
     },
     "animal.fox": {
       "damage": 4,
-      "chance": 1.0
+      "chance": 1.0,
+      "reach_m": 1.2
     },
     "zeroad.wolf": {
       "damage": 12,
-      "chance": 1.0
+      "chance": 1.0,
+      "reach_m": 1.6
     },
     "zeroad.fox": {
       "damage": 4,
-      "chance": 1.0
+      "chance": 1.0,
+      "reach_m": 1.2
     },
     "zeroad.mastiff": {
       "damage": 7,
-      "chance": 1.0
+      "chance": 1.0,
+      "reach_m": 1.6
     },
     "zeroad.boar": {
       "damage": 8,
-      "chance": 0.6
+      "chance": 0.6,
+      "reach_m": 1.5
     },
     "zeroad.lion": {
       "damage": 18,
-      "chance": 1.0
+      "chance": 1.0,
+      "reach_m": 2.2
     },
     "zeroad.lioness": {
       "damage": 15,
-      "chance": 1.0
+      "chance": 1.0,
+      "reach_m": 2.0
     },
     "zeroad.crocodile": {
       "damage": 16,
-      "chance": 1.0
+      "chance": 1.0,
+      "reach_m": 2.0
     }
   },
   "ambush": {
-    "range_m": 22.0,
     "cooldown_seconds": 4.0,
     "chance": 0.65,
     "max_level": 12,
     "snare_chance": 0.9,
-    "snare_range_m": 28.0,
     "quest_suffix": "the_hunter_and_the_wild_man"
   }
 }

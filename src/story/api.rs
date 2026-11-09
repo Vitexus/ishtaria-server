@@ -45,6 +45,7 @@ pub fn routes() -> Router<AppState> {
         .route("/story/quests", get(quests))
         .route("/story/markers", get(markers))
         .route("/story/sky_flights", get(sky_flights))
+        .route("/world/settlements", get(settlements))
         .layer(DefaultBodyLimit::max(1024))
         .route("/story/strings", get(strings))
         .route("/story/media/{disk}/{*path}", get(media))
@@ -887,6 +888,61 @@ async fn quests(
             })
             .collect(),
     ))
+}
+
+/// How far from a point the landing flight looks for settlements to fly over.
+const SETTLEMENT_FLIGHT_RANGE_M: f64 = 20_000.0;
+/// The most settlements a landing flight passes over.
+const SETTLEMENT_FLIGHT_MAX: usize = 6;
+
+#[derive(Serialize)]
+struct SettlementStop {
+    id: String,
+    name_key: String,
+    /// World metres, like the positions of NPCs.
+    position: [f64; 3],
+    radius_m: f64,
+}
+
+/// The settlements (places of kind `city`: generated towns, datadisk cities and villages) within 20 km of a point, the furthest
+/// first, so that a landing flight passes over them one after another and ends at the point. Public like `/world/objects`.
+async fn settlements(
+    State(state): State<AppState>,
+    Query(query): Query<crate::movement::RegionQuery>,
+) -> Result<Json<Vec<SettlementStop>>, Error> {
+    let point = [query.x, query.y, query.z];
+    if point.iter().any(|value| !value.is_finite()) {
+        return Err(status(StatusCode::BAD_REQUEST, "invalid point"));
+    }
+    let Some(story) = world::world(&state).await? else {
+        return Ok(Json(Vec::new()));
+    };
+    let mut found: Vec<(f64, SettlementStop)> = story
+        .story
+        .anchors
+        .iter()
+        .filter(|anchor| anchor.place.kind == "city")
+        .filter_map(|anchor| {
+            let position = world::site_position(story.sites.get(&anchor.id)?);
+            let distance =
+                crate::movement::length(std::array::from_fn(|axis| position[axis] - point[axis]));
+            (distance <= SETTLEMENT_FLIGHT_RANGE_M).then(|| {
+                (
+                    distance,
+                    SettlementStop {
+                        id: anchor.id.clone(),
+                        name_key: anchor.place.name_key.clone(),
+                        position,
+                        radius_m: anchor.place.radius_m.unwrap_or(100.0),
+                    },
+                )
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    found.truncate(SETTLEMENT_FLIGHT_MAX);
+    found.reverse();
+    Ok(Json(found.into_iter().map(|(_, stop)| stop).collect()))
 }
 
 /// Where the player is pointed to: a place of an active quest or the start of one not yet begun.
